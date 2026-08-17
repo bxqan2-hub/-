@@ -63,7 +63,13 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
 
     def test_cache_scope_is_first_party_public_get_script_or_css(self):
         self.assertTrue(is_cacheable_request("https://chatgpt.com/_next/static/app.js", "GET", "script"))
-        self.assertTrue(is_cacheable_request("https://oaistatic.com/site.css", "GET", "stylesheet"))
+        self.assertTrue(is_cacheable_request("https://chatgpt.com/cdn/assets/site.css", "GET", "stylesheet"))
+        self.assertFalse(is_cacheable_request(
+            "https://auth-cdn.oaistatic.com/assets/app-core.css", "GET", "stylesheet",
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://auth.openai.com/assets/login.js", "GET", "script",
+        ))
         self.assertTrue(is_cacheable_request(
             "https://chatgpt.com/cdn/assets/app.js", "GET", "script", {"Cookie": "session=browser-state"},
         ))

@@ -43,10 +43,8 @@ OPTIONAL_IDENTITY_SUFFIXES = (
     "login.microsoftonline.com",
 )
 FIRST_PARTY_CACHE_SUFFIXES = (
-    "auth.openai.com",
     "chatgpt.com",
     "cdn.openai.com",
-    "oaistatic.com",
 )
 SESSION_REQUIRED_PREFIXES = (
     "/api/auth/callback/",
@@ -132,6 +130,15 @@ def block_reason(url: str, resource_type: str = "", *, session_only: bool = Fals
 
 
 def is_cacheable_request(url: str, method: str, resource_type: str, headers=None) -> bool:
+    """Return whether Roxy may replay the request from the shared cache.
+
+    Authentication pages deliberately stay on the normal network path.  In
+    production Roxy runs, replaying ``auth.openai.com`` / ``oaistatic.com``
+    bundles under high concurrency intermittently left OTP/profile pages with
+    only browser-default styling or incomplete interactive DOM.  ChatGPT's
+    post-auth application shell remains cacheable because an appearance issue
+    there cannot prevent registration or access-token acquisition.
+    """
     if str(method or "").upper() != "GET":
         return False
     if _resource_name(resource_type) not in {"script", "stylesheet"}:
