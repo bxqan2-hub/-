@@ -1,0 +1,496 @@
+# -*- coding: utf-8 -*-
+import os
+import unittest
+from unittest.mock import MagicMock, call, patch
+
+from core import registration_service, roxy_registration
+
+
+class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
+    def test_email_auth_error_is_eligible_for_normal_network_recovery(self):
+        driver = MagicMock()
+        driver.current_url = "https://chatgpt.com/auth/error?error=undefined"
+        self.assertTrue(
+            roxy_registration._should_retry_email_entry_without_optimization(
+                driver,
+                RuntimeError("找不到邮箱输入框/邮箱入口"),
+            )
+        )
+
+    def test_email_error_on_unrelated_page_does_not_trigger_recovery(self):
+        driver = MagicMock()
+        driver.current_url = "https://chatgpt.com/"
+        self.assertFalse(
+            roxy_registration._should_retry_email_entry_without_optimization(
+                driver,
+                RuntimeError("找不到邮箱输入框/邮箱入口"),
+            )
+        )
+
+    def test_email_auth_error_recovery_disables_optimization_before_resubmit(self):
+        driver = MagicMock()
+        optimizer = MagicMock()
+        with patch("core.roxy_registration._safe_get") as safe_get, \
+             patch("core.roxy_registration._page_warmup") as warmup, \
+             patch("core.roxy_registration._maybe_accept"), \
+             patch("core.roxy_registration.human_delay"), \
+             patch("core.roxy_registration._submit_email_and_wait_next", return_value="otp") as submit:
+            state = roxy_registration._retry_email_entry_after_traffic_fallback(
+                driver,
+                "mail@example.test",
+                optimizer,
+            )
+
+        self.assertEqual(state, "otp")
+        optimizer.disable_for_recovery.assert_called_once_with("email_submit_auth_error")
+        safe_get.assert_called_once()
+        warmup.assert_called_once_with(driver, reason="email_submit_recovery")
+        submit.assert_called_once_with(driver, "mail@example.test", attempts=2)
+
+    def test_empty_login_shell_detection(self):
+        self.assertTrue(roxy_registration._is_empty_login_shell({
+            "url": "https://chatgpt.com/auth/login",
+            "inputs": [],
+            "actions": [],
+        }))
+        self.assertFalse(roxy_registration._is_empty_login_shell({
+            "url": "https://chatgpt.com/auth/login",
+            "inputs": [{"type": "email"}],
+            "actions": [],
+        }))
+
+    def test_empty_login_shell_reload_uses_clean_navigation(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._safe_get") as safe_get, \
+             patch("core.roxy_registration._page_warmup") as warmup, \
+             patch("core.roxy_registration.time.sleep"):
+            roxy_registration._reload_empty_login_shell(driver)
+
+        driver.get.assert_called_once_with("about:blank")
+        safe_get.assert_called_once_with(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=45,
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+        warmup.assert_called_once_with(driver, reason="empty_login_shell_reload")
+
+    def test_local_webdriver_bypasses_clash_proxy(self):
+        with patch.dict(os.environ, {"NO_PROXY": "example.test"}, clear=True):
+            roxy_registration._ensure_local_proxy_bypass()
+            self.assertEqual(
+                os.environ["NO_PROXY"],
+                "example.test,127.0.0.1,localhost,::1",
+            )
+            self.assertEqual(os.environ["no_proxy"], os.environ["NO_PROXY"])
+
+    def test_email_retry_stops_when_otp_dom_already_exists(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._type_email_address") as type_email:
+            state = roxy_registration._submit_email_and_wait_next(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        type_email.assert_not_called()
+
+    def test_email_submit_uses_nextauth_once_when_ui_route_stalls(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_email_verification_page", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=False), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._type_email_address"), \
+             patch("core.roxy_registration._email_input_value_state", return_value={"inputs": [{"value": "mail@example.test"}]}), \
+             patch("core.roxy_registration._submit_email_step"), \
+             patch("core.roxy_registration._wait_email_submit_next_state", side_effect=["email_cleared", "otp"]), \
+             patch("core.roxy_registration._submit_email_via_browser_nextauth", return_value={"ok": True}) as nextauth, \
+             patch("core.roxy_registration.human_delay"), \
+             patch("core.roxy_registration.time.sleep"):
+            state = roxy_registration._submit_email_and_wait_next(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        nextauth.assert_called_once_with(driver, "mail@example.test")
+
+    def test_resend_atomic_snapshot_happens_before_click(self):
+        driver = MagicMock()
+        driver.execute_script.return_value = {"ok": True, "text": "もう一度試す", "kind": "retry"}
+        with patch("core.roxy_registration.time.sleep"):
+            action = roxy_registration._click_resend_email_otp(driver, timeout=1)
+        self.assertEqual(action["kind"], "retry")
+        script = next(
+            call.args[0]
+            for call in driver.execute_script.call_args_list
+            if "target.click();" in call.args[0]
+        )
+        self.assertLess(script.index("const kind ="), script.index("target.click();"))
+
+    def test_resend_acknowledgement_accepts_disabled_countdown_button(self):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+        before = {
+            "url": driver.current_url,
+            "text": "Check your inbox",
+            "buttons": [{"text": "Resend email", "disabled": False}],
+        }
+        after = {
+            "url": driver.current_url,
+            "text": "Check your inbox",
+            "buttons": [{"text": "Resend email in 59s", "disabled": True}],
+        }
+        with patch.object(roxy_registration, "_email_otp_page_state", return_value=after), \
+             patch.object(roxy_registration, "_is_email_verification_page", return_value=True), \
+             patch.object(roxy_registration.time, "sleep"):
+            self.assertTrue(
+                roxy_registration._wait_for_resend_acknowledgement(
+                    driver,
+                    before_state=before,
+                    timeout=1,
+                )
+            )
+
+    def test_stuck_otp_reload_reuses_visible_auth_url_once(self):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+        with patch.object(roxy_registration, "_safe_get") as safe_get, \
+             patch.object(roxy_registration, "_page_warmup") as warmup, \
+             patch.object(roxy_registration, "_wait_for_otp_input") as wait_input:
+            self.assertEqual(roxy_registration._reload_stuck_otp_page(driver), "otp")
+        safe_get.assert_called_once_with(
+            driver,
+            driver.current_url,
+            timeout=30,
+            attempts=1,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+        warmup.assert_called_once_with(driver, reason="otp_resend_stuck_recovery")
+        wait_input.assert_called_once_with(driver, timeout=20)
+
+    def test_next_otp_attempt_reloads_once_when_resend_is_not_acknowledged(self):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+        with patch.object(roxy_registration, "_email_otp_page_state", return_value={}), \
+             patch.object(roxy_registration, "_otp_flow_advanced_state", return_value=None), \
+             patch.object(roxy_registration, "_is_email_login_page_still_present", return_value=False), \
+             patch.object(roxy_registration, "_is_email_verification_page", return_value=True), \
+             patch.object(
+                 roxy_registration,
+                 "_click_resend_email_otp",
+                 side_effect=[{"ok": True, "kind": "resend", "acknowledged": False},
+                              {"ok": True, "kind": "resend", "acknowledged": True}],
+             ) as resend, \
+             patch.object(roxy_registration, "_reload_stuck_otp_page", return_value="otp") as reload_page, \
+             patch.object(roxy_registration, "_wait_for_otp_input") as wait_input:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        reload_page.assert_called_once_with(driver)
+        self.assertEqual([call.kwargs["timeout"] for call in resend.call_args_list], [25, 15])
+        wait_input.assert_called_once_with(driver, timeout=30)
+
+    def test_next_otp_attempt_stops_after_unacknowledged_resend_retry(self):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+        with patch.object(roxy_registration, "_email_otp_page_state", return_value={}), \
+             patch.object(roxy_registration, "_otp_flow_advanced_state", return_value=None), \
+             patch.object(roxy_registration, "_is_email_login_page_still_present", return_value=False), \
+             patch.object(roxy_registration, "_is_email_verification_page", return_value=True), \
+             patch.object(
+                 roxy_registration,
+                 "_click_resend_email_otp",
+                 side_effect=[{"ok": True, "kind": "resend", "acknowledged": False},
+                              {"ok": True, "kind": "resend", "acknowledged": False}],
+             ), \
+             patch.object(roxy_registration, "_reload_stuck_otp_page", return_value="otp"):
+            with self.assertRaisesRegex(RuntimeError, "stopping blind polling"):
+                roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+
+    def test_atomic_otp_fill_remains_as_fallback_without_live_element(self):
+        driver = MagicMock()
+        driver.find_elements.return_value = []
+        driver.execute_script.return_value = {"ok": True, "mode": "single", "values": ["123456"]}
+        roxy_registration._type_otp(driver, "123456")
+        driver.execute_script.assert_called_once()
+        driver.find_elements.assert_called()
+
+    def test_single_otp_prefers_real_webdriver_keys(self):
+        driver = MagicMock()
+        element = MagicMock()
+        element.id = "otp-input"
+        element.is_displayed.return_value = True
+        element.is_enabled.return_value = True
+        element.get_attribute.return_value = ""
+        driver.find_elements.return_value = [element]
+        with patch(
+            "core.roxy_registration._email_otp_page_state",
+            return_value={"inputs": [{"name": "code", "autocomplete": "one-time-code", "value": "123456"}]},
+        ), patch("core.roxy_registration.time.sleep"):
+            roxy_registration._type_otp(driver, "123456")
+        self.assertEqual(
+            [call.args[0] for call in element.send_keys.call_args_list],
+            list("123456"),
+        )
+
+    def test_single_otp_preserves_leading_zeroes_with_character_key_events(self):
+        driver = MagicMock()
+        element = MagicMock()
+        element.id = "otp-input"
+        element.is_displayed.return_value = True
+        element.is_enabled.return_value = True
+        element.get_attribute.return_value = ""
+        driver.find_elements.return_value = [element]
+        with patch(
+            "core.roxy_registration._email_otp_page_state",
+            return_value={"inputs": [{"name": "code", "autocomplete": "one-time-code", "value": "001414"}]},
+        ), patch("core.roxy_registration.time.sleep"):
+            roxy_registration._type_otp(driver, "001414")
+        self.assertEqual(
+            [call.args[0] for call in element.send_keys.call_args_list],
+            list("001414"),
+        )
+
+    def test_atomic_otp_fill_checks_segmented_boxes_before_single_input(self):
+        driver = MagicMock()
+        driver.execute_script.return_value = {"ok": True, "mode": "segmented", "values": list("123456")}
+        roxy_registration._type_otp(driver, "123456")
+        script = driver.execute_script.call_args.args[0]
+        self.assertLess(
+            script.index("if (boxes.length >= code.length)"),
+            script.index("const single = candidates.find"),
+        )
+
+    def test_otp_page_without_explicit_error_is_pending(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration.time.time", side_effect=[0.0, 0.0]), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._email_otp_page_state", return_value={"inputs": [], "errors": []}):
+            outcome = roxy_registration._wait_after_email_otp_submit(driver, timeout=0)
+        self.assertEqual(outcome, "pending")
+
+    def test_email_already_verified_page_is_success_not_invalid_otp(self):
+        driver = MagicMock()
+        verified = {
+            "title": "Email verified - OpenAI",
+            "text": "Email verified\nYour email has already been verified",
+            "inputs": [],
+            "errors": [],
+        }
+        with patch("core.roxy_registration.time.time", side_effect=[0.0, 0.0]), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._email_otp_page_state", return_value=verified):
+            outcome = roxy_registration._wait_after_email_otp_submit(driver, timeout=0)
+        self.assertEqual(outcome, "email_verified")
+
+    def test_japanese_email_verified_page_is_success(self):
+        driver = MagicMock()
+        verified = {
+            "title": "メールが確認されました - OpenAI",
+            "text": "メールが確認されました\nこのメールアドレスはすでに確認済みです。",
+            "inputs": [],
+            "errors": [],
+        }
+        with patch("core.roxy_registration.time.time", side_effect=[0.0, 0.0]), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._email_otp_page_state", return_value=verified):
+            outcome = roxy_registration._wait_after_email_otp_submit(driver, timeout=0)
+        self.assertEqual(outcome, "email_verified")
+
+    def test_advanced_state_recognizes_email_verified_confirmation(self):
+        driver = MagicMock()
+        verified = {
+            "title": "Email verified - OpenAI",
+            "text": "Your email has already been verified",
+        }
+        with patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._email_otp_page_state", return_value=verified):
+            state = roxy_registration._otp_flow_advanced_state(driver)
+        self.assertEqual(state, "email_verified")
+
+    def test_otp_submit_detects_redirect_back_to_email_login(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration.time.sleep"), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=False), \
+             patch("core.roxy_registration._is_email_login_page_still_present", return_value=True):
+            outcome = roxy_registration._wait_after_email_otp_submit(driver, timeout=1)
+        self.assertEqual(outcome, "email_login")
+
+    def test_otp_submit_detects_account_deactivated_as_terminal(self):
+        driver = MagicMock()
+        page_state = {
+            "title": "認証エラー - OpenAI",
+            "text": "error_code: account_deactivated\nもう一度試す",
+            "inputs": [],
+            "errors": [],
+        }
+        with patch("core.roxy_registration.time.sleep"), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._email_otp_page_state", return_value=page_state):
+            outcome = roxy_registration._wait_after_email_otp_submit(driver, timeout=1)
+        self.assertEqual(outcome, "account_deactivated")
+
+    def test_callback_resume_resubmits_email_when_login_form_is_empty(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._safe_get") as safe_get, \
+             patch("core.roxy_registration.time.sleep"), \
+             patch("core.roxy_registration._is_email_login_page_still_present", return_value=True), \
+             patch("core.roxy_registration._submit_email_and_wait_next", return_value="otp") as submit_email:
+            state = roxy_registration._resume_chatgpt_login_callback(driver, email="mail@example.test")
+        self.assertEqual(state, "otp")
+        safe_get.assert_called_once_with(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=45,
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+        submit_email.assert_called_once_with(driver, "mail@example.test", attempts=2)
+
+    def test_wait_for_otp_input_fails_fast_on_account_deactivated_page(self):
+        driver = MagicMock()
+        page_state = {
+            "title": "認証エラー - OpenAI",
+            "text": "error_code: account_deactivated",
+            "inputs": [],
+            "errors": [],
+        }
+        with patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._email_otp_page_state", return_value=page_state), \
+             patch("core.roxy_registration.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "account_deactivated"):
+                roxy_registration._wait_for_otp_input(driver, timeout=1)
+
+    def test_next_otp_attempt_resubmits_email_after_login_redirect(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._otp_flow_advanced_state", return_value="email_login"), \
+             patch("core.roxy_registration._is_email_login_page_still_present", return_value=True), \
+             patch("core.roxy_registration._submit_email_and_wait_next", return_value="otp") as submit_email, \
+             patch("core.roxy_registration._wait_for_otp_input") as wait_input, \
+             patch("core.roxy_registration._click_resend_email_otp") as resend:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        submit_email.assert_called_once_with(driver, "mail@example.test", attempts=2)
+        wait_input.assert_called_once_with(driver, timeout=30)
+        resend.assert_not_called()
+
+    def test_next_otp_attempt_uses_resend_only_while_still_on_otp_page(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._otp_flow_advanced_state", return_value=None), \
+             patch("core.roxy_registration._is_email_login_page_still_present", return_value=False), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._click_resend_email_otp", return_value={"ok": True, "kind": "resend"}) as resend, \
+             patch("core.roxy_registration._wait_for_otp_input") as wait_input:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        resend.assert_called_once_with(driver, timeout=25)
+        wait_input.assert_called_once_with(driver, timeout=30)
+
+    def test_next_otp_attempt_recovers_chrome_navigation_error(self):
+        driver = MagicMock()
+        driver.current_url = "chrome-error://chromewebdata/"
+        with patch("core.roxy_registration._safe_get") as safe_get, \
+             patch("core.roxy_registration._page_warmup") as warmup, \
+             patch("core.roxy_registration._submit_email_and_wait_next", return_value="otp") as submit_email, \
+             patch("core.roxy_registration._wait_for_otp_input") as wait_input:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        safe_get.assert_called_once_with(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=45,
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+        warmup.assert_called_once_with(driver, reason="otp_navigation_error_recovery")
+        submit_email.assert_called_once_with(driver, "mail@example.test", attempts=2)
+        wait_input.assert_called_once_with(driver, timeout=30)
+
+    def test_next_otp_attempt_recovers_navigation_error_from_wait_exception(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_browser_navigation_error", return_value=False), \
+             patch("core.roxy_registration._otp_flow_advanced_state", return_value=None), \
+             patch("core.roxy_registration._is_email_login_page_still_present", return_value=False), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._click_resend_email_otp", return_value={"ok": True, "kind": "resend"}), \
+             patch("core.roxy_registration._wait_for_otp_input", side_effect=RuntimeError(
+                 "等待 OTP 输入框超时: url=chrome-error://chromewebdata/; inputs=[]"
+             )), \
+             patch("core.roxy_registration._email_otp_page_state", return_value={"url": ""}), \
+             patch("core.roxy_registration._restart_email_otp_from_login", return_value="otp") as restart:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        restart.assert_called_once_with(driver, "mail@example.test")
+
+    def test_next_otp_attempt_recovers_empty_otp_shell_after_resend(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_browser_navigation_error", return_value=False), \
+             patch("core.roxy_registration._otp_flow_advanced_state", return_value=None), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=False), \
+             patch("core.roxy_registration._is_email_login_page_still_present", return_value=False), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._click_resend_email_otp", return_value={"ok": True, "kind": "resend"}), \
+             patch("core.roxy_registration._wait_for_otp_input", side_effect=RuntimeError(
+                 "等待 OTP 输入框超时: url=https://auth.openai.com/email-verification; inputs=[]"
+             )), \
+             patch("core.roxy_registration._email_otp_page_state", return_value={
+                 "url": "https://auth.openai.com/email-verification",
+                 "inputs": [],
+             }), \
+             patch("core.roxy_registration._restart_email_otp_from_login", return_value="otp") as restart:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        restart.assert_called_once_with(driver, "mail@example.test")
+
+    def test_next_otp_attempt_resubmits_signup_password_page(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_browser_navigation_error", return_value=False), \
+             patch("core.roxy_registration._otp_flow_advanced_state", return_value=None), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration._fill_password_page_if_present") as fill_password, \
+             patch("core.roxy_registration._wait_for_otp_input") as wait_input, \
+             patch("core.roxy_registration._click_resend_email_otp") as resend:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        fill_password.assert_called_once_with(driver, "mail@example.test", timeout=25)
+        wait_input.assert_called_once_with(driver, timeout=30)
+        resend.assert_not_called()
+
+    def test_try_again_redirect_resubmits_email_instead_of_waiting_on_login_page(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._otp_flow_advanced_state", side_effect=[None, "email_login"]), \
+             patch("core.roxy_registration._is_email_login_page_still_present", side_effect=[False, True]), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._click_resend_email_otp", return_value={"ok": True, "kind": "retry"}), \
+             patch("core.roxy_registration._submit_email_and_wait_next", return_value="otp") as submit_email, \
+             patch("core.roxy_registration._wait_for_otp_input") as wait_input:
+            state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+        self.assertEqual(state, "otp")
+        submit_email.assert_called_once_with(driver, "mail@example.test", attempts=2)
+        wait_input.assert_called_once_with(driver, timeout=30)
+
+    def test_continuous_rejected_otp_is_retryable(self):
+        self.assertFalse(
+            registration_service._should_disable_failed_registration_email(
+                "RuntimeError: 邮箱验证码连续错误/过期，已达到最大重试次数"
+            )
+        )
+
+    def test_existing_account_password_page_disables_mailbox(self):
+        self.assertTrue(
+            registration_service._should_disable_failed_registration_email(
+                "RuntimeError: 邮箱提交后进入登录密码页: auth.openai.com/log-in/password"
+            )
+        )
+
+    def test_account_deactivated_disables_mailbox(self):
+        self.assertTrue(
+            registration_service._should_disable_failed_registration_email(
+                "RuntimeError: OpenAI 返回 account_deactivated：该邮箱对应的账号已删除或停用"
+            )
+        )
+
+    def test_transient_mail_api_timeout_does_not_disable_mailbox(self):
+        self.assertFalse(
+            registration_service._should_disable_failed_registration_email(
+                "GenericApiMailError: 等待通用 API 验证码超时"
+            )
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

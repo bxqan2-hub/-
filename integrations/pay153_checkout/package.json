@@ -1,0 +1,13 @@
+{
+  "name": "turb-pay153-sentinel-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Locked Node.js runtime dependencies for the vendored PAY.153 Sentinel helper.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "jsdom": "26.1.0",
+    "undici": "8.7.0"
+  }
+}

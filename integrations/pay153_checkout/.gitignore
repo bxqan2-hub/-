@@ -1,0 +1,17 @@
+﻿__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+data/
+logs/
+backups/
+*.bak*
+*.nohup
+*.out
+*.log
+*.jsonl
+*.zip
+node_modules/
+tools/upi_go/pix_extract_slot
+tools/upi_go/pix_extract_slot.exe

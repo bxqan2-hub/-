@@ -1,0 +1,262 @@
+import unittest
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+from unittest.mock import MagicMock, call, patch
+
+from core.roxybrowser_client import RoxyBrowserClient
+
+
+class RoxyProxyEnforcementTests(unittest.TestCase):
+    def test_profile_is_reported_immediately_after_creation(self):
+        client = RoxyBrowserClient()
+        reported = []
+        with patch.object(client, "create_profile", return_value="created-profile"), \
+             patch.object(client, "request", side_effect=RuntimeError("open failed")):
+            with self.assertRaisesRegex(RuntimeError, "open failed"):
+                client.open_profile(on_profile_ready=reported.append)
+        self.assertEqual(reported, ["created-profile"])
+
+    def test_visible_window_opens_only_after_proxy_exit_ip_is_known(self):
+        client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
+        events = []
+        with patch.object(client, "create_profile", side_effect=lambda: events.append("create") or "created-profile"), \
+             patch("core.browser_exit_geo.probe_proxy_exit_geo", side_effect=lambda *_a, **_k: events.append("probe") or {"ip": "203.0.113.8", "country": "JP"}), \
+             patch.object(client, "request", side_effect=lambda *_a, **_k: events.append("open") or {"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}}):
+            opened = client.open_profile(require_proxy_exit_ip=True)
+        self.assertEqual(events, ["probe", "create", "open"])
+        self.assertEqual(opened.preflight_exit_geo["ip"], "203.0.113.8")
+
+    def test_local_mode_creates_and_opens_without_proxy_preflight(self):
+        client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+        events = []
+        with patch.object(client, "create_profile", side_effect=lambda: events.append("create") or "created-profile"), \
+             patch("core.browser_exit_geo.probe_proxy_exit_geo") as probe_proxy_exit_geo, \
+             patch.object(client, "request", side_effect=lambda *_a, **_k: events.append("open") or {"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}}):
+            opened = client.open_profile(require_proxy_exit_ip=False)
+        self.assertEqual(events, ["create", "open"])
+        self.assertEqual(opened.preflight_exit_geo, {})
+        probe_proxy_exit_geo.assert_not_called()
+
+    def test_failed_proxy_exit_ip_probe_never_creates_or_opens_profile(self):
+        client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
+        with patch.object(client, "create_profile") as create_profile, \
+             patch("core.browser_exit_geo.probe_proxy_exit_geo", return_value={}), \
+             patch.object(client, "request") as request:
+            with self.assertRaisesRegex(RuntimeError, "未读取到出口 IP"):
+                client.open_profile(require_proxy_exit_ip=True)
+        create_profile.assert_not_called()
+        request.assert_not_called()
+
+    def test_pool_proxy_is_resolved_and_probed_before_profile_creation(self):
+        client = RoxyBrowserClient()
+        events = []
+        with patch("core.roxybrowser_client._cfg.ROXY_CREATE_USE_PROXY_POOL", True), \
+             patch("config.proxy.pick_proxy", side_effect=lambda: events.append("pick") or "socks5h://proxy.example:1080"), \
+             patch("core.browser_exit_geo.probe_proxy_exit_geo", side_effect=lambda *_a, **_k: events.append("probe") or {"ip": "203.0.113.9"}), \
+             patch.object(client, "create_profile", side_effect=lambda: events.append("create") or "created-profile"), \
+             patch.object(client, "request", side_effect=lambda *_a, **_k: events.append("open") or {"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}}):
+            client.open_profile(require_proxy_exit_ip=True)
+        self.assertEqual(events, ["pick", "probe", "create", "open"])
+
+    def _config_patches(self):
+        return (
+            patch("core.roxybrowser_client._cfg.ROXY_CREATE_USE_PROXY_POOL", True),
+            patch("core.roxybrowser_client._cfg.ROXY_RANDOM_PROFILE_NAME_ON_CREATE", False),
+            patch("core.roxybrowser_client._cfg.ROXY_RANDOM_OS_ON_CREATE", False),
+            patch("core.roxybrowser_client._cfg.ROXY_WORKSPACE_ID", "123"),
+            patch("core.roxybrowser_client._cfg.ROXY_PROJECT_ID", "456"),
+        )
+
+    def test_pool_proxy_overrides_template_and_call_payload(self):
+        client = RoxyBrowserClient()
+        stale = {
+            "proxyMethod": "custom",
+            "protocol": "HTTP",
+            "host": "non-jp.example",
+            "port": "8080",
+        }
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            stack.enter_context(patch("config.proxy.PROXY_API_ENABLED", True))
+            stack.enter_context(patch("config.proxy.pick_proxy", return_value="socks5h://jp-gateway.example:16601"))
+            request = stack.enter_context(
+                patch.object(client, "request", return_value={"data": {"dirId": 789}})
+            )
+            profile_id = client.create_profile({"proxyInfo": stale})
+
+        self.assertEqual(profile_id, "789")
+        body = request.call_args.kwargs["json_body"]
+        self.assertEqual(body["proxyInfo"]["host"], "jp-gateway.example")
+        self.assertEqual(body["proxyInfo"]["port"], "16601")
+        self.assertEqual(body["proxyInfo"]["protocol"], "SOCKS5")
+
+    def test_missing_pool_proxy_aborts_before_roxy_create(self):
+        client = RoxyBrowserClient()
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            stack.enter_context(patch("config.proxy.PROXY_API_ENABLED", False))
+            stack.enter_context(patch("config.proxy.pick_proxy", return_value=""))
+            request = stack.enter_context(patch.object(client, "request"))
+            with self.assertRaisesRegex(RuntimeError, "未取得可用代理"):
+                client.create_profile()
+
+        request.assert_not_called()
+
+    def test_explicit_local_proxy_bypasses_proxy_api(self):
+        client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            stack.enter_context(patch("config.proxy.PROXY_API_ENABLED", True))
+            pick_proxy = stack.enter_context(patch("config.proxy.pick_proxy"))
+            request = stack.enter_context(
+                patch.object(client, "request", return_value={"data": {"dirId": 790}})
+            )
+            profile_id = client.create_profile()
+
+        self.assertEqual(profile_id, "790")
+        pick_proxy.assert_not_called()
+        body = request.call_args.kwargs["json_body"]
+        self.assertEqual(body["proxyInfo"]["host"], "127.0.0.1")
+        self.assertEqual(body["proxyInfo"]["port"], "10808")
+
+    def test_fixed_windows_overrides_template_and_call_payload(self):
+        client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            stack.enter_context(patch("core.roxybrowser_client._cfg.ROXY_DEFAULT_OS", "Windows"))
+            stack.enter_context(patch("core.roxybrowser_client._cfg.ROXY_DEFAULT_OS_VERSION", ""))
+            request = stack.enter_context(
+                patch.object(client, "request", return_value={"data": {"dirId": 791}})
+            )
+            profile_id = client.create_profile({"os": "macOS", "osVersion": "15.3.2"})
+
+        self.assertEqual(profile_id, "791")
+        body = request.call_args.kwargs["json_body"]
+        self.assertEqual(body["os"], "Windows")
+        self.assertNotIn("osVersion", body)
+
+    def test_create_retries_only_explicit_roxy_busy_response(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        busy = MagicMock(status_code=200, text='{"code":1,"msg":"正在创建中，请稍等！"}')
+        busy.json.return_value = {"code": 1, "msg": "正在创建中，请稍等！"}
+        success = MagicMock(status_code=200, text='{"code":0}')
+        success.json.return_value = {"code": 0, "data": {"dirId": "ok"}}
+        with patch.object(client.http, "request", side_effect=[busy, success]) as request, \
+             patch("core.roxybrowser_client.time.sleep"):
+            result = client.request("POST", "/browser/create", json_body={})
+        self.assertEqual(result["data"]["dirId"], "ok")
+        self.assertEqual(request.call_count, 2)
+
+    def test_create_retries_roxy_fingerprint_15000ms_response_until_success(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        fingerprint_timeout = MagicMock(
+            status_code=200,
+            text='{"code":1,"msg":"timeout of 15000ms exceeded"}',
+        )
+        fingerprint_timeout.json.return_value = {
+            "code": 1,
+            "msg": "timeout of 15000ms exceeded",
+        }
+        success = MagicMock(status_code=200, text='{"code":0}')
+        success.json.return_value = {"code": 0, "data": {"dirId": "retry-ok"}}
+
+        with (
+            patch.object(client.http, "request", side_effect=[
+                fingerprint_timeout,
+                fingerprint_timeout,
+                success,
+            ]) as request,
+            patch("core.roxybrowser_client.time.sleep") as sleep,
+        ):
+            result = client.request("POST", "/browser/create", json_body={})
+
+        self.assertEqual(result["data"]["dirId"], "retry-ok")
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [call(2), call(4)])
+
+    def test_create_does_not_retry_other_roxy_business_timeout(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        other_timeout = MagicMock(
+            status_code=200,
+            text='{"code":1,"msg":"timeout of 10000ms exceeded"}',
+        )
+        other_timeout.json.return_value = {
+            "code": 1,
+            "msg": "timeout of 10000ms exceeded",
+        }
+
+        with (
+            patch.object(client.http, "request", return_value=other_timeout) as request,
+            patch("core.roxybrowser_client.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "timeout of 10000ms exceeded"):
+                client.request("POST", "/browser/create", json_body={})
+
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_create_timeout_is_not_retried(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        with patch.object(client.http, "request", side_effect=TimeoutError("create timed out")) as request, \
+             patch("core.roxybrowser_client.time.sleep"):
+            with self.assertRaises(TimeoutError):
+                client.request("POST", "/browser/create", json_body={})
+        self.assertEqual(request.call_count, 1)
+
+    def test_profile_create_calls_are_serialized(self):
+        guard = threading.Lock()
+        active = 0
+        max_active = 0
+        sequence = 0
+
+        def fake_request(*_args, **_kwargs):
+            nonlocal active, max_active, sequence
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+                sequence += 1
+                profile_id = str(sequence)
+            time.sleep(0.03)
+            with guard:
+                active -= 1
+            return {"data": {"dirId": profile_id}}
+
+        clients = [RoxyBrowserClient(), RoxyBrowserClient()]
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            stack.enter_context(patch("config.proxy.PROXY_API_ENABLED", True))
+            stack.enter_context(patch("config.proxy.pick_proxy", return_value="socks5h://jp-gateway.example:16601"))
+            for client in clients:
+                stack.enter_context(patch.object(client, "request", side_effect=fake_request))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                profile_ids = list(pool.map(lambda client: client.create_profile(), clients))
+
+        self.assertEqual(sorted(profile_ids), ["1", "2"])
+        self.assertEqual(max_active, 1)
+
+    def test_delete_missing_profile_is_idempotent_success(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        error = RuntimeError("Roxy API 返回失败 POST /browser/delete: 窗口/数据不存在，请刷新页面后重试")
+        with patch.object(client, "request", side_effect=error) as request:
+            deleted = client.delete_profile("missing-profile")
+
+        self.assertTrue(deleted)
+        request.assert_called_once()
+
+    def test_delete_other_error_remains_failure(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        with patch.object(client, "request", side_effect=RuntimeError("permission denied")):
+            deleted = client.delete_profile("protected-profile")
+
+        self.assertFalse(deleted)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>PAY.153 · 多通道提链控制台</title>
+  <meta name="description" content="Hosted、PayPal、iDEAL、UPI、PIX、Kakao Pay、Team 与 Codex 空间提链工作台">
+  <link rel="stylesheet" href="/pay153/static/styles.css?v=20260814-paypal-proxy-check-1">
+</head>
+<body>
+  <div class="paper-noise"></div>
+  <header class="topbar">
+    <a class="brand" href="/pay153/" aria-label="PAY.153 首页">
+      <span class="brand-mark"><i></i>P</span>
+      <span><b>PAY.153</b><small>CHECKOUT ROUTER</small></span>
+    </a>
+    <div class="top-actions">
+      <a class="protocol-nav-link" href="/paypal-pay/">PayPal 协议支付</a>
+      <span class="service-dot"><i></i> 服务在线</span>
+      <button id="themeToggle" class="icon-button" type="button" aria-label="切换主题">◐</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span>01</span> MULTI-RAIL CHECKOUT</div>
+        <h1>把支付路径，<em>交给一张控制台。</em></h1>
+        <p>输入会话、选择通道、交给任务队列。Hosted、PayPal、iDEAL、UPI、PIX、Kakao Pay 与空间方案统一在一个流程内完成。</p>
+        <div class="hero-chips">
+          <span>PayPal</span><span>iDEAL</span><span>UPI QR</span><span>PIX</span><span>Kakao</span><span>Team</span><span>Codex</span>
+        </div>
+      </div>
+      <div class="hero-board" aria-label="服务能力">
+        <div><small>ROUTES</small><strong>05</strong><span>支付通道</span></div>
+        <div><small>LOCAL RATE</small><strong>∞</strong><span>任务不限速</span></div>
+        <div><small>TOKEN MODE</small><strong>RAM</strong><span>仅任务内存</span></div>
+      </div>
+    </section>
+
+    <section class="workspace-grid">
+      <form id="checkoutForm" class="panel form-panel">
+        <div class="panel-heading">
+          <div><span class="section-index">A</span><h2>提链参数</h2></div>
+          <span class="quiet">公开工作台</span>
+        </div>
+        <div class="local-mode-note"><b>本地部署模式</b><span>不限制每分钟创建任务数；任务仅按后台并发线程数排队执行。</span></div>
+
+        <label class="field token-field">
+          <span class="label-row"><b>Access Token / Session JSON</b><small id="tokenHint">自动识别账号信息</small></span>
+          <textarea id="token" name="token" required autocomplete="off" spellcheck="false" placeholder="粘贴 Access Token，或 chatgpt.com/api/auth/session 返回的 JSON"></textarea>
+          <span class="field-note">内容不写入数据库，服务日志会自动隐藏 Token。</span>
+        </label>
+
+        <fieldset class="field-group">
+          <legend>订阅 / 空间</legend>
+          <div class="choice-grid plan-grid" id="planGrid">
+            <label class="choice active"><input type="radio" name="plan" value="plus" checked><span><b>Plus</b><small>个人订阅</small></span></label>
+            <label class="choice"><input type="radio" name="plan" value="pro"><span><b>Pro</b><small>专业计划</small></span></label>
+            <label class="choice"><input type="radio" name="plan" value="team"><span><b>Team</b><small>工作空间</small></span></label>
+            <label class="choice"><input type="radio" name="plan" value="codex_low"><span><b>Codex</b><small>低价空间</small></span></label>
+          </div>
+        </fieldset>
+
+        <fieldset class="field-group run-mode-group">
+          <legend>运行配置</legend>
+          <label class="field run-mode-field">
+            <span><b>运行模式</b><small>选择一种支付路径</small></span>
+            <select id="runMode" name="link_type">
+              <option value="hosted" selected>支付长链</option>
+              <option value="ph_short">菲律宾短链</option>
+              <option value="paypal">PayPal · CSLIVE / Stripe</option>
+              <option value="paypal_oaics">PayPal OAICS</option>
+              <option value="ideal">iDEAL</option>
+              <option value="upi">UPI</option>
+              <option value="pix">PIX</option>
+              <option value="momo">MoMo</option>
+              <option value="gcash">GCash</option>
+              <option value="kakao">Kakao Pay</option>
+            </select>
+            <span id="runModeHint" class="field-note">返回官方 Checkout 长链，不提交支付方式。</span>
+          </label>
+        </fieldset>
+
+        <div class="two-cols" id="regionFields">
+          <label class="field"><span>国家 / 地区</span><select id="country">
+            <option value="US">US · 美国</option><option value="DE">DE · 德国</option>
+            <option value="FR">FR · 法国</option><option value="NL">NL · 荷兰</option>
+            <option value="IN">IN · 印度</option><option value="BR">BR · 巴西</option>
+            <option value="VN">VN · 越南</option>
+            <option value="GB">GB · 英国</option><option value="JP">JP · 日本</option>
+            <option value="KR">KR · 韩国</option><option value="PH">PH ? 菲律宾</option>
+            <option value="AU">AU · 澳大利亚</option><option value="CA">CA · 加拿大</option>
+          </select></label>
+          <label class="field"><span>币种</span><select id="currency">
+            <option>USD</option><option>EUR</option><option>INR</option><option>BRL</option>
+            <option>GBP</option><option>JPY</option><option>KRW</option><option>VND</option><option>PHP</option><option>AUD</option><option>CAD</option>
+          </select></label>
+        </div>
+        <p id="regionAutoHint" class="region-auto-hint" hidden>PayPal 的国家、地区和币种会根据代理池 2 自动识别。</p>
+
+        <div id="paypalOaicsOptions" class="conditional-fields compact-fields" hidden>
+          <div class="form-actions">
+            <button id="paypalOaicsManualToggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="paypalOaicsCountryFields">手动设置代理与账单国家</button>
+          </div>
+          <input id="paypalOaicsManualEnabled" type="checkbox" hidden>
+          <div id="paypalOaicsCountryFields" class="two-cols" hidden>
+            <label class="field"><span>代理出口国家</span><select id="paypalOaicsProxyCountry"></select></label>
+            <label class="field"><span>账单国家</span><select id="paypalOaicsBillingCountry"></select></label>
+          </div>
+          <p id="paypalOaicsCountrySummary" class="inline-note">默认使用 BR 代理出口与 DE/EUR 零元账单。</p>
+          <p class="inline-note">使用 eatWhitePorridge/link-pp 提链核心；只扩展地区配置，原有 Checkout、零元校验、PayPal confirm 与 BA 提取流程不变。</p>
+        </div>
+
+        <section class="proxy-block" aria-labelledby="proxyTitle">
+          <div class="block-heading">
+            <div><span class="section-index">P</span><div><h3 id="proxyTitle">代理池</h3><p id="proxyRecommendation">每行填写一个代理，系统会在任务运行时自动选择。</p></div></div>
+            <div class="block-tags"><span id="proxySaveState" class="local-save-tag">本地自动保存</span><span class="required-tag">任务必填</span></div>
+          </div>
+          <div id="proxyRoleGuide" class="proxy-role-guide" aria-live="polite">
+            <article class="proxy-role-card">
+              <div><span class="proxy-role-index">1</span><div><b id="entryProxyRole">Checkout / 账单 / 优惠</b><small id="entryProxyCountry">账号常用地区</small></div></div>
+              <p id="entryProxyDescription">创建 Checkout，并完成当前路径需要的优惠与账单步骤。</p>
+            </article>
+            <article id="exitProxyRoleCard" class="proxy-role-card is-unused">
+              <div><span class="proxy-role-index">2</span><div><b id="exitProxyRole">当前路径不使用</b><small id="exitProxyCountry">无需填写</small></div></div>
+              <p id="exitProxyDescription">当前路径全程使用代理池 1。</p>
+            </article>
+          </div>
+          <div class="two-cols" id="proxyGrid">
+            <label class="field"><span><b id="entryProxyLabel">代理池 1 · Checkout / 账单 / 优惠</b><small id="entryProxyCount">0 / 500</small></span><small id="entryProxyInputNote" class="proxy-input-note">推荐账号常用地区；每行一个代理。</small><textarea id="entryProxy" class="proxy-pool-input" required autocomplete="off" spellcheck="false" aria-describedby="entryProxyInputNote paypalOaicsProxyCheck" placeholder="每行一个代理，支持 1-500 条"></textarea><small id="paypalOaicsProxyCheck" class="proxy-check-status" aria-live="polite" hidden></small></label>
+            <label class="field" id="exitProxyField" hidden><span><b id="exitProxyLabel">代理池 2 · 支付出口</b><small id="exitProxyCount">0 / 500</small></span><small id="exitProxyInputNote" class="proxy-input-note">每行一个代理。</small><textarea id="exitProxy" class="proxy-pool-input" autocomplete="off" spellcheck="false" aria-describedby="exitProxyInputNote" placeholder="每行一个代理，支持 1-500 条"></textarea></label>
+          </div>
+          <div class="retry-setting">
+            <label class="field"><span>失败重试次数 <small>1-50 次</small></span><input id="retryCount" type="number" min="1" max="50" value="10"></label>
+            <p>任务未成功时会自动更换代理重新尝试，无需手动重复提交。</p>
+          </div>
+          <div class="proxy-foot">
+            <span id="proxyFootHint">推荐代理会根据所选支付方式自动显示。</span>
+            <button id="copyEntryProxy" type="button">复制代理池 1 到代理池 2</button>
+          </div>
+        </section>
+
+        <div id="teamFields" class="conditional-fields" hidden>
+          <div class="two-cols">
+            <label class="field"><span>空间名称</span><input id="workspaceName" maxlength="80" value="Codex Workspace"></label>
+            <label class="field"><span>已有空间 ID</span><input id="workspaceId" maxlength="120" placeholder="留空创建新空间"></label>
+          </div>
+          <div class="two-cols">
+            <label class="field"><span>席位数量</span><input id="seatQuantity" type="number" min="2" max="999" value="5"></label>
+            <label class="field"><span>计费周期</span><select id="priceInterval"><option value="month">按月</option><option value="year">按年</option></select></label>
+          </div>
+          <label class="field priority-field"><span>Team 优惠码 <small class="optional-tag">重要 · 选填</small></span><input id="promoCode" placeholder="有 Team 活动码时填写，留空正常创建"></label>
+        </div>
+
+        <div id="codexFields" class="conditional-fields" hidden>
+          <div class="two-cols">
+            <label class="field"><span>Codex 空间名称</span><input id="codexWorkspaceName" maxlength="80" value="Codex Space"></label>
+            <label class="field"><span>积分数量</span><input id="creditQuantity" type="number" min="1" max="100000" value="13"></label>
+          </div>
+          <p class="inline-note">数量将按原值提交，最终价格和最低购买限制以 Checkout 返回为准。</p>
+        </div>
+
+        <div class="toggle-line" id="promoLine">
+          <label class="switch"><input id="usePromo" type="checkbox" checked><span></span></label>
+          <div><b>尝试优惠活动</b><small>资格不匹配时，上游会返回具体原因</small></div>
+        </div>
+
+        <div class="toggle-line sentinel-combined-toggle">
+          <label class="switch"><input id="useSentinel" type="checkbox" checked><span></span></label>
+          <div><b>SEN + SO</b><small>同时生成并提交主令牌与附加令牌</small></div>
+        </div>
+        <p class="inline-note sentinel-note">关闭后 SEN 与 SO 会同时省略，并在任务日志中记录。</p>
+
+        <div id="plusPromoFields" class="conditional-fields compact-fields">
+          <label class="field"><span>Plus 优惠 Campaign <small>选填</small></span><input id="promoCampaign" placeholder="例如 plus-1-month-free"></label>
+        </div>
+
+        <div id="idealOptions" class="conditional-fields compact-fields" hidden>
+          <label class="field"><span>iDEAL 银行</span><select id="idealBank" disabled>
+            <option value="" selected>在 iDEAL 支付页面选择</option>
+          </select></label>
+          <p class="inline-note">新版 iDEAL 在银行跳转页统一选择银行，提链阶段不再提交旧版 bank 参数。</p>
+        </div>
+
+        <div id="paypalOptions" class="conditional-fields compact-fields" hidden>
+          <p class="inline-note">巴西 PayPal 推荐：代理池 1、代理池 2 均使用 BR。系统自动创建 DE/EUR OpenAI 账单，并使用 BR 资料完成 PayPal PM、confirm 与 poll；其他国家仍按代理池 2 自动识别。</p>
+        </div>
+
+        <div id="pixOptions" class="conditional-fields compact-fields" hidden>
+          <div class="two-cols">
+            <label class="field"><span>自动生成类型</span><select id="pixAutoKind"><option value="cpf" selected>主要生成 CPF</option><option value="mixed">CPF / CNPJ 交替</option><option value="cnpj">仅生成 CNPJ</option></select></label>
+            <label class="field"><span>固定 CPF / CNPJ <small>选填</small></span><input id="pixTaxId" inputmode="numeric" maxlength="18" placeholder="留空由每轮自动生成"></label>
+          </div>
+          <p class="inline-note">留空税号时，每轮自动生成新的 CPF 或 CNPJ，并同步生成持有人/企业名称、邮箱和巴西地址。填写固定 CNPJ 时会优先查询登记资料。</p>
+        </div>
+
+        <div class="form-actions">
+          <button id="submitButton" class="primary-button" type="submit"><span>开始提炼</span><i>→</i></button>
+          <button id="cancelButton" class="secondary-button" type="button" hidden>停止任务</button>
+        </div>
+      </form>
+
+      <aside class="right-stack">
+        <section class="panel status-panel">
+          <div class="panel-heading"><div><span class="section-index">B</span><h2>运行状态</h2></div><span id="statusBadge" class="status-badge idle">等待</span></div>
+          <div class="progress-orbit"><svg viewBox="0 0 120 120"><circle class="orbit-bg" cx="60" cy="60" r="51"></circle><circle id="orbitValue" class="orbit-value" cx="60" cy="60" r="51"></circle></svg><div><strong id="progressValue">0%</strong><span id="progressText">尚未创建任务</span></div></div>
+          <div class="progress-track" aria-hidden="true"><i id="progressBar"></i></div>
+          <div class="progress-caption"><span>任务进度</span><b id="progressStage">等待开始</b></div>
+          <div id="logBox" class="log-box"><div class="empty-log">任务日志将在这里实时出现。</div></div>
+        </section>
+
+        <section id="resultPanel" class="panel result-panel" hidden>
+          <div class="panel-heading"><div><span class="section-index">C</span><h2>提炼结果</h2></div><span class="seal">READY</span></div>
+          <div id="qrWrap" class="qr-wrap" hidden><img id="qrImage" alt="支付二维码"><span id="qrCountdown"></span></div>
+          <div class="result-list">
+            <div><span>支付路径</span><b id="resultType">—</b></div>
+            <div><span>账号</span><b id="resultEmail">—</b></div>
+            <div><span>地区</span><b id="resultRegion">—</b></div>
+            <div><span>优惠状态</span><b id="resultPromo">—</b></div>
+            <div><span>Session</span><code id="resultSession">—</code></div>
+          </div>
+          <label class="field result-link"><span>最终链接 / 付款码</span><textarea id="resultValue" readonly></textarea></label>
+          <div class="result-actions"><a id="openResult" class="primary-button" target="_blank" rel="noopener noreferrer">打开长链</a><a id="verifyResult" class="secondary-button" target="_blank" rel="noopener noreferrer" hidden>条款页面</a><button id="copyResult" class="secondary-button" type="button">复制结果</button></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <footer><span>PAY.153.INK</span><p>任务完成后请及时使用链接；支付提供商生成的二维码通常具有有效期。</p></footer>
+  <script src="/pay153/static/app.js?v=20260814-paypal-country-extension-1"></script>
+</body>
+</html>

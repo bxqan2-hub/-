@@ -1,0 +1,275 @@
+# -*- coding: utf-8 -*-
+"""Probe the actual egress used by an active registration browser context."""
+from __future__ import annotations
+
+import ipaddress
+import logging
+import math
+import time
+
+logger = logging.getLogger(__name__)
+
+
+def normalize_browser_exit_geo(data: dict | None) -> dict:
+    """Normalize the JSON shapes returned by the configured IP geo services."""
+    if not isinstance(data, dict):
+        return {}
+    ip_value = str(data.get("ip") or data.get("query") or "").strip()
+    try:
+        ip_value = str(ipaddress.ip_address(ip_value))
+    except ValueError:
+        return {}
+
+    timezone = data.get("timezone")
+    if isinstance(timezone, dict):
+        timezone = timezone.get("id") or timezone.get("name")
+    connection = data.get("connection") if isinstance(data.get("connection"), dict) else {}
+    country = str(
+        data.get("country_code")
+        or data.get("countryCode")
+        or data.get("country")
+        or ""
+    ).strip()
+    if len(country) in (2, 3):
+        country = country.upper()
+    return {
+        "ip": ip_value,
+        "country": country,
+        "region": data.get("region") or data.get("regionName"),
+        "city": data.get("city"),
+        "timezone": timezone or "",
+        "org": data.get("org") or data.get("isp") or connection.get("org"),
+    }
+
+
+def _probe_settings() -> tuple[list[str], float]:
+    try:
+        from config import browser as browser_config
+
+        endpoints = [
+            str(value).strip()
+            for value in (getattr(browser_config, "IP_GEO_ENDPOINTS", []) or [])
+            if str(value).strip()
+        ]
+        timeout = max(1.0, float(getattr(browser_config, "IP_GEO_TIMEOUT", 6) or 6))
+        return endpoints, timeout
+    except Exception:
+        return [], 6.0
+
+
+def _log_detected(label: str, geo: dict) -> None:
+    logger.info(
+        "[%s] 浏览器代理出口 IP: %s country=%s",
+        label,
+        geo.get("ip") or "?",
+        geo.get("country") or "?",
+    )
+
+
+def probe_proxy_exit_geo(
+    proxy_url: str,
+    *,
+    label: str,
+    attempts: int = 1,
+    retry_delay: float = 0.0,
+    stop_check=None,
+) -> dict:
+    """Probe an explicit proxy before a browser window is opened.
+
+    ``attempts <= 0`` means keep probing until an exit IP is obtained.  The
+    optional ``stop_check`` callback is invoked between network operations so a
+    manually stopped registration can still terminate an unlimited probe.
+    """
+    proxy_url = str(proxy_url or "").strip()
+    endpoints, timeout = _probe_settings()
+    if not proxy_url or not endpoints:
+        return {}
+
+    from curl_cffi.requests import Session
+
+    configured_attempts = int(attempts if attempts is not None else 1)
+    max_attempts = max(1, configured_attempts) if configured_attempts > 0 else None
+    delay = max(0.0, float(retry_delay or 0.0))
+    attempt = 0
+    while True:
+        attempt += 1
+        if callable(stop_check):
+            stop_check()
+        session = Session(impersonate="chrome")
+        session.proxies = {"http": proxy_url, "https": proxy_url}
+        try:
+            for endpoint in endpoints:
+                if callable(stop_check):
+                    stop_check()
+                try:
+                    response = session.get(
+                        endpoint,
+                        headers={"Accept": "application/json"},
+                        timeout=timeout,
+                    )
+                    if int(response.status_code) != 200:
+                        continue
+                    geo = normalize_browser_exit_geo(response.json())
+                    if geo.get("ip"):
+                        _log_detected(label, geo)
+                        return geo
+                except Exception as exc:
+                    logger.debug(
+                        "[%s] 窗口打开前出口 IP 探测失败 endpoint=%s attempt=%s/%s: %s: %s",
+                        label, endpoint, attempt, max_attempts or "∞", type(exc).__name__, exc,
+                    )
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+        if max_attempts is not None and attempt >= max_attempts:
+            break
+        if delay:
+            time.sleep(min(30.0, delay * attempt))
+    logger.warning("[%s] 窗口打开前未能读取代理出口 IP", label)
+    return {}
+
+
+def probe_playwright_context_exit_geo(context, *, label: str) -> dict:
+    """Use a temporary page in the active Playwright context to probe egress."""
+    endpoints, timeout = _probe_settings()
+    if context is None or not endpoints:
+        return {}
+
+    probe_page = None
+    try:
+        probe_page = context.new_page()
+        timeout_ms = int(math.ceil(timeout * 1000))
+        probe_page.set_default_timeout(timeout_ms)
+        probe_page.set_default_navigation_timeout(timeout_ms)
+        for endpoint in endpoints:
+            try:
+                response = probe_page.goto(endpoint, wait_until="domcontentloaded", timeout=timeout_ms)
+                status = getattr(response, "status", None) if response is not None else None
+                if status is not None and not (200 <= int(status) < 300):
+                    continue
+                data = probe_page.evaluate(
+                    """() => {
+                      const text = document.body?.innerText || document.documentElement?.innerText || '';
+                      try { return JSON.parse(text); } catch (_) { return null; }
+                    }"""
+                )
+                geo = normalize_browser_exit_geo(data)
+                if geo.get("ip"):
+                    _log_detected(label, geo)
+                    return geo
+            except Exception as exc:
+                logger.debug(
+                    "[%s] 浏览器出口 IP 探测失败，继续下一个服务: %s: %s",
+                    label,
+                    type(exc).__name__,
+                    exc,
+                )
+        logger.warning("[%s] 未能从当前注册浏览器上下文识别出口 IP", label)
+        return {}
+    except Exception as exc:
+        logger.warning(
+            "[%s] 无法创建浏览器出口探测临时页，账号将留空: %s: %s",
+            label,
+            type(exc).__name__,
+            exc,
+        )
+        return {}
+    finally:
+        if probe_page is not None:
+            try:
+                probe_page.close()
+            except Exception:
+                pass
+
+
+def probe_selenium_driver_exit_geo(
+    driver,
+    *,
+    label: str,
+    restore_page_load_timeout: float | int | None = None,
+    restore_script_timeout: float | int | None = None,
+    attempts: int = 1,
+    retry_delay: float = 0.0,
+    stop_check=None,
+) -> dict:
+    """Use a temporary tab in the active Selenium browser to probe egress."""
+    endpoints, timeout = _probe_settings()
+    if driver is None or not endpoints:
+        return {}
+
+    original_handle = None
+    probe_opened = False
+    try:
+        original_handle = driver.current_window_handle
+        driver.switch_to.new_window("tab")
+        probe_opened = True
+        timeout_seconds = max(1, int(math.ceil(timeout)))
+        driver.set_page_load_timeout(timeout_seconds)
+        driver.set_script_timeout(timeout_seconds)
+        configured_attempts = int(attempts if attempts is not None else 1)
+        max_attempts = max(1, configured_attempts) if configured_attempts > 0 else None
+        delay = max(0.0, float(retry_delay or 0.0))
+        attempt = 0
+        while True:
+            attempt += 1
+            if callable(stop_check):
+                stop_check()
+            for endpoint in endpoints:
+                if callable(stop_check):
+                    stop_check()
+                try:
+                    driver.get(endpoint)
+                    data = driver.execute_script(
+                        """
+                        const text = document.body?.innerText || document.documentElement?.innerText || '';
+                        try { return JSON.parse(text); } catch (_) { return null; }
+                        """
+                    )
+                    geo = normalize_browser_exit_geo(data)
+                    if geo.get("ip"):
+                        _log_detected(label, geo)
+                        return geo
+                except Exception as exc:
+                    logger.debug(
+                        "[%s] 浏览器出口 IP 探测失败 endpoint=%s attempt=%s/%s: %s: %s",
+                        label, endpoint, attempt, max_attempts or "∞", type(exc).__name__, exc,
+                    )
+            if max_attempts is not None and attempt >= max_attempts:
+                break
+            if delay:
+                time.sleep(min(30.0, delay * attempt))
+        logger.warning("[%s] 未能从当前注册浏览器上下文识别出口 IP，账号将留空", label)
+        return {}
+    except Exception as exc:
+        if callable(stop_check):
+            stop_check()
+        logger.warning(
+            "[%s] 无法创建浏览器出口探测临时标签: %s: %s",
+            label,
+            type(exc).__name__,
+            exc,
+        )
+        return {}
+    finally:
+        if probe_opened:
+            try:
+                driver.close()
+            except Exception:
+                pass
+        if original_handle is not None:
+            try:
+                driver.switch_to.window(original_handle)
+            except Exception:
+                pass
+        if restore_page_load_timeout is not None:
+            try:
+                driver.set_page_load_timeout(restore_page_load_timeout)
+            except Exception:
+                pass
+        if restore_script_timeout is not None:
+            try:
+                driver.set_script_timeout(restore_script_timeout)
+            except Exception:
+                pass
