@@ -3118,7 +3118,7 @@ def run_roxy_registration(
 
             outcome = _wait_after_email_otp_submit(driver, timeout=45)
             if outcome == 'pending':
-                logger.info("[Roxy注册][OTP] 未发现明确错误，延长等待 10 秒，不立即重发验证码")
+                logger.info("[Roxy][OTP] No explicit error; waiting 20 more seconds before any resend")
                 outcome = _wait_after_email_otp_submit(driver, timeout=20)
             if outcome == 'accepted':
                 break
