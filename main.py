@@ -26,6 +26,7 @@ from core.openai_auth import (
     network_preflight,
     navigate_about_you,
     EmailOtpInvalidError,
+    CloudflareChallengeError,
     create_account,
 )
 from core.account_export import (
@@ -589,7 +590,11 @@ def run_registration(
                     logger.info(f"[邮箱:{src}] {email} 已恢复 available")
         except Exception:
             pass
-        return {"success": False, "email": email, "error": str(e)}
+        result = {"success": False, "email": email, "error": str(e)}
+        if isinstance(e, CloudflareChallengeError):
+            result["error_code"] = e.error_code
+            result["retryable"] = False
+        return result
 
 
 def main():

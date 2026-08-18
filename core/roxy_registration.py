@@ -1243,7 +1243,7 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
 
-def _wait_for_otp_input(driver, timeout: int = 30) -> None:
+def _wait_for_otp_input(driver, timeout: int = 30) -> str | None:
     """Wait for the live OTP DOM control after a resend/navigation redraw."""
     end = time.time() + max(1, int(timeout))
     while time.time() < end:
@@ -1251,6 +1251,9 @@ def _wait_for_otp_input(driver, timeout: int = 30) -> None:
         try:
             if _is_email_verification_page(driver):
                 state = _email_otp_page_state(driver)
+                if _email_otp_verified_success(state):
+                    logger.info("%s[OTP] 检测到 Email verified 确认页，不再等待验证码输入框", _log_prefix(driver))
+                    return "email_verified"
                 if state.get("inputs"):
                     return
         except Exception:
@@ -1262,6 +1265,9 @@ def _wait_for_otp_input(driver, timeout: int = 30) -> None:
             )
         time.sleep(0.8)
     state = _email_otp_page_state(driver)
+    if _email_otp_verified_success(state):
+        logger.info("%s[OTP] 超时检查发现 Email verified 确认页，按已验证处理", _log_prefix(driver))
+        return "email_verified"
     terminal_error = _email_otp_terminal_error(state)
     if terminal_error:
         raise RuntimeError(
@@ -1639,8 +1645,8 @@ def _reload_stuck_otp_page(driver, *, timeout: int = 30) -> str:
         accept_hosts=("chatgpt.com", "auth.openai.com"),
     )
     _page_warmup(driver, reason="otp_resend_stuck_recovery")
-    _wait_for_otp_input(driver, timeout=20)
-    return "otp"
+    wait_state = _wait_for_otp_input(driver, timeout=20)
+    return "email_verified" if wait_state == "email_verified" else "otp"
 
 
 def _click_resend_email_otp(driver, timeout: int = 20) -> dict:

@@ -3,7 +3,8 @@ from unittest.mock import MagicMock, patch
 
 import main
 from config import browser as browser_config
-from core.session import BrowserSession
+from core.openai_auth import CloudflareChallengeError, network_preflight
+from core.session import BrowserSession, is_cloudflare_challenge_response
 
 
 _EXIT_GEO = {
@@ -14,6 +15,57 @@ _EXIT_GEO = {
 
 
 class ProtocolFingerprintAlignmentTests(TestCase):
+    def test_cloudflare_challenge_response_is_detected_from_edge_header(self):
+        response = MagicMock(
+            status_code=403,
+            headers={"cf-mitigated": "challenge"},
+            text="<html><title>Just a moment...</title></html>",
+        )
+        self.assertTrue(is_cloudflare_challenge_response(response))
+
+    def test_cloudflare_challenge_response_requires_403(self):
+        response = MagicMock(
+            status_code=200,
+            headers={"cf-mitigated": "challenge"},
+            text="<html><title>Just a moment...</title></html>",
+        )
+        self.assertFalse(is_cloudflare_challenge_response(response))
+
+    def test_network_preflight_fails_fast_with_cloudflare_error(self):
+        response = MagicMock(
+            status_code=403,
+            headers={"cf-mitigated": "challenge", "cf-ray": "abc123"},
+            text="<html><title>Just a moment...</title></html>",
+            url="https://chatgpt.com/login",
+        )
+        session = MagicMock()
+        session.get.side_effect = [response]
+        session.exit_geo = {"ip": "203.0.113.7"}
+
+        with self.assertRaises(CloudflareChallengeError) as ctx:
+            network_preflight(session)
+
+        self.assertEqual(ctx.exception.error_code, "cloudflare_managed_challenge")
+        self.assertIn("Cloudflare Managed Challenge", str(ctx.exception))
+        self.assertIn("cf-ray=abc123", str(ctx.exception))
+        self.assertIn("protocol flow stopped before OTP", str(ctx.exception))
+        session.get.assert_called_once()
+
+    def test_network_preflight_keeps_non_cloudflare_403_as_runtime_error(self):
+        response = MagicMock(
+            status_code=403,
+            headers={},
+            text="application forbidden",
+            url="https://chatgpt.com/login",
+        )
+        session = MagicMock()
+        session.get.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, "chatgpt-login status=403"):
+            network_preflight(session)
+
+        session.get.assert_called_once()
+
     def test_default_profile_aligns_tls_ua_client_hints_and_os(self):
         profile = browser_config.build_browser_environment(
             _EXIT_GEO,

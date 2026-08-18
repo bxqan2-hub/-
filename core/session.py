@@ -27,6 +27,19 @@ _GEO_CACHE_LOCK = threading.Lock()
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
 
 
+def is_cloudflare_challenge_response(resp) -> bool:
+    """Return True when a response is a Cloudflare Managed Challenge page."""
+    status = int(getattr(resp, "status_code", 0) or 0)
+    if status != 403:
+        return False
+    headers = getattr(resp, "headers", {}) or {}
+    lowered = {str(key).lower(): str(value).strip().lower() for key, value in headers.items()}
+    if lowered.get("cf-mitigated") == "challenge":
+        return True
+    body = str(getattr(resp, "text", "") or "").lower()
+    return "just a moment" in body and ("challenge-platform" in body or "cloudflare" in body)
+
+
 class BrowserSession:
     """
     模拟 Chrome 浏览器的 HTTP 会话管理器。
@@ -592,8 +605,17 @@ class BrowserSession:
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
         cool_down = retry_after if retry_after > 0 else (300 if status == 429 else 900)
         self.blocked_until = max(self.blocked_until, time.time() + min(cool_down, 3600))
-        self.blocked_reason = f"HTTP {status} from {url}"
-        logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), url)
+        if is_cloudflare_challenge_response(resp):
+            self.blocked_reason = f"Cloudflare Managed Challenge from {url}"
+            logger.warning(
+                "[熔断] Cloudflare Managed Challenge: HTTP %s, %ss cooling, stop protocol requests: %s",
+                status,
+                min(cool_down, 3600),
+                url,
+            )
+        else:
+            self.blocked_reason = f"HTTP {status} from {url}"
+            logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), url)
         return resp
 
     def get(self, url: str, headers: dict = None, **kwargs):

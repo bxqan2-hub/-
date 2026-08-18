@@ -8,7 +8,7 @@ import json
 import logging
 import time
 
-from core.session import BrowserSession
+from core.session import BrowserSession, is_cloudflare_challenge_response
 from core.sentinel import (
     generate_requirements_token,
     build_sentinel_request_body,
@@ -20,6 +20,31 @@ logger = logging.getLogger(__name__)
 
 class EmailOtpInvalidError(RuntimeError):
     """邮箱验证码无效/过期，可重新发送后重试。"""
+
+
+class CloudflareChallengeError(RuntimeError):
+    """The protocol request reached a Cloudflare Managed Challenge page."""
+
+    error_code = "cloudflare_managed_challenge"
+
+    def __init__(self, label: str, response, session: BrowserSession):
+        self.label = str(label or "request")
+        self.status_code = int(getattr(response, "status_code", 0) or 0)
+        headers = getattr(response, "headers", {}) or {}
+        self.cf_ray = str(headers.get("cf-ray") or "").strip()
+        self.url = str(getattr(response, "url", "") or "")
+        self.exit_ip = str((getattr(session, "exit_geo", {}) or {}).get("ip") or "")
+        details = [
+            f"Cloudflare Managed Challenge at {self.label}",
+            f"status={self.status_code}",
+            f"url={self.url or '?'}",
+        ]
+        if self.cf_ray:
+            details.append(f"cf-ray={self.cf_ray}")
+        if self.exit_ip:
+            details.append(f"exit_ip={self.exit_ip}")
+        details.append("protocol flow stopped before OTP")
+        super().__init__("; ".join(details))
 
 
 class AccountUnusableError(Exception):
@@ -172,6 +197,8 @@ def network_preflight(session: BrowserSession) -> None:
             try:
                 logger.info(f"[预检] {label} ({attempt}/{_FOLLOW_AUTH_MAX_ATTEMPTS})")
                 resp = fn()
+                if is_cloudflare_challenge_response(resp):
+                    raise CloudflareChallengeError(label, resp, session)
                 if getattr(resp, "status_code", 0) >= 400:
                     raise RuntimeError(f"{label} status={resp.status_code}, body={(getattr(resp, 'text', '') or '')[:180]}")
                 break
