@@ -20,20 +20,20 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-def _latest_chrome_major(default: str = "149") -> str:
-    """兼容旧模块导入；默认按 2026-07-19 抓包里的 Chrome 149 画像。"""
+def _latest_chrome_major(default: str = "146") -> str:
+    """兼容旧模块导入；版本必须与 curl_cffi 的 TLS impersonate 完全一致。"""
     return default
 
 
-CHROME_MAJOR = "149"
-CHROME_FULL_VERSION = "149.0.0.0"
+CHROME_MAJOR = "146"
+CHROME_FULL_VERSION = "146.0.0.0"
 
 SAFARI_VERSION = ""
 SAFARI_WEBKIT_VERSION = "537.36"
 MAC_OS_UA_VERSION = "10_15_7"
 
 # ---------- curl_cffi 模拟浏览器 ----------
-# curl_cffi 0.15 当前最高内置到 chrome146；HTTP/JS 画像按抓包补齐到 Chrome/149。
+# TLS、UA 和 OS/Client Hints 共用这一份 Chrome 146 macOS 画像；禁止跨版本拼接。
 IMPERSONATE = "chrome146"
 
 # ---------- 桌面 Chrome 画像 ----------
@@ -49,8 +49,8 @@ USER_AGENT = (
     f"Chrome/{CHROME_FULL_VERSION} Safari/{SAFARI_WEBKIT_VERSION}"
 )
 
-SEC_CH_UA = '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
-SEC_CH_UA_FULL_VERSION_LIST = '"Google Chrome";v="149.0.0.0", "Chromium";v="149.0.0.0", "Not)A;Brand";v="24.0.0.0"'
+SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"'
+SEC_CH_UA_FULL_VERSION_LIST = '"Chromium";v="146.0.0.0", "Not-A.Brand";v="24.0.0.0", "Google Chrome";v="146.0.0.0"'
 SEC_CH_UA_PLATFORM = '"macOS"'
 SEC_CH_UA_PLATFORM_VERSION = '"15.7.0"'
 SEC_CH_UA_MOBILE = "?0"
@@ -240,6 +240,7 @@ def build_browser_environment(geo: dict | None = None, base_profile: dict | None
         "accept_language": locale["accept_language"],
         "browser_family": BROWSER_FAMILY,
         "browser_os": BROWSER_OS,
+        "impersonate": IMPERSONATE,
         "navigator_platform": NAVIGATOR_PLATFORM,
         "navigator_vendor": NAVIGATOR_VENDOR,
         "user_agent_data_platform": USER_AGENT_DATA_PLATFORM,
@@ -273,24 +274,57 @@ def pick_browser_profile(geo: dict | None = None) -> dict:
 
 
 def validate_browser_profile(profile: dict) -> list[str]:
-    """返回画像内部矛盾点，主要用于日志/自测。"""
+    """返回 TLS、UA、Client Hints 与 JS OS 画像之间的矛盾点。"""
     issues: list[str] = []
     ua = str(profile.get("user_agent") or "")
     family = str(profile.get("browser_family") or BROWSER_FAMILY)
+    browser_os = str(profile.get("browser_os") or "")
+    impersonate = str(profile.get("impersonate") or "")
+    chrome_major = str(profile.get("chrome_major") or "")
     if family == "safari":
         if "Version/" not in ua or "Safari/" not in ua or "Chrome/" in ua or "Chromium/" in ua:
             issues.append("Safari UA 不一致")
         if profile.get("send_client_hints"):
             issues.append("Safari 不应发送 Chromium Client Hints")
-    elif f"Chrome/{profile.get('chrome_full_version')}" not in ua:
-        issues.append("UA 与 chrome_full_version 不一致")
-    if profile.get("browser_os") == "macOS":
+    else:
+        if f"Chrome/{profile.get('chrome_full_version')}" not in ua:
+            issues.append("UA 与 chrome_full_version 不一致")
+        tls_match = re.fullmatch(r"chrome(\d+)", impersonate)
+        if not tls_match:
+            issues.append("TLS impersonate 不是明确的 Chrome 版本")
+        elif tls_match.group(1) != chrome_major:
+            issues.append("TLS impersonate 与 UA Chrome 主版本不一致")
+        sec_ch_ua = str(profile.get("sec_ch_ua") or "")
+        if profile.get("send_client_hints") and f'v="{chrome_major}"' not in sec_ch_ua:
+            issues.append("sec-ch-ua 与 UA Chrome 主版本不一致")
+        full_version_list = str(profile.get("sec_ch_ua_full_version_list") or "")
+        if full_version_list and str(profile.get("chrome_full_version") or "") not in full_version_list:
+            issues.append("sec-ch-ua-full-version-list 与 UA 完整版本不一致")
+    if browser_os == "macOS":
         if "Macintosh; Intel Mac OS X" not in ua:
             issues.append("macOS 画像但 UA 不是 Macintosh")
         if str(profile.get("navigator_platform") or "") != "MacIntel":
             issues.append("macOS 画像但 navigator.platform 不是 MacIntel")
         if "macOS" not in str(profile.get("sec_ch_ua_platform") or ""):
             issues.append("macOS 画像但 sec-ch-ua-platform 不是 macOS")
+        if str(profile.get("user_agent_data_platform") or "") != "macOS":
+            issues.append("macOS 画像但 navigator.userAgentData.platform 不是 macOS")
+    elif browser_os == "Windows":
+        if "Windows NT" not in ua:
+            issues.append("Windows 画像但 UA 不是 Windows")
+        if str(profile.get("navigator_platform") or "") != "Win32":
+            issues.append("Windows 画像但 navigator.platform 不是 Win32")
+        if "Windows" not in str(profile.get("sec_ch_ua_platform") or ""):
+            issues.append("Windows 画像但 sec-ch-ua-platform 不是 Windows")
+    elif browser_os == "Linux":
+        if "Linux" not in ua:
+            issues.append("Linux 画像但 UA 不是 Linux")
+        if "Linux" not in str(profile.get("navigator_platform") or ""):
+            issues.append("Linux 画像但 navigator.platform 不是 Linux")
+        if "Linux" not in str(profile.get("sec_ch_ua_platform") or ""):
+            issues.append("Linux 画像但 sec-ch-ua-platform 不是 Linux")
+    else:
+        issues.append("browser_os 为空或不受支持")
     if not profile.get("navigator_language"):
         issues.append("navigator_language 为空")
     languages = profile.get("navigator_languages") or []

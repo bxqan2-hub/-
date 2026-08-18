@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from urllib.parse import urlparse
+from curl_cffi.const import CurlOpt
 from curl_cffi.requests import Session
 
 from config import (
@@ -32,7 +33,14 @@ class BrowserSession:
     使用 curl_cffi 的 impersonate 功能绕过 Cloudflare TLS 指纹检测。
     """
 
-    def __init__(self, proxy: str = None, *, detect_exit_geo: bool = True):
+    def __init__(
+        self,
+        proxy: str = None,
+        *,
+        detect_exit_geo: bool = True,
+        require_proxy: bool = False,
+        strict_fingerprint: bool = False,
+    ):
         """
         初始化会话。
 
@@ -42,6 +50,8 @@ class BrowserSession:
                    显式传 "" 表示禁用代理。
             detect_exit_geo: 是否探测出口 IP 并自动选择语言/时区画像。
                              套餐查询等短请求可关闭，避免额外网络等待。
+            require_proxy: 代理出口 fail-closed；禁止直连、socks5 本地 DNS 和请求级改路由。
+            strict_fingerprint: TLS impersonate、UA、Client Hints、JS OS 任一不一致即中止。
         """
         # proxy=None  → 从池里随机抽（默认行为）
         # proxy=""    → 禁用代理（直连）
@@ -50,6 +60,19 @@ class BrowserSession:
             self.proxy = pick_proxy()
         else:
             self.proxy = proxy
+        self.proxy = str(self.proxy or "").strip()
+        self.require_proxy = bool(require_proxy)
+        self.strict_fingerprint = bool(strict_fingerprint)
+        if self.require_proxy:
+            self._validate_strict_proxy(self.proxy)
+            if not detect_exit_geo:
+                raise RuntimeError("严格代理出口必须启用出口 IP 探测")
+
+        # 先创建会话唯一画像，再用画像中的 impersonate 和 UA 完成出口探测。
+        # 地区画像会在探测后刷新，但 TLS/UA/OS 字段在整个初始化和注册链路中保持不变。
+        self.browser_profile = pick_browser_profile({})
+        self.impersonate = str(self.browser_profile.get("impersonate") or IMPERSONATE)
+        self._validate_fingerprint_alignment()
 
         # 生成设备ID（oai-did），整个注册流程复用
         self.device_id = str(uuid.uuid4())
@@ -73,15 +96,24 @@ class BrowserSession:
         self.react_container_key = "__reactContainer$" + uuid.uuid4().hex[:11]
         self.react_resources_key = "__reactResources$" + self.react_container_key.split("$", 1)[1]
 
-        # 创建 curl_cffi 会话
-        self.session = Session(impersonate=IMPERSONATE)
-
-        # 设置代理
+        # 严格出口关闭环境变量/NO_PROXY 继承，只接受会话级固定代理；同时把目标和
+        # 重定向协议限定为 HTTPS，避免协议注册链在重定向时降级到明文或绕过代理。
+        session_kwargs = {"impersonate": self.impersonate}
         if self.proxy:
-            self.session.proxies = {
+            session_kwargs["proxies"] = {
                 "http": self.proxy,
                 "https": self.proxy,
             }
+        if self.require_proxy:
+            session_kwargs.update({
+                "trust_env": False,
+                "curl_options": {
+                    CurlOpt.NOPROXY: "",
+                    CurlOpt.PROTOCOLS_STR: "https",
+                    CurlOpt.REDIR_PROTOCOLS_STR: "https",
+                },
+            })
+        self.session = Session(**session_kwargs)
 
         # 设置超时
         self.session.timeout = REQUEST_TIMEOUT
@@ -93,14 +125,14 @@ class BrowserSession:
         # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
         # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
         self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
+        if self.require_proxy and not str(self.exit_geo.get("ip") or "").strip():
+            raise RuntimeError("严格代理出口验证失败：无法通过固定代理确认出口 IP")
         self._enforce_proxy_quality()
         self.browser_profile = pick_browser_profile(self.exit_geo)
         self.browser_profile["react_listening_key"] = self.react_listening_key
         self.browser_profile["react_container_key"] = self.react_container_key
         self.browser_profile["react_resources_key"] = self.react_resources_key
-        issues = validate_browser_profile(self.browser_profile)
-        if issues:
-            logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
+        self._validate_fingerprint_alignment()
 
         # 让 HTTP Cookie、OAuth 参数 ext-oai-did、Sentinel 里的 id 三者一致。
         # 浏览器里 oai-did 通常会作为一方 Cookie 存在；协议层主动补齐可减少同一会话内
@@ -110,6 +142,48 @@ class BrowserSession:
 
         # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
         self._cf_cookie_seen = self.cf_cookie_snapshot()
+
+    @staticmethod
+    def _validate_strict_proxy(proxy: str) -> None:
+        """严格代理仅允许能保证 HTTPS 隧道或远端 DNS 的显式 URL。"""
+        if not proxy:
+            raise RuntimeError("纯协议注册要求严格代理出口，当前未解析到代理，已停止直连")
+        parsed = urlparse(proxy)
+        scheme = (parsed.scheme or "").lower()
+        if scheme == "socks5":
+            raise RuntimeError("严格代理出口拒绝 socks5:// 本地 DNS；请改用 socks5h://")
+        if scheme not in ("http", "https", "socks5h"):
+            raise RuntimeError(f"严格代理出口不支持代理协议：{scheme or '空'}")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise RuntimeError("严格代理出口的代理端口非法") from exc
+        if not parsed.hostname or not port:
+            raise RuntimeError("严格代理出口要求完整的 proxy://host:port")
+
+    def _validate_fingerprint_alignment(self) -> None:
+        issues = validate_browser_profile(self.browser_profile)
+        profile_impersonate = str(self.browser_profile.get("impersonate") or "")
+        if getattr(self, "impersonate", profile_impersonate) != profile_impersonate:
+            issues.append("会话 TLS impersonate 与浏览器画像不一致")
+        if issues and self.strict_fingerprint:
+            raise RuntimeError("TLS/UA/OS 三层画像未严格对齐：" + "; ".join(issues))
+        if issues:
+            logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
+
+    def fingerprint_alignment(self) -> dict:
+        """返回本会话实际生效的 TLS、UA 与 OS 三层摘要。"""
+        profile = self.browser_profile
+        return {
+            "tls": self.impersonate,
+            "ua": str(profile.get("user_agent") or ""),
+            "ua_major": str(profile.get("chrome_major") or ""),
+            "os": str(profile.get("browser_os") or ""),
+            "sec_ch_ua_platform": str(profile.get("sec_ch_ua_platform") or ""),
+            "navigator_platform": str(profile.get("navigator_platform") or ""),
+            "proxy_enforced": self.require_proxy,
+            "exit_ip": str(self.exit_geo.get("ip") or ""),
+        }
 
     def cf_cookie_snapshot(self) -> dict:
         """返回当前 CookieJar 中的 Cloudflare 关键 Cookie 摘要，便于确认同 IP/同会话连续性。"""
@@ -252,13 +326,43 @@ class BrowserSession:
                 headers["sec-ch-ua-platform"] = str(profile.get("sec_ch_ua_platform") or SEC_CH_UA_PLATFORM)
             if SEND_HIGH_ENTROPY_CLIENT_HINTS:
                 headers.update({
-                    "sec-ch-ua-full-version-list": SEC_CH_UA_FULL_VERSION_LIST,
-                    "sec-ch-ua-platform-version": SEC_CH_UA_PLATFORM_VERSION,
-                    "sec-ch-ua-arch": SEC_CH_UA_ARCH,
-                    "sec-ch-ua-bitness": SEC_CH_UA_BITNESS,
-                    "sec-ch-ua-model": SEC_CH_UA_MODEL,
+                    "sec-ch-ua-full-version-list": str(profile.get("sec_ch_ua_full_version_list") or SEC_CH_UA_FULL_VERSION_LIST),
+                    "sec-ch-ua-platform-version": str(profile.get("sec_ch_ua_platform_version") or SEC_CH_UA_PLATFORM_VERSION),
+                    "sec-ch-ua-arch": str(profile.get("sec_ch_ua_arch") or SEC_CH_UA_ARCH),
+                    "sec-ch-ua-bitness": str(profile.get("sec_ch_ua_bitness") or SEC_CH_UA_BITNESS),
+                    "sec-ch-ua-model": str(profile.get("sec_ch_ua_model") or SEC_CH_UA_MODEL),
                 })
         return headers
+
+    def _prepare_strict_request(self, url: str, headers: dict | None, kwargs: dict) -> dict | None:
+        if not (self.require_proxy or self.strict_fingerprint):
+            return headers
+        parsed = urlparse(str(url))
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
+            raise RuntimeError("严格纯协议会话只允许有效的 HTTPS 目标")
+        if self.require_proxy:
+            self._validate_strict_proxy(self.proxy)
+            configured = dict(getattr(self.session, "proxies", {}) or {})
+            if configured.get("http") != self.proxy or configured.get("https") != self.proxy:
+                raise RuntimeError("严格代理出口检测到会话代理被修改")
+        forbidden = {
+            "proxy", "proxies", "interface", "doh_url",
+            "impersonate", "ja3", "akamai", "extra_fp",
+        }
+        overridden = sorted(forbidden.intersection(kwargs))
+        if overridden:
+            raise RuntimeError("严格纯协议会话禁止请求级覆盖：" + ", ".join(overridden))
+
+        expected = self._get_common_headers()
+        merged = dict(headers or {})
+        actual_keys = {str(key).lower(): key for key in merged}
+        for name, expected_value in expected.items():
+            actual_key = actual_keys.get(name.lower())
+            if actual_key is not None and str(merged[actual_key]) != str(expected_value):
+                raise RuntimeError(f"严格指纹检测到请求头 {name} 与会话画像不一致")
+            if actual_key is None:
+                merged[name] = expected_value
+        return merged
 
     def navigator_language(self) -> str:
         """当前会话画像里的 navigator.language。"""
@@ -495,6 +599,7 @@ class BrowserSession:
     def get(self, url: str, headers: dict = None, **kwargs):
         """发送 GET 请求"""
         self._raise_if_circuit_open()
+        headers = self._prepare_strict_request(url, headers, kwargs)
         headers = self._attach_openai_target_headers_for_url(url, headers)
         resp = self.session.get(url, headers=headers, **kwargs)
         return self._observe_response_for_circuit_breaker(resp, url)
@@ -502,6 +607,7 @@ class BrowserSession:
     def post(self, url: str, headers: dict = None, **kwargs):
         """发送 POST 请求"""
         self._raise_if_circuit_open()
+        headers = self._prepare_strict_request(url, headers, kwargs)
         headers = self._attach_openai_target_headers_for_url(url, headers)
         resp = self.session.post(url, headers=headers, **kwargs)
         return self._observe_response_for_circuit_breaker(resp, url)

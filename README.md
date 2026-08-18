@@ -2,7 +2,7 @@
 
 ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目支持三套注册驱动：
 
-- **protocol**：原纯协议注册，基于 `curl_cffi` + Sentinel/PoW。
+- **protocol**：纯协议注册，基于 `curl_cffi` + Sentinel/PoW；强制 TLS/UA/OS 三层对齐并固定代理出口。
 - **roxy**：RoxyBrowser 指纹浏览器 + Selenium 自动化注册，兼容新版页面流，例如 `create-account/password`、`about-you` 年龄/生日表单、地区本地化页面等。
 - **cloak**：CloakBrowser + Playwright 适配层自动化注册，支持免费 binary、无头模式、humanize、固定 fingerprint seed、代理 geoip。
 - **browser_use**：Browser Use Cloud stealth Chromium + Playwright（可选住宅代理，无需本机安装 Roxy）。
@@ -314,7 +314,12 @@ CLOAK_USER_DATA_DIR = ""        # 留空临时环境；填路径可持久化 pro
 REGISTRATION_DRIVER = "protocol"
 ```
 
-协议注册会使用 `curl_cffi`、Sentinel/PoW、代理池等配置。
+协议注册会使用 `curl_cffi`、Sentinel/PoW、代理池等配置，并按 fail-closed 规则执行：
+
+- TLS 固定为 `chrome146` impersonate；UA、`sec-ch-ua*`、`navigator.platform` 与 JS OS 同步使用 Chrome 146 macOS 画像，任一层不一致即停止。
+- 每个注册会话只绑定一条代理，关闭环境变量/`NO_PROXY` 继承，禁止请求级覆盖代理或 TLS 指纹。
+- 代理必须能确认出口 IP；代理缺失、探测失败或连接失败时停止，不回退直连。
+- SOCKS 代理必须写成 `socks5h://`，避免 `socks5://` 在本地解析目标域名。
 
 #### 使用 Browser Use Cloud 注册
 
@@ -398,6 +403,7 @@ PROXY_API_FAIL_CLOSED="True"
 - `PROXY_API_MAX_ATTEMPTS=3` 会在前两次失败后等待 3 秒、6 秒再取；第三次仍失败才结束注册任务。
 - `PROXY_API_CACHE_SECONDS=0` 表示每个新会话重新获取；需要多个并发任务共用同一条时再设置短缓存。
 - `PROXY_API_FAIL_CLOSED=True` 表示 API 失败就停止任务，不会静默直连。
+- `protocol` 注册始终要求显式代理出口；静态池/系统代理/API 代理均未解析到可用 URL 时任务直接停止。`http://`、`https://`、`socks5h://` 可用，`socks5://` 会因本地 DNS 风险被拒绝。
 - WebUI「代理池」配置区提供“获取并测试”按钮，可查看实际出口 IP 和地区。
 - Roxy API 代理模式会自动把代理写入新建 Profile，无需另外开启 `ROXY_CREATE_USE_PROXY_POOL`；Cloak 需要保持 `CLOAK_USE_PROXY=True`。
 

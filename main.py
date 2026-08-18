@@ -230,8 +230,13 @@ def run_registration(
             f"不支持的 REGISTRATION_DRIVER={driver_mode!r}，可选 protocol / roxy / cloak / browser_use / skyvern"
         )
 
-    # 创建浏览器会话（proxy=None 时自动从 config.PROXY_POOL 随机抽一个）
-    session = BrowserSession(proxy=proxy)
+    # 纯协议注册强制 fail-closed：必须解析到显式代理，并把 TLS impersonate、
+    # User-Agent/Client Hints 与 JS OS 画像绑定为同一份会话配置。
+    session = BrowserSession(
+        proxy=proxy,
+        require_proxy=True,
+        strict_fingerprint=True,
+    )
 
     # 从代理 URL 中抽取 sid 段做日志，避免把账号密码完整打印
     proxy_label = "无"
@@ -251,6 +256,14 @@ def run_registration(
 
     logger.info(f"[注册] 开始：{email}，代理={proxy_label}")
     logger.info(f"[注册] 本次随机生日: {birthday}")
+    alignment = session.fingerprint_alignment()
+    logger.info(
+        "[注册] 严格三层对齐：TLS=%s UA=Chrome/%s OS=%s "
+        "sec-ch-platform=%s navigator.platform=%s 出口IP=%s",
+        alignment["tls"], alignment["ua_major"], alignment["os"],
+        alignment["sec_ch_ua_platform"], alignment["navigator_platform"],
+        alignment["exit_ip"],
+    )
     logger.debug(f"[注册] 设备ID={session.device_id}，会话日志ID={session.auth_session_logging_id}")
 
     create_acknowledged = False

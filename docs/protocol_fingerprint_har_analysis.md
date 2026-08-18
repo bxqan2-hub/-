@@ -96,7 +96,7 @@ HAR 没有直接保存 `.js` 响应正文，但从 Sentinel `p[5]` 还原出被�
 2. `https://chatgpt.com/cdn-cgi/challenge-platform/scripts/jsd/api.js?onload=jsdOnload`
 3. `https://sentinel.openai.com/sentinel/20260219f9f6/sdk.js`
 
-项目本地已有 SDK 文件：`sentinel/sdk.js`；Node VM 执行器为 `sentinel/sentinel-runner.js`。本轮已按 HAR 补齐 runner 的 Chrome 149 DOM/Navigator/Window 样本。
+项目本地已有 SDK 文件：`sentinel/sdk.js`；Node VM 执行器为 `sentinel/sentinel-runner.js`。DOM/Navigator/Window 字段按 HAR 样本补齐；运行时版本字段统一由当前严格画像注入。
 
 ## 5. 已同步到代码的纯协议细节
 
@@ -105,9 +105,11 @@ HAR 没有直接保存 `.js` 响应正文，但从 Sentinel `p[5]` 还原出被�
   - 新增 `OAI_CLIENT_BUILD_NUMBER=8370486`、`OAI_CLIENT_VERSION`
   - 补齐 Statsig/AB SDK key/version 常量。
 - `config/browser.py`
-  - 切到 Chrome 149 HTTP/JS 画像：UA、Client Hints、动态语言/时区；窗口/屏幕尺寸从画像池随机选择，HAR 的 `1680x1050` / `hardwareConcurrency=6` / `jsHeapSizeLimit=4395630592` 只作为候选之一。
+  - HAR 记录的是 Chrome 149，但当前 `curl_cffi` 内置 TLS 模板最高为 `chrome146`，因此严格运行画像统一固定为 Chrome 146；TLS impersonate、UA、Client Hints 与 JS OS 不再跨版本拼接。
+  - 动态语言/时区继续跟随代理出口；窗口/屏幕尺寸从画像池随机选择，HAR 的 `1680x1050` / `hardwareConcurrency=6` / `jsHeapSizeLimit=4395630592` 只作为候选之一。
   - 补齐 `createAuctionNonce`、`clearOriginJoinedAdInterestGroups`、`login`、`locationbar`、`scrollX`、`ondevicemotion` 等 HAR 出现的采样键。
 - `core/session.py`
+  - 纯协议注册启用严格校验：TLS/UA/OS 不一致、代理缺失、出口 IP 无法确认或请求级改路由时立即停止，不回退直连。
   - 所有前端 API 请求统一补 `oai-client-build-number`、`oai-client-version`、`oai-session-id`。
   - 会话内新增稳定 `react_container_key`，与 `react_listening_key` 一起供 p[11] 抽样。
 - `core/sentinel.py`
