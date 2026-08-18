@@ -57,7 +57,7 @@ class BrowserSession:
         # proxy=""    → 禁用代理（直连）
         # proxy="..." → 使用指定代理
         if proxy is None:
-            self.proxy = pick_proxy()
+            self.proxy = pick_proxy(strict=bool(require_proxy))
         else:
             self.proxy = proxy
         self.proxy = str(self.proxy or "").strip()

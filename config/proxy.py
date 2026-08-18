@@ -44,6 +44,9 @@ logger = logging.getLogger(__name__)
 PROXY_POOL = [
     "http://127.0.0.1:10808",
 ]
+# 静态池当前选中项。填写与 PROXY_POOL 中解析后的代理 URL 相同的值；
+# 为空时普通非协议任务仍可轮询，严格纯协议注册会在多条静态代理时拒绝未选择状态。
+PROXY_POOL_ACTIVE = ""
 
 # ---- API 代理（Cliproxy 白名单模式）----
 # 开启后，pick_proxy() 优先调用 API 获取临时代理；静态 PROXY_POOL 可以留空。
@@ -588,7 +591,7 @@ def fetch_proxy_from_api(
     return str(flight["proxy"])
 
 
-def _pick_static_or_system_proxy() -> str:
+def _pick_static_or_system_proxy(*, strict: bool = False) -> str:
     global _STATIC_PROXY_INDEX
     entries = list(PROXY_POOL or [])
     if not entries:
@@ -600,14 +603,23 @@ def _pick_static_or_system_proxy() -> str:
         if proxy:
             resolved.append(proxy)
     if resolved:
+        active = _normalize_proxy_url(str(PROXY_POOL_ACTIVE or "").strip())
+        if active:
+            if active not in resolved:
+                raise RuntimeError("PROXY_POOL_ACTIVE 不在当前 PROXY_POOL 中，已停止避免错用代理")
+            return active
+        if strict and len(resolved) > 1:
+            raise RuntimeError("纯协议注册要求先选择 PROXY_POOL_ACTIVE，禁止在多条静态代理之间轮询")
         with _STATIC_PROXY_LOCK:
             selected = resolved[_STATIC_PROXY_INDEX % len(resolved)]
             _STATIC_PROXY_INDEX += 1
         return selected
+    if strict:
+        raise RuntimeError("严格代理出口未解析到静态代理或系统代理")
     return detect_system_proxy()
 
 
-def pick_proxy() -> str:
+def pick_proxy(*, strict: bool = False) -> str:
     """从代理池中轮询抽取一个代理 URL。
 
     - 池为空，或条目为 system/auto：跟随当前系统代理
@@ -617,15 +629,15 @@ def pick_proxy() -> str:
         try:
             return fetch_proxy_from_api()
         except Exception:
-            if bool(PROXY_API_FAIL_CLOSED):
+            if strict or bool(PROXY_API_FAIL_CLOSED):
                 raise
             logger.exception("[代理API] 获取失败，按配置回退静态代理池/系统代理")
-    return _pick_static_or_system_proxy()
+    return _pick_static_or_system_proxy(strict=strict)
 
 
-def pick_local_proxy() -> str:
+def pick_local_proxy(*, strict: bool = False) -> str:
     """只读取本地静态池/系统代理，不调用远程代理 API。"""
-    return _pick_static_or_system_proxy()
+    return _pick_static_or_system_proxy(strict=strict)
 
 
 # 兼容入口；实际注册流程使用 pick_proxy()，API 代理保持按会话实时获取。
@@ -634,6 +646,7 @@ PROXY = ""
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'PROXY_POOL': 'list_str_multiline',
+    'PROXY_POOL_ACTIVE': 'str',
     'PROXY_API_ENABLED': 'bool',
     'PROXY_API_URL': 'str',
     'PROXY_API_PROFILES': 'list_str_multiline',

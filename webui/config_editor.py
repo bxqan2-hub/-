@@ -533,6 +533,10 @@ EDITABLE_FIELDS = [
         "label": "静态代理池(每行一个)", "help": "API代理开启时可留空；关闭API代理时，每行填写一个代理 URL",
     },
     {
+        "key": "PROXY_POOL_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "静态池当前代理", "help": "填写 PROXY_POOL 中要使用的完整代理 URL；纯协议多条静态代理时必须选择",
+    },
+    {
         "key": "PROXY_API_ENABLED", "file": "proxy.py", "type": "bool", "group": "代理池",
         "label": "启用API代理", "help": "开启后每个新注册会话/指纹环境优先实时调用代理 API，静态代理池可留空",
     },
