@@ -65,6 +65,15 @@ class ProtocolFingerprintAlignmentTests(TestCase):
         self.assertEqual(session.session.proxies["http"], session.proxy)
         self.assertEqual(session.session.proxies["https"], session.proxy)
 
+    @patch.object(BrowserSession, "_detect_exit_geo", return_value=_EXIT_GEO)
+    @patch("core.session.pick_proxy", return_value="http://selected-proxy.example:8080")
+    def test_strict_session_resolves_the_selected_pool_proxy_once(self, pick_proxy, _detect_exit_geo):
+        session = BrowserSession(require_proxy=True, strict_fingerprint=True)
+        self.addCleanup(session.session.close)
+
+        pick_proxy.assert_called_once_with(strict=True)
+        self.assertEqual(session.proxy, "http://selected-proxy.example:8080")
+
     @patch("core.session.pick_proxy", return_value="")
     def test_strict_session_fails_closed_without_proxy(self, _pick_proxy):
         with self.assertRaisesRegex(RuntimeError, "要求严格代理出口"):
