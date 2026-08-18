@@ -335,6 +335,41 @@ class ProxyApiTests(unittest.TestCase):
                 proxy_cfg.pick_proxy()
         fallback.assert_not_called()
 
+    def test_strict_pick_proxy_uses_selected_static_entry(self):
+        selected = "http://user:pass@proxy-two.example:8080"
+        with (
+            patch.object(proxy_cfg, "PROXY_API_ENABLED", False),
+            patch.object(proxy_cfg, "PROXY_POOL", [
+                "http://proxy-one.example:8080",
+                selected,
+            ]),
+            patch.object(proxy_cfg, "PROXY_POOL_ACTIVE", selected),
+        ):
+            self.assertEqual(proxy_cfg.pick_proxy(strict=True), selected)
+
+    def test_strict_pick_proxy_rejects_unselected_static_pool(self):
+        with (
+            patch.object(proxy_cfg, "PROXY_API_ENABLED", False),
+            patch.object(proxy_cfg, "PROXY_POOL", [
+                "http://proxy-one.example:8080",
+                "http://proxy-two.example:8080",
+            ]),
+            patch.object(proxy_cfg, "PROXY_POOL_ACTIVE", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "PROXY_POOL_ACTIVE"):
+                proxy_cfg.pick_proxy(strict=True)
+
+    def test_strict_pick_proxy_never_falls_back_from_selected_api(self):
+        with (
+            patch.object(proxy_cfg, "PROXY_API_ENABLED", True),
+            patch.object(proxy_cfg, "PROXY_API_FAIL_CLOSED", False),
+            patch.object(proxy_cfg, "fetch_proxy_from_api", side_effect=RuntimeError("api down")),
+            patch.object(proxy_cfg, "_pick_static_or_system_proxy") as fallback,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "api down"):
+                proxy_cfg.pick_proxy(strict=True)
+        fallback.assert_not_called()
+
     def test_webui_exposes_proxy_api_fields(self):
         keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
         self.assertTrue({
@@ -342,6 +377,7 @@ class ProxyApiTests(unittest.TestCase):
             "PROXY_API_URL",
             "PROXY_API_PROFILES",
             "PROXY_API_ACTIVE",
+            "PROXY_POOL_ACTIVE",
             "PROXY_API_PROTOCOL",
             "PROXY_API_FAIL_CLOSED",
         }.issubset(keys))
