@@ -1296,8 +1296,8 @@ def _restart_email_otp_from_login(driver, email: str) -> str:
     _page_warmup(driver, reason="otp_navigation_error_recovery")
     state = _submit_email_and_wait_next(driver, email, attempts=2)
     if state == "otp":
-        _wait_for_otp_input(driver, timeout=30)
-        return "otp"
+        wait_state = _wait_for_otp_input(driver, timeout=30)
+        return wait_state if wait_state in {"email_verified", "profile", "logged_in"} else "otp"
     if state == "logged_in":
         return "logged_in"
     advanced = _otp_flow_advanced_state(driver)
@@ -1307,8 +1307,8 @@ def _restart_email_otp_from_login(driver, email: str) -> str:
     if _is_signup_password_page(driver):
         logger.warning("%s[OTP] 页面退回创建密码步骤，重新提交密码后恢复验证码页", _log_prefix(driver))
         _fill_password_page_if_present(driver, email, timeout=25)
-        _wait_for_otp_input(driver, timeout=30)
-        return "otp"
+        wait_state = _wait_for_otp_input(driver, timeout=30)
+        return wait_state if wait_state in {"email_verified", "profile", "logged_in"} else "otp"
     raise RuntimeError(
         f"OTP 导航错误恢复后未进入验证码页: state={state}, snapshot={_email_otp_page_state(driver)}"
     )
@@ -1761,15 +1761,15 @@ def _prepare_next_email_otp_attempt(driver, email: str) -> str:
     if _is_signup_password_page(driver):
         logger.warning("%s[OTP] 页面退回创建密码步骤，重新提交密码后恢复验证码页", _log_prefix(driver))
         _fill_password_page_if_present(driver, email, timeout=25)
-        _wait_for_otp_input(driver, timeout=30)
-        return "otp"
+        wait_state = _wait_for_otp_input(driver, timeout=30)
+        return wait_state if wait_state in {"email_verified", "profile", "logged_in"} else "otp"
 
     if _is_email_login_page_still_present(driver):
         logger.warning("%s[OTP] 页面已退回邮箱登录页，重新填写邮箱并申请新验证码", _log_prefix(driver))
         state = _submit_email_and_wait_next(driver, email, attempts=2)
         if state == "otp":
-            _wait_for_otp_input(driver, timeout=30)
-            return "otp"
+            wait_state = _wait_for_otp_input(driver, timeout=30)
+            return wait_state if wait_state in {"email_verified", "profile", "logged_in"} else "otp"
         if state == "logged_in":
             return "logged_in"
         advanced = _otp_flow_advanced_state(driver)
@@ -1782,7 +1782,9 @@ def _prepare_next_email_otp_attempt(driver, email: str) -> str:
     if _is_email_verification_page(driver):
         action = _click_resend_email_otp(driver, timeout=25)
         if action.get("acknowledged") is False:
-            _reload_stuck_otp_page(driver)
+            reloaded_state = _reload_stuck_otp_page(driver)
+            if reloaded_state in ("profile", "logged_in", "email_verified"):
+                return reloaded_state
             retry_action = _click_resend_email_otp(driver, timeout=15)
             if retry_action.get("acknowledged") is False:
                 raise RuntimeError("OTP resend had no acknowledgement after one page reload; stopping blind polling")
@@ -1799,8 +1801,8 @@ def _prepare_next_email_otp_attempt(driver, email: str) -> str:
                     logger.warning("%s[OTP] 点击再试一次后回到邮箱登录页，重新填写邮箱并申请新验证码", _log_prefix(driver))
                     state = _submit_email_and_wait_next(driver, email, attempts=2)
                     if state == "otp":
-                        _wait_for_otp_input(driver, timeout=30)
-                        return "otp"
+                        wait_state = _wait_for_otp_input(driver, timeout=30)
+                        return wait_state if wait_state in {"email_verified", "profile", "logged_in"} else "otp"
                     if state == "logged_in":
                         return "logged_in"
                     raise RuntimeError(
@@ -1808,6 +1810,8 @@ def _prepare_next_email_otp_attempt(driver, email: str) -> str:
                     )
                 if _is_email_verification_page(driver):
                     snapshot = _email_otp_page_state(driver)
+                    if _email_otp_verified_success(snapshot):
+                        return "email_verified"
                     has_input = bool(snapshot.get("inputs"))
                     has_error = bool(snapshot.get("errors")) or any(
                         str(i.get("ariaInvalid") or "").lower() == "true"
@@ -1817,7 +1821,9 @@ def _prepare_next_email_otp_attempt(driver, email: str) -> str:
                         return "otp"
                 time.sleep(0.8)
         try:
-            _wait_for_otp_input(driver, timeout=30)
+            wait_state = _wait_for_otp_input(driver, timeout=30)
+            if wait_state in {"email_verified", "profile", "logged_in"}:
+                return wait_state
         except RuntimeError as exc:
             snapshot = _email_otp_page_state(driver)
             snapshot_url = str(snapshot.get("url") or "").lower()
@@ -2783,7 +2789,12 @@ def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None)
     otp_after_ts = time.time()
     state = _resume_chatgpt_login_callback(driver, email=email)
     if state == "otp":
-        _wait_for_otp_input(driver, timeout=30)
+        wait_state = _wait_for_otp_input(driver, timeout=30)
+        if wait_state == "email_verified":
+            state = _resume_chatgpt_login_callback(driver, email=email)
+        else:
+            state = "otp"
+    if state == "otp":
         code = wait_for_otp(
             email,
             after_ts=otp_after_ts,
@@ -2795,11 +2806,13 @@ def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None)
         _type_otp(driver, code)
         if _is_email_verification_page(driver):
             _click_continue(driver)
-        outcome = _wait_after_email_otp_submit(driver, timeout=35)
+        outcome = _wait_after_email_otp_submit(driver, timeout=45)
         if outcome not in {"accepted", "email_verified", "profile", "logged_in"}:
             raise RuntimeError(f"可见窗口 OTP 恢复未完成: {outcome}")
         if outcome == "email_verified":
-            _resume_chatgpt_login_callback(driver, email=email)
+            state = _resume_chatgpt_login_callback(driver, email=email)
+            if state == "otp":
+                raise RuntimeError("Email verified callback still requires OTP")
     elif state not in {"logged_in", "profile", "email_verified"}:
         raise RuntimeError(f"可见窗口登录恢复未进入下一步: {state}")
     return _fetch_chatgpt_session(
@@ -3066,7 +3079,17 @@ def run_roxy_registration(
                     current_otp = None
                     continue
             logger.info("[Roxy注册][OTP] 收到验证码：%s", current_otp)
-            _wait_for_otp_input(driver, timeout=30)
+            otp_ready = _wait_for_otp_input(driver, timeout=30)
+            if otp_ready == "email_verified":
+                logger.info("[Roxy][OTP] Email verified page appeared before OTP input; resuming ChatGPT callback")
+                callback_state = _resume_chatgpt_login_callback(driver, email=email)
+                if callback_state == "otp":
+                    if otp_attempt >= max_otp_attempts:
+                        raise RuntimeError("Email verified callback still requires OTP after maximum retries")
+                    otp_after_ts = time.time()
+                    current_otp = None
+                    continue
+                break
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
             logger.info("[Roxy注册][OTP] 已填写邮箱验证码")
@@ -3093,10 +3116,10 @@ def run_roxy_registration(
             else:
                 logger.info("[Roxy注册][OTP] 输入后已离开验证码页，判定页面已自动提交")
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=25)
+            outcome = _wait_after_email_otp_submit(driver, timeout=45)
             if outcome == 'pending':
                 logger.info("[Roxy注册][OTP] 未发现明确错误，延长等待 10 秒，不立即重发验证码")
-                outcome = _wait_after_email_otp_submit(driver, timeout=10)
+                outcome = _wait_after_email_otp_submit(driver, timeout=20)
             if outcome == 'accepted':
                 break
             if outcome == 'email_verified':
