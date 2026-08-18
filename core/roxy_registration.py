@@ -2820,6 +2820,22 @@ def _fetch_or_recover_chatgpt_session(
         if callable(should_stop) and should_stop():
             raise RuntimeError("AT 获取已停止")
 
+    # OTP 成功后，auth.openai.com 偶尔会短暂停留在“Email verified / already
+    # been verified”确认页，而不是立刻跳回 ChatGPT。这个页面代表邮箱验证
+    # 已完成，不应当被当成错误页继续等待 OTP 或直接判定跳转失败。
+    try:
+        if _otp_flow_advanced_state(driver) == "email_verified":
+            logger.info(
+                "%s 检测到 Email verified 确认页，主动恢复 ChatGPT OAuth callback",
+                _log_prefix(driver),
+            )
+            _resume_chatgpt_login_callback(driver, email=email)
+    except Exception as exc:
+        logger.warning(
+            "%s Email verified 确认页 callback 恢复失败，继续使用 session 检查：%s",
+            _log_prefix(driver), str(exc)[:240],
+        )
+
     try:
         return _fetch_chatgpt_session(
             driver,

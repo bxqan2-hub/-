@@ -107,6 +107,23 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 registration_created=False,
             )
 
+    @patch.object(roxy_registration, "_resume_chatgpt_login_callback")
+    @patch.object(roxy_registration, "_otp_flow_advanced_state", return_value="email_verified")
+    @patch.object(roxy_registration, "_fetch_chatgpt_session", return_value={"accessToken": "verified-at"})
+    def test_email_verified_confirmation_page_resumes_callback_before_session_read(
+        self, _fetch, _advanced_state, resume_callback
+    ):
+        result = roxy_registration._fetch_or_recover_chatgpt_session(
+            MagicMock(),
+            email="verified@example.com",
+            proxy=None,
+            registration_created=True,
+            should_stop=None,
+        )
+
+        self.assertEqual(result["accessToken"], "verified-at")
+        resume_callback.assert_called_once_with(ANY, email="verified@example.com")
+
     @patch("core.account_liveness.check_account_liveness")
     @patch.object(roxy_registration, "_fetch_chatgpt_session", side_effect=RuntimeError("AT 获取已停止"))
     def test_stopped_task_does_not_start_email_relogin(self, _fetch, live_check):
