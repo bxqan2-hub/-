@@ -58,6 +58,9 @@ ROXY_OPEN_EXTRA_PARAMS: dict = {}
 # Selenium 行为
 ROXY_SELENIUM_TIMEOUT: int = 90
 ROXY_KEEP_BROWSER_OPEN: bool = False
+# Starting too many Roxy Chrome/chromedriver pairs at once can fail before
+# Selenium attaches (Windows status 3221225794 / 0xC0000142).
+ROXY_MAX_CONCURRENT_REGISTRATIONS: int = 2
 
 # Conservative registration traffic optimization for Roxy/Selenium.
 ROXY_LOW_TRAFFIC: bool = True
@@ -142,6 +145,7 @@ ROXY_CODEX_CALLBACK_TIMEOUT: int = 180
 apply_env_overrides(globals(), {'REGISTRATION_DRIVER': 'str', 'ROXY_API_BASE': 'str', 'ROXY_API_TOKEN': 'str', 'ROXY_PROFILE_ID': 'str', 'ROXY_WORKSPACE_ID': 'str', 'ROXY_PROJECT_ID': 'str', 'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool', 'ROXY_CLOSE_PATH': 'str', 'ROXY_KEEP_BROWSER_OPEN': 'bool', 'ROXY_POST_REGISTRATION_CHAT_ENABLED': 'bool', 'ROXY_POST_REGISTRATION_CHAT_PROMPT': 'str', 'ROXY_POST_REGISTRATION_CHAT_TIMEOUT': 'int', 'GC_REGISTRATION_MODE': 'bool', 'ROXY_ONE_PROFILE_PER_ACCOUNT': 'bool', 'ROXY_DELETE_PROFILE_AFTER_RUN': 'bool', 'ROXY_RANDOM_OS_ON_CREATE': 'bool', 'ROXY_RANDOM_OS_CHOICES': 'str', 'ROXY_DEFAULT_OS': 'str', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE': 'bool', 'ROXY_PROFILE_NAME_PREFIX': 'str', 'ROXY_CREATE_USE_PROXY_POOL': 'bool', 'ROXY_PROXY_CHECK_CHANNEL': 'str', 'ROXY_PROXY_PREFLIGHT_ATTEMPTS': 'int', 'ROXY_PROXY_PREFLIGHT_RETRY_DELAY': 'float', 'ROXY_BROWSER_EXIT_IP_ATTEMPTS': 'int', 'ROXY_BROWSER_EXIT_IP_RETRY_DELAY': 'float', 'ROXY_DELETE_PATH': 'str', 'ROXY_CODEX_CALLBACK_TIMEOUT': 'int'})
 apply_env_overrides(globals(), {
     'ROXY_LOW_TRAFFIC': 'bool',
+    'ROXY_MAX_CONCURRENT_REGISTRATIONS': 'int',
     'ROXY_STATIC_CACHE': 'bool',
     'ROXY_TRAFFIC_CAPTURE': 'bool',
     'ROXY_TRAFFIC_BUDGET_BYTES': 'int',

@@ -74,7 +74,38 @@ def _build_driver(opened: RoxyOpenResult):
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
+    from selenium.common.exceptions import WebDriverException
     from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+
+    def _launch(service_path: str = ""):
+        if service_path:
+            return webdriver.Chrome(service=Service(executable_path=service_path), options=options)
+        return webdriver.Chrome(options=options)
+
+    def _is_startup_failure(exc: BaseException) -> bool:
+        message = str(exc or "").lower()
+        return "unexpectedly exited" in message and (
+            "3221225794" in message or "0xc0000142" in message
+        )
+
+    def _launch_with_retry(service_path: str = ""):
+        last: BaseException | None = None
+        for attempt in range(1, 4):
+            try:
+                return _launch(service_path)
+            except WebDriverException as exc:
+                last = exc
+                if not _is_startup_failure(exc) or attempt >= 3:
+                    raise
+                delay = min(5.0, 1.5 * attempt)
+                logger.warning(
+                    "[Roxy] chromedriver 启动失败（DLL 初始化/资源瞬时错误），%ss 后重试 %s/3：%s",
+                    delay,
+                    attempt + 1,
+                    str(exc).splitlines()[0] if str(exc) else type(exc).__name__,
+                )
+                time.sleep(delay)
+        raise last or RuntimeError("chromedriver 启动失败")
 
     if opened.debugger_address:
         logger.info("[Roxy] Selenium 连接 debuggerAddress=%s", opened.debugger_address)
@@ -92,9 +123,9 @@ def _build_driver(opened: RoxyOpenResult):
             driver_path = ""
         if driver_path:
             logger.info("[Roxy] 使用 Roxy chromedriver=%s", driver_path)
-            driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
+            driver = _launch_with_retry(driver_path)
         else:
-            driver = webdriver.Chrome(options=options)
+            driver = _launch_with_retry()
         _apply_browser_automation_mask(driver)
         return driver
 
