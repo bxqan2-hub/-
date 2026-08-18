@@ -126,7 +126,8 @@ class BrowserSession:
                     CurlOpt.REDIR_PROTOCOLS_STR: "https",
                 },
             })
-        self.session = Session(**session_kwargs)
+        self._session_kwargs = session_kwargs
+        self.session = self._new_transport()
 
         # 设置超时
         self.session.timeout = REQUEST_TIMEOUT
@@ -147,14 +148,69 @@ class BrowserSession:
         self.browser_profile["react_resources_key"] = self.react_resources_key
         self._validate_fingerprint_alignment()
 
-        # 让 HTTP Cookie、OAuth 参数 ext-oai-did、Sentinel 里的 id 三者一致。
-        # 浏览器里 oai-did 通常会作为一方 Cookie 存在；协议层主动补齐可减少同一会话内
-        # “头部/参数/JS 指纹有设备 ID，但 Cookie Jar 为空”的不一致。
-        for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
-            self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
-
-        # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
+        # oai-did 与 Cloudflare Cookie 都只接受服务端真实 Set-Cookie。首个成功的
+        # ChatGPT 页面响应会下发 oai-did，届时再把 OAuth/诊断上下文同步到该值。
         self._cf_cookie_seen = self.cf_cookie_snapshot()
+
+    def _new_transport(self) -> Session:
+        transport = Session(**dict(self._session_kwargs))
+        transport.timeout = REQUEST_TIMEOUT
+        return transport
+
+    def _sync_device_id_from_cookie(self) -> None:
+        """Adopt the server-issued ChatGPT oai-did after the first valid page response."""
+        try:
+            for cookie in self.session.cookies.jar:
+                if getattr(cookie, "name", "") != "oai-did":
+                    continue
+                domain = str(getattr(cookie, "domain", "") or "").lower()
+                value = str(getattr(cookie, "value", "") or "").strip()
+                if "chatgpt.com" not in domain or not value:
+                    continue
+                if value != self.device_id:
+                    logger.info("[设备] 采用服务端 oai-did，保持 Cookie/OAuth 上下文一致")
+                    self.device_id = value
+                return
+        except Exception:
+            return
+
+    def _challenge_retry_policy(self) -> tuple[int, float]:
+        try:
+            from config import openai_protocol as protocol_cfg
+            attempts = int(getattr(protocol_cfg, "PROTOCOL_CF_TRANSPORT_ATTEMPTS", 30) or 30)
+            delay = float(getattr(protocol_cfg, "PROTOCOL_CF_RETRY_DELAY", 0.25) or 0)
+        except Exception:
+            attempts, delay = 30, 0.25
+        return max(1, min(attempts, 60)), max(0.0, min(delay, 5.0))
+
+    def _rebuild_transport_after_challenge(self, url: str) -> None:
+        """Rotate only the transport while retaining non-Cloudflare flow cookies."""
+        retained = []
+        try:
+            for cookie in self.session.cookies.jar:
+                name = str(getattr(cookie, "name", "") or "")
+                if name in _CF_COOKIE_NAMES or name == "_cfuvid":
+                    continue
+                retained.append((
+                    name,
+                    str(getattr(cookie, "value", "") or ""),
+                    str(getattr(cookie, "domain", "") or ""),
+                    str(getattr(cookie, "path", "") or "/"),
+                ))
+        except Exception:
+            retained = []
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        self.session = self._new_transport()
+        for name, value, domain, path in retained:
+            if name and domain:
+                self.session.cookies.set(name, value, domain=domain, path=path or "/")
+        self.blocked_until = 0.0
+        self.blocked_reason = ""
+        self._cf_cookie_seen = self.cf_cookie_snapshot()
+        logger.debug("[CF] 已用同一所选代理端点重建 transport: %s", url)
 
     @staticmethod
     def _validate_strict_proxy(proxy: str) -> None:
@@ -274,10 +330,12 @@ class BrowserSession:
             return {}
 
         cache_key = self.proxy or "__direct__"
-        with _GEO_CACHE_LOCK:
-            cached = _GEO_CACHE.get(cache_key)
-            if cached is not None:
-                return dict(cached)
+        use_cache = not self.require_proxy
+        if use_cache:
+            with _GEO_CACHE_LOCK:
+                cached = _GEO_CACHE.get(cache_key)
+                if cached is not None:
+                    return dict(cached)
 
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         for url in endpoints:
@@ -288,8 +346,9 @@ class BrowserSession:
                 data = resp.json()
                 geo = self._normalize_geo_response(data)
                 if geo.get("country") or geo.get("timezone"):
-                    with _GEO_CACHE_LOCK:
-                        _GEO_CACHE[cache_key] = dict(geo)
+                    if use_cache:
+                        with _GEO_CACHE_LOCK:
+                            _GEO_CACHE[cache_key] = dict(geo)
                     logger.info(
                         "[指纹] 出口IP地理信息: ip=%s country=%s city=%s timezone=%s",
                         geo.get("ip") or "?", geo.get("country") or "?",
@@ -299,8 +358,9 @@ class BrowserSession:
             except Exception as exc:
                 logger.debug(f"[指纹] 出口 IP 地理检测失败 endpoint={url}: {type(exc).__name__}: {exc}")
                 continue
-        with _GEO_CACHE_LOCK:
-            _GEO_CACHE[cache_key] = {}
+        if use_cache:
+            with _GEO_CACHE_LOCK:
+                _GEO_CACHE[cache_key] = {}
         return {}
 
     @staticmethod
@@ -600,6 +660,8 @@ class BrowserSession:
     def _observe_response_for_circuit_breaker(self, resp, url: str):
         status = int(getattr(resp, "status_code", 0) or 0)
         self._observe_cf_cookie_changes(url)
+        if status < 400:
+            self._sync_device_id_from_cookie()
         if status not in (403, 429):
             return resp
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
@@ -618,18 +680,36 @@ class BrowserSession:
             logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), url)
         return resp
 
+    def _request_with_challenge_rotation(self, method: str, url: str, headers: dict | None, kwargs: dict):
+        attempts, retry_delay = self._challenge_retry_policy()
+        for attempt in range(1, attempts + 1):
+            self._raise_if_circuit_open()
+            request = getattr(self.session, method)
+            resp = request(url, headers=headers, **kwargs)
+            if not is_cloudflare_challenge_response(resp):
+                return self._observe_response_for_circuit_breaker(resp, url)
+            self._observe_cf_cookie_changes(url)
+            if attempt >= attempts or not self.require_proxy:
+                return self._observe_response_for_circuit_breaker(resp, url)
+            logger.warning(
+                "[CF] Managed Challenge，保持所选代理端点/TLS/UA/OS 不变并轮换 transport：%s/%s url=%s",
+                attempt,
+                attempts,
+                url,
+            )
+            self._rebuild_transport_after_challenge(url)
+            if retry_delay:
+                time.sleep(retry_delay)
+        raise RuntimeError("Cloudflare challenge transport retry exhausted")
+
     def get(self, url: str, headers: dict = None, **kwargs):
         """发送 GET 请求"""
-        self._raise_if_circuit_open()
         headers = self._prepare_strict_request(url, headers, kwargs)
         headers = self._attach_openai_target_headers_for_url(url, headers)
-        resp = self.session.get(url, headers=headers, **kwargs)
-        return self._observe_response_for_circuit_breaker(resp, url)
+        return self._request_with_challenge_rotation("get", url, headers, kwargs)
 
     def post(self, url: str, headers: dict = None, **kwargs):
         """发送 POST 请求"""
-        self._raise_if_circuit_open()
         headers = self._prepare_strict_request(url, headers, kwargs)
         headers = self._attach_openai_target_headers_for_url(url, headers)
-        resp = self.session.post(url, headers=headers, **kwargs)
-        return self._observe_response_for_circuit_breaker(resp, url)
+        return self._request_with_challenge_rotation("post", url, headers, kwargs)

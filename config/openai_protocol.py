@@ -48,3 +48,9 @@ CHATGPT_ANON_BOOTSTRAP_ENABLED = True
 CHATGPT_AUTH_BOOTSTRAP_ENABLED = True
 # True 时预热失败会中断主流程；默认 False，仅记录日志并继续。
 CHATGPT_BOOTSTRAP_STRICT = False
+
+# 选中的代理端点可能在不同 TCP 隧道上分配不同出口。Cloudflare 返回明确的
+# Managed Challenge 时，纯协议会保持同一代理端点和 TLS/UA/OS 画像，重建
+# transport 后重试；不会切换到其他代理线路或回退直连。
+PROTOCOL_CF_TRANSPORT_ATTEMPTS = 30
+PROTOCOL_CF_RETRY_DELAY = 0.25

@@ -118,6 +118,77 @@ class ProtocolFingerprintAlignmentTests(TestCase):
         self.assertEqual(session.session.proxies["https"], session.proxy)
 
     @patch.object(BrowserSession, "_detect_exit_geo", return_value=_EXIT_GEO)
+    def test_strict_session_waits_for_server_issued_oai_did(self, _detect_exit_geo):
+        session = BrowserSession(
+            proxy="http://127.0.0.1:65535",
+            require_proxy=True,
+            strict_fingerprint=True,
+        )
+        self.addCleanup(session.session.close)
+
+        self.assertNotIn("oai-did", {cookie.name for cookie in session.session.cookies.jar})
+
+        server_did = "7e8bcb4d-e96b-4678-a71a-5c5a60c17f17"
+        session.session.cookies.set("oai-did", server_did, domain=".chatgpt.com", path="/")
+        response = MagicMock(status_code=200, headers={})
+        session._observe_response_for_circuit_breaker(response, "https://chatgpt.com/login")
+        self.assertEqual(session.device_id, server_did)
+
+    @patch.object(BrowserSession, "_detect_exit_geo", return_value=_EXIT_GEO)
+    def test_cf_challenge_rotates_transport_on_same_selected_proxy(self, _detect_exit_geo):
+        session = BrowserSession(
+            proxy="http://127.0.0.1:65535",
+            require_proxy=True,
+            strict_fingerprint=True,
+        )
+        self.addCleanup(lambda: getattr(session.session, "close", lambda: None)())
+        first_transport = session.session
+        challenge = MagicMock(
+            status_code=403,
+            headers={"cf-mitigated": "challenge"},
+            text="<html>Cloudflare challenge-platform Just a moment</html>",
+        )
+        success = MagicMock(status_code=200, headers={}, text="ok")
+        first_transport.get = MagicMock(return_value=challenge)
+        second_transport = MagicMock()
+        second_transport.get.return_value = success
+
+        def install_second(_url):
+            session.session = second_transport
+            session.blocked_until = 0
+            session.blocked_reason = ""
+
+        with (
+            patch.object(session, "_challenge_retry_policy", return_value=(2, 0)),
+            patch.object(session, "_rebuild_transport_after_challenge", side_effect=install_second) as rebuild,
+        ):
+            result = session.get("https://chatgpt.com/login")
+
+        self.assertIs(result, success)
+        first_transport.get.assert_called_once()
+        second_transport.get.assert_called_once()
+        rebuild.assert_called_once_with("https://chatgpt.com/login")
+        self.assertEqual(session.proxy, "http://127.0.0.1:65535")
+
+    @patch.object(BrowserSession, "_detect_exit_geo", return_value=_EXIT_GEO)
+    def test_transport_rebuild_keeps_flow_cookies_and_drops_cf_cookies(self, _detect_exit_geo):
+        session = BrowserSession(
+            proxy="http://127.0.0.1:65535",
+            require_proxy=True,
+            strict_fingerprint=True,
+        )
+        self.addCleanup(session.session.close)
+        session.session.cookies.set("flow", "keep", domain="chatgpt.com", path="/")
+        session.session.cookies.set("__cf_bm", "drop", domain=".chatgpt.com", path="/")
+
+        session._rebuild_transport_after_challenge("https://chatgpt.com/login")
+
+        cookies = {cookie.name: cookie.value for cookie in session.session.cookies.jar}
+        self.assertEqual(cookies.get("flow"), "keep")
+        self.assertNotIn("__cf_bm", cookies)
+        self.assertEqual(session.session.proxies["https"], session.proxy)
+
+    @patch.object(BrowserSession, "_detect_exit_geo", return_value=_EXIT_GEO)
     @patch("core.session.pick_proxy", return_value="http://selected-proxy.example:8080")
     def test_strict_session_resolves_the_selected_pool_proxy_once(self, pick_proxy, _detect_exit_geo):
         session = BrowserSession(require_proxy=True, strict_fingerprint=True)
