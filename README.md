@@ -320,8 +320,8 @@ REGISTRATION_DRIVER = "protocol"
 - 每个注册会话只绑定一条代理，关闭环境变量/`NO_PROXY` 继承，禁止请求级覆盖代理或 TLS 指纹。
 - 代理必须能确认出口 IP；代理缺失、探测失败或连接失败时停止，不回退直连。
 - SOCKS 代理必须写成 `socks5h://`，避免 `socks5://` 在本地解析目标域名。
-- 预检若收到 `HTTP 403` 且响应带 `cf-mitigated: challenge`，协议驱动会记录 `cloudflare_managed_challenge` 并在 OTP 前立即停止；该响应是 Cloudflare Managed Challenge 页面，不会被当作普通登录错误反复重试或消耗邮箱。
-- 需要完成 JavaScript Challenge 时，将 `REGISTRATION_DRIVER` 切换为 `roxy`/`cloak`/`browser_use`，仍会沿用当前选中的代理线路；纯协议路径保持 TLS/UA/OS 三层和出口代理 fail-closed。
+- `oai-did` 和 Cloudflare Cookie 只采用服务端真实 `Set-Cookie`，首个成功响应后再同步 OAuth 设备上下文，避免预置跨域 Cookie 触发 Managed Challenge。
+- 收到 `cf-mitigated: challenge` 时，协议驱动保持当前选中的代理端点及 TLS/UA/OS 画像不变，只重建 transport、清理 Cloudflare 挑战 Cookie并保留 OAuth 流程 Cookie；达到重试上限才返回 `cloudflare_managed_challenge`。
 
 #### 使用 Browser Use Cloud 注册
 
