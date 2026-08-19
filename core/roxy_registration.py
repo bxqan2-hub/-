@@ -2,6 +2,7 @@
 """通过 RoxyBrowser 指纹浏览器 + Selenium 执行 ChatGPT 注册。"""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -185,6 +186,13 @@ def _finish_traffic_optimizer(optimizer: RoxyTrafficOptimizer | None) -> dict:
             summary.get("network_requests", 0),
             summary.get("within_budget"),
             len(summary.get("errors") or []),
+        )
+        logger.info(
+            "[Roxy流量] detail blocked_by_reason=%s by_host=%s by_path=%s degraded_reason=%s",
+            json.dumps(summary.get("blocked_by_reason") or {}, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(dict(list((summary.get("by_host") or {}).items())[:5]), ensure_ascii=False, separators=(",", ":")),
+            json.dumps(dict(list((summary.get("by_path") or {}).items())[:5]), ensure_ascii=False, separators=(",", ":")),
+            summary.get("degraded_reason") or "none",
         )
         return summary
     except Exception as exc:

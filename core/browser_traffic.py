@@ -320,9 +320,13 @@ class _CacheLoadCoordinator:
 
 
 def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int = 0, cache_hits: int = 0,
-                               cache_misses: int = 0, cached_request_urls=(), budget_bytes: int = 3 * 1024 * 1024) -> dict:
+                               cache_misses: int = 0, cached_request_urls=(), cached_request_ids=(),
+                               budget_bytes: int = 3 * 1024 * 1024) -> dict:
     requests: dict[str, str] = {}
-    cached_request_ids: set[str] = set()
+    request_resource_types: dict[str, str] = {}
+    exact_cached_request_ids = {str(request_id) for request_id in (cached_request_ids or ()) if request_id}
+    replayed_request_ids: set[str] = set()
+    blocked_request_ids: set[str] = set()
     cached_url_counts = Counter(str(url) for url in (cached_request_urls or ()) if url)
     downloaded = 0
     started = 0
@@ -346,12 +350,20 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
             url = str((params.get("request") or {}).get("url") or "")
             if url.startswith(("http://", "https://")):
                 requests[request_id] = url
+                request_resource_types[request_id] = str(params.get("type") or "")
                 started += 1
-                if cached_url_counts[url] > 0:
+                # Fetch.RequestPaused exposes Network.requestId on current
+                # Chromium builds.  Prefer that exact identity so a network
+                # miss followed by a replay of the same URL cannot subtract
+                # the wrong response from encodedDataLength.  URL matching is
+                # retained only as a compatibility fallback for older builds.
+                if request_id and request_id in exact_cached_request_ids:
+                    replayed_request_ids.add(request_id)
+                elif cached_url_counts[url] > 0:
                     cached_url_counts[url] -= 1
-                    cached_request_ids.add(request_id)
+                    replayed_request_ids.add(request_id)
         elif method == "Network.loadingFinished":
-            if request_id in cached_request_ids:
+            if request_id in replayed_request_ids:
                 continue
             size = max(0, int(float(params.get("encodedDataLength") or 0)))
             downloaded += size
@@ -360,8 +372,12 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
                 by_host[parsed.hostname.lower()] += size
                 by_path[f"{parsed.hostname.lower()}{parsed.path or '/'}"] += size
         elif method == "Network.loadingFailed" and params.get("blockedReason"):
-            reason = block_reason(requests.get(request_id, "")) or str(params.get("blockedReason") or "blocked")
+            reason = block_reason(
+                requests.get(request_id, ""), request_resource_types.get(request_id, ""),
+            ) or str(params.get("blockedReason") or "blocked")
             blocked_by_reason[reason] += 1
+            if request_id:
+                blocked_request_ids.add(request_id)
 
     top_paths = sorted(by_path.items(), key=lambda item: item[1], reverse=True)[:20]
     return {
@@ -371,7 +387,9 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
         "cache_saved_bytes": max(0, int(cached_bytes)),
         "cache_hits": max(0, int(cache_hits)),
         "cache_misses": max(0, int(cache_misses)),
-        "network_requests": max(0, started - max(0, int(cache_hits))),
+        # A blocked request and a Fetch-fulfilled cache replay never reached
+        # the proxy/network and therefore must not inflate this counter.
+        "network_requests": max(0, started - len(replayed_request_ids) - len(blocked_request_ids)),
         "blocked": sum(blocked_by_reason.values()),
         "blocked_by_reason": dict(sorted(blocked_by_reason.items())),
         "by_host": dict(sorted(by_host.items(), key=lambda item: item[1], reverse=True)),
@@ -408,6 +426,7 @@ class RoxyTrafficOptimizer:
         self._lock = threading.RLock()
         self._stats = {"cache_hits": 0, "cache_misses": 0, "cached_bytes": 0, "cache_errors": 0}
         self._cached_urls: list[str] = []
+        self._cached_request_ids: list[str] = []
         self._loading_requests: dict[str, str] = {}
         self._install_errors: list[str] = []
         self._degraded_reason = ""
@@ -534,12 +553,16 @@ class RoxyTrafficOptimizer:
                 return
             cached = self.cache.read(url)
             if cached and not self._should_refresh(url, len(cached["body"])):
-                self._fulfill_cached_request(request_id, url, cached)
+                self._fulfill_cached_request(
+                    request_id, url, cached, network_id=getattr(event, "network_id", None),
+                )
                 return
             if not cached and not self.cache.claim_load(url):
                 cached = self.cache.wait_for_load(url)
                 if cached:
-                    self._fulfill_cached_request(request_id, url, cached)
+                    self._fulfill_cached_request(
+                        request_id, url, cached, network_id=getattr(event, "network_id", None),
+                    )
                     return
             elif not cached:
                 claimed_url = url
@@ -558,7 +581,7 @@ class RoxyTrafficOptimizer:
             except Exception:
                 pass
 
-    def _fulfill_cached_request(self, request_id, url: str, cached: dict) -> None:
+    def _fulfill_cached_request(self, request_id, url: str, cached: dict, *, network_id=None) -> None:
         devtools = self._devtools
         connection = self._connection
         if not devtools or not connection:
@@ -574,7 +597,10 @@ class RoxyTrafficOptimizer:
         with self._lock:
             self._stats["cache_hits"] += 1
             self._stats["cached_bytes"] += len(cached["body"])
-            self._cached_urls.append(url)
+            if network_id:
+                self._cached_request_ids.append(str(network_id))
+            else:
+                self._cached_urls.append(url)
 
     def _release_loading_request(self, request_id, fallback_url: str = "") -> None:
         with self._lock:
@@ -636,16 +662,18 @@ class RoxyTrafficOptimizer:
         with self._lock:
             stats = dict(self._stats)
             cached_urls = list(self._cached_urls)
+            cached_request_ids = list(self._cached_request_ids)
         summary = summarize_performance_logs(
             entries,
             cached_bytes=stats["cached_bytes"],
             cache_hits=stats["cache_hits"],
             cache_misses=stats["cache_misses"],
             cached_request_urls=cached_urls,
+            cached_request_ids=cached_request_ids,
             budget_bytes=self.budget_bytes,
         )
         summary.update({
-            "metrics_version": 2,
+            "metrics_version": 3,
             "downloaded_excludes_cache_replay": True,
             "enabled": self.low_traffic or self.static_cache_enabled,
             "low_traffic": self.low_traffic,

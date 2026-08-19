@@ -203,10 +203,99 @@ class PerformanceSummaryTests(unittest.TestCase):
         )
         self.assertEqual(summary["downloaded"], 1234)
         self.assertEqual(summary["logical_downloaded"], 1734)
-        self.assertEqual(summary["network_requests"], 2)
+        self.assertEqual(summary["network_requests"], 1)
         self.assertEqual(summary["cache_saved_bytes"], 500)
         self.assertTrue(summary["within_budget"])
         self.assertEqual(summary["blocked_by_reason"], {"telemetry": 1})
+
+    def test_summary_prefers_exact_cache_request_id_for_repeated_url(self):
+        def entry(method, params):
+            return {"message": json.dumps({"message": {"method": method, "params": params}})}
+
+        url = "https://chatgpt.com/cdn/assets/shared.js"
+        entries = [
+            entry("Network.requestWillBeSent", {"requestId": "network", "request": {"url": url}}),
+            entry("Network.loadingFinished", {"requestId": "network", "encodedDataLength": 1200}),
+            entry("Network.requestWillBeSent", {"requestId": "replay", "request": {"url": url}}),
+            entry("Network.loadingFinished", {"requestId": "replay", "encodedDataLength": 500}),
+        ]
+
+        summary = summarize_performance_logs(
+            entries,
+            cached_bytes=500,
+            cache_hits=1,
+            cached_request_ids=["replay"],
+            budget_bytes=2000,
+        )
+
+        self.assertEqual(summary["downloaded"], 1200)
+        self.assertEqual(summary["logical_downloaded"], 1700)
+        self.assertEqual(summary["network_requests"], 1)
+
+    def test_network_request_count_excludes_blocked_requests(self):
+        def entry(method, params):
+            return {"message": json.dumps({"message": {"method": method, "params": params}})}
+
+        entries = [
+            entry("Network.requestWillBeSent", {
+                "requestId": "allowed", "request": {"url": "https://chatgpt.com/api/auth/session"},
+            }),
+            entry("Network.loadingFinished", {"requestId": "allowed", "encodedDataLength": 300}),
+            entry("Network.requestWillBeSent", {
+                "requestId": "blocked", "type": "Fetch",
+                "request": {"url": "https://statsigapi.net/log"},
+            }),
+            entry("Network.loadingFailed", {"requestId": "blocked", "blockedReason": "inspector"}),
+        ]
+
+        summary = summarize_performance_logs(entries)
+
+        self.assertEqual(summary["network_requests"], 1)
+        self.assertEqual(summary["blocked"], 1)
+
+    def test_blocked_reason_uses_request_resource_type(self):
+        def entry(method, params):
+            return {"message": json.dumps({"message": {"method": method, "params": params}})}
+
+        entries = [
+            entry("Network.requestWillBeSent", {
+                "requestId": "image", "type": "Image",
+                "request": {"url": "https://chatgpt.com/cdn/assets/avatar"},
+            }),
+            entry("Network.loadingFailed", {"requestId": "image", "blockedReason": "inspector"}),
+        ]
+
+        summary = summarize_performance_logs(entries)
+
+        self.assertEqual(summary["blocked_by_reason"], {"image": 1})
+
+    def test_roxy_finalize_logs_document_diagnostics_without_losing_summary(self):
+        from core.roxy_registration import _finish_traffic_optimizer
+
+        optimizer = MagicMock()
+        optimizer.finalize.return_value = {
+            "downloaded": 300,
+            "logical_downloaded": 800,
+            "cache_saved_bytes": 500,
+            "cache_hits": 1,
+            "cache_misses": 1,
+            "blocked": 2,
+            "network_requests": 1,
+            "within_budget": True,
+            "errors": [],
+            "blocked_by_reason": {"telemetry": 2},
+            "by_host": {"chatgpt.com": 300},
+            "by_path": {"chatgpt.com/api/auth/session": 300},
+            "degraded_reason": "",
+        }
+
+        with self.assertLogs("core.roxy_registration", level="INFO") as captured:
+            summary = _finish_traffic_optimizer(optimizer)
+
+        self.assertEqual(summary["downloaded"], 300)
+        detail = next(line for line in captured.output if "blocked_by_reason=" in line)
+        self.assertIn('blocked_by_reason={"telemetry":2}', detail)
+        self.assertIn('by_host={"chatgpt.com":300}', detail)
 
 
 if __name__ == "__main__":
