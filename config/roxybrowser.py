@@ -142,13 +142,15 @@ ROXY_CREATE_USE_PROXY_POOL: bool = False
 # Roxy 代理检测通道；留空则不传 checkChannel。
 ROXY_PROXY_CHECK_CHANNEL: str = "IPRust.io"
 
-# 创建环境后先用同一代理读取出口 IP；成功后才调用 /browser/open 显示窗口。
-ROXY_PROXY_PREFLIGHT_ATTEMPTS: int = 0
-ROXY_PROXY_PREFLIGHT_RETRY_DELAY: float = 2.0
+# 创建环境前先读取出口 IP。每条代理只快速测一次；失败时最多换 3 条代理，
+# 杜绝 attempts=0 导致十个注册线程在错误代理格式上无限循环。
+ROXY_PROXY_PREFLIGHT_ATTEMPTS: int = 1
+ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS: int = 3
+ROXY_PROXY_PREFLIGHT_RETRY_DELAY: float = 0.5
 
 # 窗口启动后再从 Selenium 上下文复核实际出口 IP；仍失败则终止注册。
-ROXY_BROWSER_EXIT_IP_ATTEMPTS: int = 0
-ROXY_BROWSER_EXIT_IP_RETRY_DELAY: float = 2.0
+ROXY_BROWSER_EXIT_IP_ATTEMPTS: int = 1
+ROXY_BROWSER_EXIT_IP_RETRY_DELAY: float = 0.5
 
 # 没有 ROXY_PROFILE_ID 时创建环境的最小 payload；按你的 Roxy 版本字段调整。
 # 默认开启 ROXY_RANDOM_PROFILE_NAME_ON_CREATE，因此这里的 name 只是兜底值。
@@ -184,6 +186,7 @@ apply_env_overrides(globals(), {
     'ROXY_DEFAULT_OS': 'str', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE': 'bool',
     'ROXY_PROFILE_NAME_PREFIX': 'str', 'ROXY_CREATE_USE_PROXY_POOL': 'bool',
     'ROXY_PROXY_CHECK_CHANNEL': 'str', 'ROXY_PROXY_PREFLIGHT_ATTEMPTS': 'int',
+    'ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS': 'int',
     'ROXY_PROXY_PREFLIGHT_RETRY_DELAY': 'float', 'ROXY_BROWSER_EXIT_IP_ATTEMPTS': 'int',
     'ROXY_BROWSER_EXIT_IP_RETRY_DELAY': 'float', 'ROXY_DELETE_PATH': 'str',
     'ROXY_CODEX_CALLBACK_TIMEOUT': 'int',

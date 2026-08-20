@@ -44,7 +44,7 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         with patch.object(client, "create_profile") as create_profile, \
              patch("core.browser_exit_geo.probe_proxy_exit_geo", return_value={}), \
              patch.object(client, "request") as request:
-            with self.assertRaisesRegex(RuntimeError, "未读取到出口 IP"):
+            with self.assertRaisesRegex(RuntimeError, "快速检测失败"):
                 client.open_profile(require_proxy_exit_ip=True)
         create_profile.assert_not_called()
         request.assert_not_called()
@@ -59,6 +59,23 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
              patch.object(client, "request", side_effect=lambda *_a, **_k: events.append("open") or {"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}}):
             client.open_profile(require_proxy_exit_ip=True)
         self.assertEqual(events, ["pick", "probe", "create", "open"])
+
+    def test_failed_pool_proxy_rotates_before_profile_creation(self):
+        client = RoxyBrowserClient()
+        first = "socks5h://first.example:1080"
+        second = "socks5h://second.example:1080"
+        with patch("core.roxybrowser_client._cfg.ROXY_CREATE_USE_PROXY_POOL", True), \
+             patch("core.roxybrowser_client._cfg.ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS", 3), \
+             patch("config.proxy.pick_proxy", side_effect=[first, second]) as pick_proxy, \
+             patch("core.browser_exit_geo.probe_proxy_exit_geo", side_effect=[{}, {"ip": "203.0.113.10"}]) as probe, \
+             patch.object(client, "create_profile", return_value="created-profile"), \
+             patch.object(client, "request", return_value={"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}}):
+            opened = client.open_profile(require_proxy_exit_ip=True)
+
+        self.assertEqual(opened.preflight_exit_geo["ip"], "203.0.113.10")
+        self.assertEqual(probe.call_args_list[0].args[0], first)
+        self.assertEqual(probe.call_args_list[1].args[0], second)
+        self.assertEqual(pick_proxy.call_args_list[1].kwargs["excluded"], {first})
 
     def _config_patches(self):
         return (

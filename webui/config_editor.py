@@ -323,6 +323,18 @@ EDITABLE_FIELDS = [
         "label": "代理检测通道", "help": "写入 Roxy proxyInfo.checkChannel；留空则不传，默认 IPRust.io",
     },
     {
+        "key": "ROXY_PROXY_PREFLIGHT_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "单代理出口检测次数", "help": "限制为 1-10；0 也按 1 次处理，避免坏代理无限卡住",
+    },
+    {
+        "key": "ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "出口检测换代理上限", "help": "默认 3；一条检测失败就从粘性池随机换下一条，不重复已失败代理",
+    },
+    {
+        "key": "ROXY_BROWSER_EXIT_IP_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "窗口出口复核次数", "help": "限制为 1-10；默认 1，窗口启动后快速复核一次",
+    },
+    {
         "key": "ROXY_DELETE_PATH", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
         "label": "删除接口路径", "help": "默认 /browser/delete；如 Roxy 版本不同可调整",
     },

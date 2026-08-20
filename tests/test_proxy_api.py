@@ -32,6 +32,21 @@ class ProxyApiTests(unittest.TestCase):
             self.assertEqual(proxy_cfg._pick_static_or_system_proxy(), pool[1])
         choice.assert_called_once_with(pool)
 
+    def test_static_pool_parses_host_port_username_password_as_socks5h(self):
+        raw = "proxy.example:3010:user-region-GB-sid-abc-t-15:secret"
+        self.assertEqual(
+            proxy_cfg._expand_pool_entry(raw),
+            "socks5h://user-region-GB-sid-abc-t-15:secret@proxy.example:3010",
+        )
+
+    def test_static_pool_can_exclude_a_failed_proxy_on_retry(self):
+        pool = ["socks5h://one.example:3010", "socks5h://two.example:3010"]
+        with patch.object(proxy_cfg, "PROXY_POOL", pool), \
+             patch.object(proxy_cfg.random, "choice", return_value=pool[1]) as choice:
+            selected = proxy_cfg._pick_static_or_system_proxy(excluded={pool[0]})
+        self.assertEqual(selected, pool[1])
+        choice.assert_called_once_with([pool[1]])
+
     def test_static_pool_random_choice_receives_all_1000_entries(self):
         pool = [f"socks5h://proxy-{index}.example:3010" for index in range(1000)]
         with patch.object(proxy_cfg, "PROXY_POOL", pool), \

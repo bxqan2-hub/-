@@ -174,7 +174,7 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
     @patch("core.browser_exit_geo.time.sleep")
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))
     @patch("curl_cffi.requests.Session")
-    def test_proxy_preflight_zero_attempts_waits_until_ip_is_available(self, session_cls, _settings, sleep):
+    def test_proxy_preflight_zero_attempts_is_bounded_to_one(self, session_cls, _settings, sleep):
         first = MagicMock(status_code=503)
         second = MagicMock(status_code=200)
         second.json.return_value = {"ip": "203.0.113.99", "country": "JP"}
@@ -187,9 +187,9 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
             retry_delay=1,
         )
 
-        self.assertEqual(geo["ip"], "203.0.113.99")
-        self.assertEqual(session_cls.return_value.get.call_count, 2)
-        sleep.assert_called_once_with(1.0)
+        self.assertEqual(geo, {})
+        self.assertEqual(session_cls.return_value.get.call_count, 1)
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

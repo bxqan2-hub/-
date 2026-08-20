@@ -76,9 +76,9 @@ def probe_proxy_exit_geo(
 ) -> dict:
     """Probe an explicit proxy before a browser window is opened.
 
-    ``attempts <= 0`` means keep probing until an exit IP is obtained.  The
-    optional ``stop_check`` callback is invoked between network operations so a
-    manually stopped registration can still terminate an unlimited probe.
+    Attempts are always bounded to 1..10. Historical ``attempts <= 0`` values
+    now mean one attempt, so a malformed or dead proxy cannot occupy a worker
+    forever. The optional ``stop_check`` callback is invoked between operations.
     """
     proxy_url = str(proxy_url or "").strip()
     endpoints, timeout = _probe_settings()
@@ -88,7 +88,7 @@ def probe_proxy_exit_geo(
     from curl_cffi.requests import Session
 
     configured_attempts = int(attempts if attempts is not None else 1)
-    max_attempts = max(1, configured_attempts) if configured_attempts > 0 else None
+    max_attempts = max(1, min(10, configured_attempts or 1))
     delay = max(0.0, float(retry_delay or 0.0))
     attempt = 0
     while True:
@@ -116,17 +116,17 @@ def probe_proxy_exit_geo(
                 except Exception as exc:
                     logger.debug(
                         "[%s] 窗口打开前出口 IP 探测失败 endpoint=%s attempt=%s/%s: %s: %s",
-                        label, endpoint, attempt, max_attempts or "∞", type(exc).__name__, exc,
+                        label, endpoint, attempt, max_attempts, type(exc).__name__, exc,
                     )
         finally:
             try:
                 session.close()
             except Exception:
                 pass
-        if max_attempts is not None and attempt >= max_attempts:
+        if attempt >= max_attempts:
             break
         if delay:
-            time.sleep(min(30.0, delay * attempt))
+            time.sleep(min(5.0, delay * attempt))
     logger.warning("[%s] 窗口打开前未能读取代理出口 IP", label)
     return {}
 
@@ -209,7 +209,7 @@ def probe_selenium_driver_exit_geo(
         driver.set_page_load_timeout(timeout_seconds)
         driver.set_script_timeout(timeout_seconds)
         configured_attempts = int(attempts if attempts is not None else 1)
-        max_attempts = max(1, configured_attempts) if configured_attempts > 0 else None
+        max_attempts = max(1, min(10, configured_attempts or 1))
         delay = max(0.0, float(retry_delay or 0.0))
         attempt = 0
         while True:
@@ -234,12 +234,12 @@ def probe_selenium_driver_exit_geo(
                 except Exception as exc:
                     logger.debug(
                         "[%s] 浏览器出口 IP 探测失败 endpoint=%s attempt=%s/%s: %s: %s",
-                        label, endpoint, attempt, max_attempts or "∞", type(exc).__name__, exc,
+                        label, endpoint, attempt, max_attempts, type(exc).__name__, exc,
                     )
-            if max_attempts is not None and attempt >= max_attempts:
+            if attempt >= max_attempts:
                 break
             if delay:
-                time.sleep(min(30.0, delay * attempt))
+                time.sleep(min(5.0, delay * attempt))
         logger.warning("[%s] 未能从当前注册浏览器上下文识别出口 IP，账号将留空", label)
         return {}
     except Exception as exc:

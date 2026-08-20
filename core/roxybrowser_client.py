@@ -528,17 +528,41 @@ class RoxyBrowserClient:
                 raise RuntimeError("Roxy 窗口打开前未取得本次环境使用的代理，已终止注册")
             from core.browser_exit_geo import probe_proxy_exit_geo
 
-            logger.info("[Roxy] 创建环境前先检测代理出口 IP，完成前不创建环境、不打开窗口")
+            logger.info("[Roxy] 创建环境前快速检测代理出口 IP，失败会换下一条粘性代理")
             configured_attempts = getattr(_cfg, "ROXY_PROXY_PREFLIGHT_ATTEMPTS", 0)
-            preflight_exit_geo = probe_proxy_exit_geo(
-                self.profile_proxy,
-                label="Roxy预检",
-                attempts=int(configured_attempts if configured_attempts is not None else 0),
-                retry_delay=float(getattr(_cfg, "ROXY_PROXY_PREFLIGHT_RETRY_DELAY", 2) or 2),
-                stop_check=proxy_probe_stop_check,
+            proxy_attempts = max(
+                1,
+                min(10, int(getattr(_cfg, "ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS", 3) or 3)),
             )
+            failed_proxies: set[str] = set()
+            for proxy_attempt in range(1, proxy_attempts + 1):
+                logger.info("[Roxy] 出口 IP 快速检测：代理 %s/%s", proxy_attempt, proxy_attempts)
+                preflight_exit_geo = probe_proxy_exit_geo(
+                    self.profile_proxy,
+                    label="Roxy预检",
+                    attempts=int(configured_attempts if configured_attempts is not None else 1),
+                    retry_delay=float(getattr(_cfg, "ROXY_PROXY_PREFLIGHT_RETRY_DELAY", 0.5) or 0.5),
+                    stop_check=proxy_probe_stop_check,
+                )
+                if preflight_exit_geo.get("ip"):
+                    break
+                failed_proxies.add(str(self.profile_proxy or ""))
+                if self.profile_proxy_source != "pool" or proxy_attempt >= proxy_attempts:
+                    break
+                from config import proxy as _proxy_cfg
+
+                replacement = str(_proxy_cfg.pick_proxy(excluded=failed_proxies) or "").strip()
+                if not replacement:
+                    logger.warning("[Roxy] 代理池中没有尚未检测的候选代理，提前结束出口检测")
+                    break
+                self.profile_proxy = replacement
+                self.profile_proxy_source = "pool"
+                logger.warning("[Roxy] 当前粘性代理未读到出口 IP，立即随机更换下一条")
             if not preflight_exit_geo.get("ip"):
-                raise RuntimeError("Roxy 代理检测未读取到出口 IP，环境未创建、窗口未打开，已终止注册")
+                raise RuntimeError(
+                    f"Roxy 代理出口快速检测失败（已检测 {len(failed_proxies)} 条），"
+                    "环境未创建、窗口未打开；请检查代理格式或节点连通性"
+                )
             logger.info(
                 "[Roxy] 代理预检完成，允许创建环境：exit_ip=%s country=%s",
                 preflight_exit_geo.get("ip"), preflight_exit_geo.get("country") or "?",

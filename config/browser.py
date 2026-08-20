@@ -63,10 +63,9 @@ SEND_HIGH_ENTROPY_CLIENT_HINTS = False
 # ---------- 语言 / 时区 ----------
 BROWSER_LOCALE_PROFILE = "jp"
 AUTO_BROWSER_LOCALE_FROM_IP = True
-IP_GEO_TIMEOUT = 6.0
+IP_GEO_TIMEOUT = 4.0
 IP_GEO_ENDPOINTS = [
     "https://ipinfo.io/json",
-    "https://ipapi.co/json",
     "https://ipwho.is/",
 ]
 

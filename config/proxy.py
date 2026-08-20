@@ -183,7 +183,12 @@ def _expand_pool_entry(entry: str) -> str:
     text = str(entry or "").strip()
     if text.lower() in _SYSTEM_PROXY_TOKENS:
         return detect_system_proxy()
-    return _normalize_proxy_url(text)
+    # 常见粘性代理供应商直接给出 host:port:username:password。这个格式是
+    # SOCKS5 凭据，不可简单拼成 http://host:port:user:password（urllib 会把
+    # 后三段误当成非法端口，出口检测随后永久超时）。
+    if "://" not in text and len(text.split(":", 3)) == 4:
+        return _proxy_url_from_candidate(text, "socks5h")
+    return _proxy_url_from_candidate(_normalize_proxy_url(text), "http")
 
 
 def _proxy_url_from_candidate(candidate, protocol: str) -> str:
@@ -589,7 +594,7 @@ def fetch_proxy_from_api(
     return str(flight["proxy"])
 
 
-def _pick_static_or_system_proxy(*, strict: bool = False) -> str:
+def _pick_static_or_system_proxy(*, strict: bool = False, excluded: set[str] | None = None) -> str:
     entries = list(PROXY_POOL or [])
     if not entries:
         return detect_system_proxy()
@@ -600,7 +605,8 @@ def _pick_static_or_system_proxy(*, strict: bool = False) -> str:
         if proxy:
             resolved.append(proxy)
     if resolved:
-        active = _normalize_proxy_url(str(PROXY_POOL_ACTIVE or "").strip())
+        active_raw = str(PROXY_POOL_ACTIVE or "").strip()
+        active = _expand_pool_entry(active_raw) if active_raw else ""
         # PROXY_POOL_ACTIVE 只服务于需要固定出口的 strict/纯协议流程。
         # 浏览器注册是非 strict 流程：每个新窗口从完整粘性池随机抽一条，
         # 窗口创建后再由对应的浏览器客户端实例固定该代理。
@@ -610,13 +616,15 @@ def _pick_static_or_system_proxy(*, strict: bool = False) -> str:
             return active
         if strict and len(resolved) > 1:
             raise RuntimeError("纯协议注册要求先选择 PROXY_POOL_ACTIVE，禁止在多条静态代理之间随机选择")
-        return random.choice(resolved)
+        excluded = {str(value or "").strip() for value in (excluded or set()) if str(value or "").strip()}
+        available = [proxy for proxy in resolved if proxy not in excluded]
+        return random.choice(available) if available else ""
     if strict:
         raise RuntimeError("严格代理出口未解析到静态代理或系统代理")
     return detect_system_proxy()
 
 
-def pick_proxy(*, strict: bool = False) -> str:
+def pick_proxy(*, strict: bool = False, excluded: set[str] | None = None) -> str:
     """从代理池中随机抽取一个代理 URL。
 
     - 池为空，或条目为 system/auto：跟随当前系统代理
@@ -624,12 +632,14 @@ def pick_proxy(*, strict: bool = False) -> str:
     """
     if bool(PROXY_API_ENABLED):
         try:
-            return fetch_proxy_from_api()
+            candidate = fetch_proxy_from_api()
+            if candidate not in (excluded or set()):
+                return candidate
         except Exception:
             if strict or bool(PROXY_API_FAIL_CLOSED):
                 raise
             logger.exception("[代理API] 获取失败，按配置回退静态代理池/系统代理")
-    return _pick_static_or_system_proxy(strict=strict)
+    return _pick_static_or_system_proxy(strict=strict, excluded=excluded)
 
 
 def pick_local_proxy(*, strict: bool = False) -> str:
