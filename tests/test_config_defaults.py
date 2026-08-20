@@ -12,6 +12,7 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
         self.assertTrue({
             "ROXY_EMAIL_SUBMIT_TIMEOUT",
+            "ROXY_CREATE_API_ATTEMPTS",
             "ROXY_OTP_MAX_WAIT",
             "ROXY_SESSION_REQUEST_TIMEOUT",
             "ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS",

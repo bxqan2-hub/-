@@ -327,8 +327,12 @@ EDITABLE_FIELDS = [
         "label": "删除接口路径", "help": "默认 /browser/delete；如 Roxy 版本不同可调整",
     },
     {
+        "key": "ROXY_CREATE_API_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "创建环境尝试次数", "help": "默认 2；限制 Roxy 15 秒指纹生成超时对串行创建队列的阻塞",
+    },
+    {
         "key": "ROXY_EMAIL_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
-        "label": "邮箱提交单轮超时", "help": "等待进入密码/OTP 页的单轮秒数，默认 25",
+        "label": "邮箱提交单轮超时", "help": "等待进入密码/OTP 页的单轮秒数，默认 20",
     },
     {
         "key": "ROXY_EMAIL_SUBMIT_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
@@ -348,7 +352,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_OTP_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
-        "label": "OTP提交超时", "help": "提交 OTP 后等待资料页/登录态的单轮秒数，默认 35",
+        "label": "OTP提交超时", "help": "提交 OTP 后等待资料页/登录态的主观察窗口，默认 15 秒",
     },
     {
         "key": "ROXY_PROFILE_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",

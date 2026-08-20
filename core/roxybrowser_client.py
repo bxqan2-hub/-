@@ -206,7 +206,11 @@ class RoxyBrowserClient:
         # 明确返回的忙碌状态，以及创建前生成随机指纹的固定 15000ms 业务超时重试。
         is_create = str(path or "").rstrip("/").endswith("/create") or "browser/create" in str(path or "")
         configured_attempts = max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
-        max_attempts = min(3, configured_attempts) if is_create else configured_attempts
+        create_attempts = max(
+            1,
+            min(3, int(getattr(_cfg, "ROXY_CREATE_API_ATTEMPTS", 2) or 2)),
+        )
+        max_attempts = create_attempts if is_create else configured_attempts
         base_delay = max(0.5, float(getattr(_cfg, "ROXY_API_RETRY_DELAY", 2) or 2))
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):

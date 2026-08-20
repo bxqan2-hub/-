@@ -62,15 +62,15 @@ ROXY_KEEP_BROWSER_OPEN: bool = False
 # 注册快速等待预算。这些值只限制单个阶段，成功信号仍会立即结束等待。
 # 旧逻辑把邮箱提交、OTP、session 请求共用 90s Selenium 超时，
 # 一次卡住的 async fetch 就可以超出上层 deadline。分开后可独立调整。
-ROXY_EMAIL_SUBMIT_TIMEOUT: int = 25
+ROXY_EMAIL_SUBMIT_TIMEOUT: int = 20
 ROXY_EMAIL_SUBMIT_ATTEMPTS: int = 2
 ROXY_OTP_MAX_WAIT: int = 60
 ROXY_OTP_POLL_INTERVAL: int = 2
 ROXY_OTP_SETTLE_SECONDS: int = 1
 ROXY_OTP_MAX_ATTEMPTS: int = 2
 ROXY_OTP_RETRY_ON_MAIL_TIMEOUT: bool = False
-ROXY_OTP_SUBMIT_TIMEOUT: int = 35
-ROXY_OTP_PENDING_GRACE: int = 10
+ROXY_OTP_SUBMIT_TIMEOUT: int = 15
+ROXY_OTP_PENDING_GRACE: int = 5
 ROXY_PROFILE_TIMEOUT: int = 35
 ROXY_PROFILE_STALL_LIMIT: int = 3
 ROXY_SESSION_WAIT_TIMEOUT: int = 25
@@ -98,8 +98,10 @@ ROXY_POST_REGISTRATION_CHAT_TIMEOUT: int = 90
 # False 时完全沿用普通注册的窗口清理流程。
 GC_REGISTRATION_MODE: bool = False
 
-# Roxy API transient 错误重试。create 接口默认不重试，避免超时后重复创建孤儿环境；open/close/delete 会重试。
+# Roxy API transient 错误重试。create 单独收敛到 2 次，避免本地 Roxy
+# 指纹生成 15s 超时把串行创建队列拖到 36s；其他生命周期接口仍按通用次数重试。
 ROXY_API_RETRIES: int = 3
+ROXY_CREATE_API_ATTEMPTS: int = 2
 ROXY_API_RETRY_DELAY: int = 2
 
 # 环境生命周期：
@@ -171,6 +173,7 @@ apply_env_overrides(globals(), {
     'ROXY_PROFILE_STALL_LIMIT': 'int', 'ROXY_SESSION_WAIT_TIMEOUT': 'int',
     'ROXY_SESSION_AUTO_JUMP_WAIT': 'int', 'ROXY_SESSION_REQUEST_TIMEOUT': 'int',
     'ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS': 'int',
+    'ROXY_CREATE_API_ATTEMPTS': 'int',
     'ROXY_POST_REGISTRATION_CHAT_ENABLED': 'bool', 'ROXY_POST_REGISTRATION_CHAT_PROMPT': 'str',
     'ROXY_POST_REGISTRATION_CHAT_TIMEOUT': 'int', 'GC_REGISTRATION_MODE': 'bool',
     'ROXY_ONE_PROFILE_PER_ACCOUNT': 'bool', 'ROXY_DELETE_PROFILE_AFTER_RUN': 'bool',
