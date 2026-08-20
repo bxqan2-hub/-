@@ -13,10 +13,27 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         client = RoxyBrowserClient()
         reported = []
         with patch.object(client, "create_profile", return_value="created-profile"), \
-             patch.object(client, "request", side_effect=RuntimeError("open failed")):
+             patch.object(client, "request", side_effect=RuntimeError("open failed")), \
+             patch.object(client, "close_profile", return_value=True) as close_profile, \
+             patch.object(client, "delete_profile", return_value=True) as delete_profile:
             with self.assertRaisesRegex(RuntimeError, "open failed"):
                 client.open_profile(on_profile_ready=reported.append)
         self.assertEqual(reported, ["created-profile"])
+        close_profile.assert_called_once_with("created-profile")
+        delete_profile.assert_called_once_with("created-profile")
+
+    def test_profile_binding_failure_reclaims_new_profile_before_open(self):
+        client = RoxyBrowserClient()
+        with patch.object(client, "create_profile", return_value="created-profile"), \
+             patch.object(client, "request") as request, \
+             patch.object(client, "close_profile", return_value=True) as close_profile, \
+             patch.object(client, "delete_profile", return_value=True) as delete_profile:
+            with self.assertRaisesRegex(RuntimeError, "bind failed"):
+                client.open_profile(on_profile_ready=MagicMock(side_effect=RuntimeError("bind failed")))
+
+        request.assert_not_called()
+        close_profile.assert_called_once_with("created-profile")
+        delete_profile.assert_called_once_with("created-profile")
 
     def test_visible_window_opens_only_after_proxy_exit_ip_is_known(self):
         client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
@@ -170,7 +187,7 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertEqual(result["data"]["dirId"], "ok")
         self.assertEqual(request.call_count, 2)
 
-    def test_create_retries_roxy_fingerprint_15000ms_response_until_success(self):
+    def test_create_does_not_repeat_fixed_fingerprint_15000ms_failure(self):
         client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
         fingerprint_timeout = MagicMock(
             status_code=200,
@@ -180,46 +197,40 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
             "code": 1,
             "msg": "timeout of 15000ms exceeded",
         }
-        success = MagicMock(status_code=200, text='{"code":0}')
-        success.json.return_value = {"code": 0, "data": {"dirId": "retry-ok"}}
-
         with (
             patch("core.roxybrowser_client._cfg.ROXY_CREATE_API_ATTEMPTS", 3),
-            patch.object(client.http, "request", side_effect=[
-                fingerprint_timeout,
-                fingerprint_timeout,
-                success,
-            ]) as request,
-            patch("core.roxybrowser_client.time.sleep") as sleep,
-        ):
-            result = client.request("POST", "/browser/create", json_body={})
-
-        self.assertEqual(result["data"]["dirId"], "retry-ok")
-        self.assertEqual(request.call_count, 3)
-        self.assertEqual(sleep.call_args_list, [call(2), call(4)])
-
-    def test_create_attempts_are_bounded_separately_from_lifecycle_retries(self):
-        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
-        fingerprint_timeout = MagicMock(
-            status_code=200,
-            text='{"code":1,"msg":"timeout of 15000ms exceeded"}',
-        )
-        fingerprint_timeout.json.return_value = {
-            "code": 1,
-            "msg": "timeout of 15000ms exceeded",
-        }
-
-        with (
-            patch("core.roxybrowser_client._cfg.ROXY_CREATE_API_ATTEMPTS", 2),
-            patch("core.roxybrowser_client._cfg.ROXY_API_RETRIES", 5),
             patch.object(client.http, "request", return_value=fingerprint_timeout) as request,
             patch("core.roxybrowser_client.time.sleep") as sleep,
         ):
             with self.assertRaisesRegex(RuntimeError, "timeout of 15000ms exceeded"):
                 client.request("POST", "/browser/create", json_body={})
 
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(request.call_args.kwargs["timeout"], 15)
+
+    def test_create_attempts_are_bounded_separately_from_lifecycle_retries(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        busy = MagicMock(
+            status_code=200,
+            text='{"code":1,"msg":"正在创建中，请稍等！"}',
+        )
+        busy.json.return_value = {
+            "code": 1,
+            "msg": "正在创建中，请稍等！",
+        }
+
+        with (
+            patch("core.roxybrowser_client._cfg.ROXY_CREATE_API_ATTEMPTS", 2),
+            patch("core.roxybrowser_client._cfg.ROXY_API_RETRIES", 5),
+            patch.object(client.http, "request", return_value=busy) as request,
+            patch("core.roxybrowser_client.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "正在创建中"):
+                client.request("POST", "/browser/create", json_body={})
+
         self.assertEqual(request.call_count, 2)
-        sleep.assert_called_once_with(2)
+        sleep.assert_called_once_with(1.0)
 
     def test_create_does_not_retry_other_roxy_business_timeout(self):
         client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")

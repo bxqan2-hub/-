@@ -57,6 +57,10 @@ ROXY_OPEN_EXTRA_PARAMS: dict = {}
 
 # Selenium 行为
 ROXY_SELENIUM_TIMEOUT: int = 90
+# 本地 Roxy OpenAPI 与 Selenium 页面等待使用不同预算。参考实现的本地 API
+# 默认 15 秒；旧逻辑误用 90 秒页面超时，再叠加 3 次重试，单个生命周期调用
+# 最坏可占用 276 秒。
+ROXY_API_TIMEOUT: int = 15
 ROXY_KEEP_BROWSER_OPEN: bool = False
 
 # 注册快速等待预算。这些值只限制单个阶段，成功信号仍会立即结束等待。
@@ -66,14 +70,18 @@ ROXY_KEEP_BROWSER_OPEN: bool = False
 # 延长观察窗口不会拖慢成功路径（成功信号立即返回），但可避免超时后重复填写。
 ROXY_EMAIL_SUBMIT_TIMEOUT: int = 50
 ROXY_EMAIL_SUBMIT_ATTEMPTS: int = 1
-# 实测成功 OTP 在进入验证页后约 10s 内到达；40s 仍无码则快速换邮箱。
-ROXY_OTP_MAX_WAIT: int = 40
+# 最新批次成功 OTP 全部在 16s 内取得；25s 仍无码时结束本轮，避免坏邮箱
+# 占住窗口到 40s。成功信号仍会立即返回。
+ROXY_OTP_MAX_WAIT: int = 25
 ROXY_OTP_POLL_INTERVAL: int = 2
 ROXY_OTP_SETTLE_SECONDS: int = 1
 ROXY_OTP_MAX_ATTEMPTS: int = 2
 ROXY_OTP_RETRY_ON_MAIL_TIMEOUT: bool = False
 ROXY_OTP_SUBMIT_TIMEOUT: int = 15
-ROXY_OTP_PENDING_GRACE: int = 5
+ROXY_OTP_SUBMIT_ATTEMPTS: int = 2
+ROXY_OTP_PENDING_GRACE: int = 0
+ROXY_PASSWORD_SUBMIT_TIMEOUT: int = 16
+ROXY_PASSWORD_SUBMIT_ATTEMPTS: int = 2
 ROXY_PROFILE_TIMEOUT: int = 35
 ROXY_PROFILE_STALL_LIMIT: int = 3
 ROXY_SESSION_WAIT_TIMEOUT: int = 25
@@ -101,11 +109,10 @@ ROXY_POST_REGISTRATION_CHAT_TIMEOUT: int = 90
 # False 时完全沿用普通注册的窗口清理流程。
 GC_REGISTRATION_MODE: bool = False
 
-# Roxy API transient 错误重试。create 单独收敛到 2 次，避免本地 Roxy
-# 指纹生成 15s 超时把串行创建队列拖到 36s；其他生命周期接口仍按通用次数重试。
-ROXY_API_RETRIES: int = 3
+# Roxy API 短重试。生命周期接口最多 2 次；create 只会对明确忙碌状态重试。
+ROXY_API_RETRIES: int = 2
 ROXY_CREATE_API_ATTEMPTS: int = 2
-ROXY_API_RETRY_DELAY: int = 2
+ROXY_API_RETRY_DELAY: int = 1
 
 # 环境生命周期：
 #   True  = 一号一环境：每个账号强制创建新 Profile，用完关闭并删除，不允许复用 ROXY_PROFILE_ID
@@ -169,15 +176,18 @@ apply_env_overrides(globals(), {
     'ROXY_PROFILE_ID': 'str', 'ROXY_WORKSPACE_ID': 'str', 'ROXY_PROJECT_ID': 'str',
     'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool',
     'ROXY_CLOSE_PATH': 'str', 'ROXY_KEEP_BROWSER_OPEN': 'bool',
-    'ROXY_SELENIUM_TIMEOUT': 'int', 'ROXY_EMAIL_SUBMIT_TIMEOUT': 'int',
+    'ROXY_SELENIUM_TIMEOUT': 'int', 'ROXY_API_TIMEOUT': 'int',
+    'ROXY_EMAIL_SUBMIT_TIMEOUT': 'int',
     'ROXY_EMAIL_SUBMIT_ATTEMPTS': 'int', 'ROXY_OTP_MAX_WAIT': 'int',
     'ROXY_OTP_POLL_INTERVAL': 'int', 'ROXY_OTP_SETTLE_SECONDS': 'int',
     'ROXY_OTP_MAX_ATTEMPTS': 'int', 'ROXY_OTP_RETRY_ON_MAIL_TIMEOUT': 'bool',
-    'ROXY_OTP_SUBMIT_TIMEOUT': 'int',
+    'ROXY_OTP_SUBMIT_TIMEOUT': 'int', 'ROXY_OTP_SUBMIT_ATTEMPTS': 'int',
     'ROXY_OTP_PENDING_GRACE': 'int', 'ROXY_PROFILE_TIMEOUT': 'int',
+    'ROXY_PASSWORD_SUBMIT_TIMEOUT': 'int', 'ROXY_PASSWORD_SUBMIT_ATTEMPTS': 'int',
     'ROXY_PROFILE_STALL_LIMIT': 'int', 'ROXY_SESSION_WAIT_TIMEOUT': 'int',
     'ROXY_SESSION_AUTO_JUMP_WAIT': 'int', 'ROXY_SESSION_REQUEST_TIMEOUT': 'int',
     'ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS': 'int',
+    'ROXY_API_RETRIES': 'int', 'ROXY_API_RETRY_DELAY': 'int',
     'ROXY_CREATE_API_ATTEMPTS': 'int',
     'ROXY_POST_REGISTRATION_CHAT_ENABLED': 'bool', 'ROXY_POST_REGISTRATION_CHAT_PROMPT': 'str',
     'ROXY_POST_REGISTRATION_CHAT_TIMEOUT': 'int', 'GC_REGISTRATION_MODE': 'bool',

@@ -326,6 +326,26 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "without an acceptance signal"):
             roxy_registration._require_confirmed_otp_submit("pending", 20)
 
+    def test_pending_otp_refreshes_refills_and_resubmits_same_code_once(self):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+        with patch("core.roxy_registration._wait_for_otp_input", return_value="otp_ready") as wait_input, \
+             patch("core.roxy_registration._clear_otp_inputs") as clear_inputs, \
+             patch("core.roxy_registration._type_otp") as type_otp, \
+             patch("core.roxy_registration._click_continue") as click_continue:
+            outcome = roxy_registration._reload_and_resubmit_otp_once(
+                driver,
+                "001414",
+                timeout=6,
+            )
+
+        self.assertEqual(outcome, "submitted")
+        driver.refresh.assert_called_once_with()
+        wait_input.assert_called_once_with(driver, timeout=6)
+        clear_inputs.assert_called_once_with(driver)
+        type_otp.assert_called_once_with(driver, "001414")
+        click_continue.assert_called_once_with(driver)
+
     def test_confirmed_otp_submit_state_is_preserved(self):
         self.assertEqual(
             roxy_registration._require_confirmed_otp_submit("accepted", 20),
@@ -357,6 +377,38 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         password_target_script = driver.execute_script.call_args.args[0]
         self.assertIn("isSubmit ? 1000", password_target_script)
         self.assertIn("b.score - a.score", password_target_script)
+
+    def test_password_form_noop_is_relocated_and_submitted_once_more(self):
+        driver = MagicMock()
+        target = {"ok": True, "input": MagicMock(), "button": MagicMock()}
+        clock = iter(range(100))
+        with patch("core.roxy_registration.time.time", side_effect=lambda: float(next(clock))), \
+             patch("core.roxy_registration.time.sleep"), \
+             patch("core.roxy_registration._password_page_targets", return_value=target) as targets, \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration._is_login_password_page", return_value=False), \
+             patch("core.roxy_registration._password_page_state", return_value={
+                 "url": "https://auth.openai.com/create-account/password",
+                 "errors": [],
+             }), \
+             patch("core.roxy_registration._click_passwordless_signup_if_present", return_value={"ok": False}), \
+             patch("core.roxy_registration._registration_password", return_value="Password1!"), \
+             patch("core.roxy_registration._human_type_text"), \
+             patch("core.roxy_registration._human_click") as click, \
+             patch("core.roxy_registration._is_email_verification_page", side_effect=lambda *_args: click.call_count >= 2), \
+             patch("core.roxy_registration.human_delay"), \
+             patch("core.roxy_registration._cfg.ROXY_PASSWORD_SUBMIT_TIMEOUT", 6), \
+             patch("core.roxy_registration._cfg.ROXY_PASSWORD_SUBMIT_ATTEMPTS", 2):
+            password = roxy_registration._fill_password_page_if_present(
+                driver,
+                "mail@example.test",
+                timeout=10,
+            )
+
+        self.assertEqual(password, "Password1!")
+        self.assertEqual(click.call_count, 2)
+        self.assertEqual(targets.call_count, 2)
 
     def test_email_already_verified_page_is_success_not_invalid_otp(self):
         driver = MagicMock()

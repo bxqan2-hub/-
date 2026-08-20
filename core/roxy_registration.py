@@ -1924,6 +1924,32 @@ def _require_confirmed_otp_submit(outcome: str, observed_seconds: int) -> str:
     return outcome
 
 
+def _reload_and_resubmit_otp_once(driver, otp: str, *, timeout: int = 6) -> str:
+    """参考 FlowPilot 的 unchanged-form 恢复：刷新、重填、再提交一次。"""
+    current_url = str(getattr(driver, "current_url", "") or "")
+    if "email-verification" not in current_url.lower():
+        return "accepted"
+    logger.warning("%s[OTP] Continue 后表单未变化，刷新验证页并复用同一验证码重试一次", _log_prefix(driver))
+    try:
+        driver.refresh()
+    except Exception:
+        _safe_get(
+            driver,
+            current_url,
+            timeout=max(3, int(timeout)),
+            attempts=1,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+    ready = _wait_for_otp_input(driver, timeout=max(2, min(6, int(timeout))))
+    if ready == "email_verified":
+        return "email_verified"
+    _clear_otp_inputs(driver)
+    _type_otp(driver, otp)
+    _click_continue(driver)
+    logger.info("%s[OTP] 刷新后已重新填写并提交验证码", _log_prefix(driver))
+    return "submitted"
+
+
 def _click_continue(driver) -> None:
     """只点击 OTP 表单自己的提交按钮，禁止在跳转后的登录页误点第三方登录。"""
     _click_any(driver, [
@@ -2344,6 +2370,38 @@ def _is_login_password_page(driver) -> bool:
     return '/log-in/password' in url
 
 
+def _password_page_targets(driver) -> dict:
+    """Return the live password input and its exact form submit control."""
+    return driver.execute_script(r"""
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+      && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+      && !el.disabled && !el.readOnly;
+    const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
+      .find(visible);
+    if (!input) return {ok:false, reason:'missing_password_input'};
+    const form = input.closest('form');
+    const scope = form || document;
+    const buttons = [...scope.querySelectorAll('button,input[type="submit"]')]
+      .filter(el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && !el.disabled && el.getAttribute('aria-disabled') !== 'true')
+      .map((el, idx) => {
+        const r = el.getBoundingClientRect();
+        const ir = input.getBoundingClientRect();
+        const type = String(el.getAttribute('type') || '').toLowerCase();
+        const cls = String(el.className || '').toLowerCase();
+        const isSubmit = type === 'submit';
+        const isPrimary = /\bbtn-primary\b|\b_primary_|\bw-full\b/.test(cls);
+        const dist = Math.max(0, r.top - ir.bottom) + Math.abs((r.left+r.right-ir.left-ir.right)/2)/10;
+        const score = (isSubmit ? 1000 : 0) + (isPrimary ? 100 : 0) - dist;
+        return {el, idx, type, isSubmit, isPrimary, below: r.top >= ir.bottom - 10, dist, score};
+      })
+      .filter(x => x.below)
+      .sort((a,b) => b.score - a.score || a.idx - b.idx);
+    if (!buttons.length) return {ok:false, reason:'missing_submit'};
+    buttons[0].el.scrollIntoView({block:'center'});
+    return {ok:true, reason:'password_targets', input, button: buttons[0].el, buttonType: buttons[0].type, isSubmit: buttons[0].isSubmit};
+    """) or {}
+
+
 def _click_passwordless_signup_if_present(driver) -> dict:
     """
     新版注册/登录流在 password 页可能默认要求密码。
@@ -2449,59 +2507,37 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             raise RuntimeError(f"当前是登录密码页且无一次性验证码入口，邮箱按已注册/不可用处理: state={last}")
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
-        result = driver.execute_script(r"""
-        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
-          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
-          && !el.disabled && !el.readOnly;
-        const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
-          .find(visible);
-        if (!input) return {ok:false, reason:'missing_password_input'};
-        const form = input.closest('form');
-        const scope = form || document;
-        const buttons = [...scope.querySelectorAll('button,input[type="submit"]')]
-          .filter(el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && !el.disabled && el.getAttribute('aria-disabled') !== 'true')
-          .map((el, idx) => {
-            const r = el.getBoundingClientRect();
-            const ir = input.getBoundingClientRect();
-            const type = String(el.getAttribute('type') || '').toLowerCase();
-            const cls = String(el.className || '').toLowerCase();
-            const isSubmit = type === 'submit';
-            const isPrimary = /\bbtn-primary\b|\b_primary_|\bw-full\b/.test(cls);
-            const dist = Math.max(0, r.top - ir.bottom) + Math.abs((r.left+r.right-ir.left-ir.right)/2)/10;
-            // Password visibility toggles are type=button and are often closer
-            // to the input than the real submit button.  Always rank a real
-            // form submit first; distance only breaks ties inside that class.
-            const score = (isSubmit ? 1000 : 0) + (isPrimary ? 100 : 0) - dist;
-            return {el, idx, type, isSubmit, isPrimary, below: r.top >= ir.bottom - 10, dist, score};
-          })
-          .filter(x => x.below)
-          .sort((a,b) => b.score - a.score || a.idx - b.idx);
-        if (!buttons.length) return {ok:false, reason:'missing_submit'};
-        buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', input, button: buttons[0].el, buttonType: buttons[0].type, isSubmit: buttons[0].isSubmit};
-        """) or {}
+        result = _password_page_targets(driver)
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
-        _human_type_text(driver, result.get("input"), password, clear=True)
-        human_delay("form", minimum=0.4, maximum=1.4)
-        _human_click(driver, result.get("button"), label="password_submit")
-        logger.info("%s 已填写并提交密码页", _log_prefix(driver))
-        # 提交密码后通常进入邮箱验证码页，最多等一段时间。
-        wait_end = time.time() + 20
-        while time.time() < wait_end:
-            if _is_email_verification_page(driver):
-                logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
-                return password
-            if _has_access_token(driver):
-                logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
-                return password
-            if not _is_signup_password_page(driver):
-                return password
-            last = _password_page_state(driver)
-            errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
-            if errors:
-                raise RuntimeError(f"创建账号密码提交被拒绝: errors={errors} state={last}")
-            time.sleep(0.5)
+        submit_timeout = max(6, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_TIMEOUT", 16) or 16))
+        submit_attempts = max(1, min(2, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_ATTEMPTS", 2) or 2)))
+        observe_per_attempt = max(4, submit_timeout // submit_attempts)
+        for submit_attempt in range(1, submit_attempts + 1):
+            if submit_attempt > 1:
+                result = _password_page_targets(driver)
+                if not result.get('ok'):
+                    raise RuntimeError(f"密码页重试处理失败：{result} state={last}")
+                logger.warning("%s 密码提交无响应，重新定位同一表单并进行第 %s/%s 次提交", _log_prefix(driver), submit_attempt, submit_attempts)
+            _human_type_text(driver, result.get("input"), password, clear=True)
+            human_delay("form", minimum=0.2, maximum=0.8)
+            _human_click(driver, result.get("button"), label=f"password_submit_{submit_attempt}")
+            logger.info("%s 已填写并提交密码页（%s/%s）", _log_prefix(driver), submit_attempt, submit_attempts)
+            wait_end = time.time() + observe_per_attempt
+            while time.time() < wait_end:
+                if _is_email_verification_page(driver):
+                    logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
+                    return password
+                if _has_access_token(driver):
+                    logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
+                    return password
+                if not _is_signup_password_page(driver):
+                    return password
+                last = _password_page_state(driver)
+                errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
+                if errors:
+                    raise RuntimeError(f"创建账号密码提交被拒绝: errors={errors} state={last}")
+                time.sleep(0.35)
         raise RuntimeError(f"创建账号密码提交后仍停留在密码页: state={last}")
     logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
     return None
@@ -3268,20 +3304,43 @@ def run_roxy_registration(
             else:
                 logger.info("[Roxy注册][OTP] 输入后已离开验证码页，判定页面已自动提交")
 
-            otp_submit_timeout = max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 35) or 35))
+            otp_submit_timeout = max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 15) or 15))
+            otp_submit_attempts = max(
+                1,
+                min(2, int(getattr(_cfg, "ROXY_OTP_SUBMIT_ATTEMPTS", 2) or 2)),
+            )
             pending_grace = max(0, int(getattr(_cfg, "ROXY_OTP_PENDING_GRACE", 10) or 0))
-            outcome = _wait_after_email_otp_submit(driver, timeout=otp_submit_timeout)
+            first_observe = otp_submit_timeout
+            if otp_submit_attempts > 1:
+                first_observe = max(5, otp_submit_timeout // 2)
+            outcome = _wait_after_email_otp_submit(driver, timeout=first_observe)
+            observed_seconds = first_observe
+            if outcome == 'pending' and otp_submit_attempts > 1:
+                retry_state = _reload_and_resubmit_otp_once(
+                    driver,
+                    current_otp,
+                    timeout=max(3, otp_submit_timeout - first_observe),
+                )
+                if retry_state == "email_verified":
+                    outcome = "email_verified"
+                elif retry_state == "accepted":
+                    outcome = "accepted"
+                else:
+                    retry_observe = max(4, otp_submit_timeout - first_observe)
+                    outcome = _wait_after_email_otp_submit(driver, timeout=retry_observe)
+                    observed_seconds += retry_observe
             if outcome == 'pending':
                 if pending_grace:
                     logger.info("[Roxy][OTP] No explicit error; waiting %s more seconds before any resend", pending_grace)
                     outcome = _wait_after_email_otp_submit(driver, timeout=pending_grace)
+                    observed_seconds += pending_grace
                 if outcome == 'pending':
                     logger.info(
                         "[Roxy][OTP] 等待预算结束仍无接受信号；停止误进入资料页"
                     )
             outcome = _require_confirmed_otp_submit(
                 outcome,
-                otp_submit_timeout + (pending_grace if outcome == 'pending' else 0),
+                observed_seconds,
             )
             if outcome == 'accepted':
                 break

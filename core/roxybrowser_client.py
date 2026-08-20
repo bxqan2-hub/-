@@ -192,18 +192,15 @@ class RoxyBrowserClient:
     @staticmethod
     def _is_safe_create_retry_error(exc: Exception) -> bool:
         text = str(exc or "")
-        if "正在创建中，请稍等" in text:
-            return True
-        return (
-            "Roxy API 返回失败" in text
-            and "timeout of 15000ms exceeded" in text.lower()
-        )
+        # 只重试明确的“仍在创建”忙碌响应。批量实测中，指纹生成已经耗尽
+        # 固定 15000ms 业务预算后再次创建只会再浪费约 17 秒，并可能产生孤儿环境。
+        return "正在创建中，请稍等" in text
 
     def request(self, method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
         url = _join_url(self.api_base, path)
         method_u = method.upper()
-        # create 网络超时后服务端可能已创建环境，直接重试可能产生孤儿环境；只对 Roxy
-        # 明确返回的忙碌状态，以及创建前生成随机指纹的固定 15000ms 业务超时重试。
+        # create 网络超时后服务端可能已创建环境，直接重试可能产生孤儿环境；
+        # 只对 Roxy 明确返回的“正在创建中”忙碌状态重试。
         is_create = str(path or "").rstrip("/").endswith("/create") or "browser/create" in str(path or "")
         configured_attempts = max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
         create_attempts = max(
@@ -224,7 +221,7 @@ class RoxyBrowserClient:
                     url,
                     params=params or None,
                     json=json_body if json_body is not None else None,
-                    timeout=max(5, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+                    timeout=max(3, int(getattr(_cfg, "ROXY_API_TIMEOUT", 15) or 15)),
                 )
                 text = resp.text or ""
                 try:
@@ -574,8 +571,17 @@ class RoxyBrowserClient:
             pid = self.create_profile()
             created_by_run = True
             logger.info("[Roxy] 已创建临时环境：%s", pid)
-        if callable(on_profile_ready):
-            on_profile_ready(str(pid))
+        try:
+            if callable(on_profile_ready):
+                on_profile_ready(str(pid))
+        except BaseException:
+            # 环境已创建、但尚未返回 RoxyOpenResult；上层 finally 还拿不到
+            # profile_id，因此必须在这个边界就地回收，避免孤儿窗口。
+            if created_by_run:
+                logger.exception("[Roxy] 绑定新环境失败，立即回收：%s", pid)
+                self.close_profile(str(pid))
+                self.delete_profile(str(pid))
+            raise
 
         path = str(_cfg.ROXY_OPEN_PATH).format(profile_id=pid)
         params = dict(getattr(_cfg, "ROXY_OPEN_EXTRA_PARAMS", {}) or {})
@@ -588,26 +594,33 @@ class RoxyBrowserClient:
         # 否则 extra 里残留 headless=False 会导致 WebUI 保存无头后仍弹窗口。
         params["headless"] = bool(getattr(_cfg, "ROXY_OPEN_HEADLESS", False)) if headless is None else bool(headless)
         logger.info("[Roxy] open 参数：profile=%s headless=%s keep_open=%s", pid, params.get("headless"), getattr(_cfg, "ROXY_KEEP_BROWSER_OPEN", False))
-        result = self.request(
-            _cfg.ROXY_OPEN_METHOD,
-            path,
-            params=params if _cfg.ROXY_OPEN_METHOD.upper() == "GET" else None,
-            json_body=params if _cfg.ROXY_OPEN_METHOD.upper() != "GET" else None,
-        )
-        debugger_address = self._extract_debugger_address(result)
-        logger.info("[Roxy] open 返回摘要: debugger=%s raw=%s", debugger_address, json.dumps(result, ensure_ascii=False)[:800])
-        webdriver_url = _first(result, [
-            ("webdriver",), ("webDriver",), ("webdriver_url",), ("webdriverUrl",),
-            ("selenium",), ("selenium_url",), ("seleniumUrl",),
-            ("data", "webdriver"), ("data", "webDriver"), ("data", "webdriver_url"), ("data", "webdriverUrl"),
-            ("data", "selenium"), ("data", "selenium_url"), ("data", "seleniumUrl"),
-        ]) or None
-        ws_endpoint = _first(result, [
-            ("ws",), ("wsEndpoint",), ("ws_endpoint",), ("debuggerWsUrl",),
-            ("data", "ws"), ("data", "wsEndpoint"), ("data", "ws_endpoint"), ("data", "debuggerWsUrl"),
-        ]) or None
-        if not debugger_address and not webdriver_url:
-            raise RuntimeError(f"Roxy 已打开环境但未返回 Selenium/调试地址，请检查 ROXY_OPEN_PATH 或接口响应: {result}")
+        try:
+            result = self.request(
+                _cfg.ROXY_OPEN_METHOD,
+                path,
+                params=params if _cfg.ROXY_OPEN_METHOD.upper() == "GET" else None,
+                json_body=params if _cfg.ROXY_OPEN_METHOD.upper() != "GET" else None,
+            )
+            debugger_address = self._extract_debugger_address(result)
+            logger.info("[Roxy] open 返回摘要: debugger=%s raw=%s", debugger_address, json.dumps(result, ensure_ascii=False)[:800])
+            webdriver_url = _first(result, [
+                ("webdriver",), ("webDriver",), ("webdriver_url",), ("webdriverUrl",),
+                ("selenium",), ("selenium_url",), ("seleniumUrl",),
+                ("data", "webdriver"), ("data", "webDriver"), ("data", "webdriver_url"), ("data", "webdriverUrl"),
+                ("data", "selenium"), ("data", "selenium_url"), ("data", "seleniumUrl"),
+            ]) or None
+            ws_endpoint = _first(result, [
+                ("ws",), ("wsEndpoint",), ("ws_endpoint",), ("debuggerWsUrl",),
+                ("data", "ws"), ("data", "wsEndpoint"), ("data", "ws_endpoint"), ("data", "debuggerWsUrl"),
+            ]) or None
+            if not debugger_address and not webdriver_url:
+                raise RuntimeError(f"Roxy 已打开环境但未返回 Selenium/调试地址，请检查 ROXY_OPEN_PATH 或接口响应: {result}")
+        except BaseException:
+            if created_by_run:
+                logger.exception("[Roxy] 新环境打开/解析失败，立即回收：%s", pid)
+                self.close_profile(str(pid))
+                self.delete_profile(str(pid))
+            raise
         return RoxyOpenResult(
             pid,
             result,

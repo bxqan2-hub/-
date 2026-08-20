@@ -91,6 +91,7 @@ class RegistrationEmailSourceTests(unittest.TestCase):
             proxy_mode=None,
         )
         executor.submit.assert_called_once_with(registration_service._run_one_job, 17, "registration.log")
+        executor.submit.return_value.add_done_callback.assert_called_once()
 
 
 if __name__ == "__main__":

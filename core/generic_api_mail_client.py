@@ -897,11 +897,21 @@ def fetch_latest_otp(
             return False
         return True
 
+    # 一轮 OTP 等待只复用一个长连接；避免并发 worker 每次轮询都重做 TLS 握手。
+    session = requests.Session()
+    session.trust_env = False
     while time.time() < deadline:
         if stop_requested():
             raise GenericApiMailError("验证码页面已进入下一步，停止等待新验证码")
+        # settle 已满足就直接返回，不再发起下一个可能占满 8s+5s 的请求。
+        now = time.time()
+        if best_otp and settle_until is not None and now >= settle_until:
+            logger.info(
+                f"[GenericAPI] settle 完成，返回 OTP={best_otp}, "
+                f"候选锁定时间={time.strftime('%H:%M:%S', time.localtime(best_seen_at))}"
+            )
+            return best_otp
         try:
-            session = requests.Session()
             yy_result = _fetch_yangyang_otp(session, account.code_url, headers, after_ts=after_ts) if is_yangyang else None
             fly_result = None
             if (not yy_result) and is_flysms:

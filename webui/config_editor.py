@@ -340,7 +340,19 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_CREATE_API_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
-        "label": "创建环境尝试次数", "help": "默认 2；限制 Roxy 15 秒指纹生成超时对串行创建队列的阻塞",
+        "label": "创建环境尝试次数", "help": "默认 2；只重试 Roxy 明确的创建忙磁状态，固定 15 秒指纹失败不会再重试",
+    },
+    {
+        "key": "ROXY_API_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Roxy 本地 API 超时", "help": "创建/打开/关闭/删除环境的单请求秒数，与 Selenium 页面等待分开",
+    },
+    {
+        "key": "ROXY_API_RETRIES", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Roxy API 尝试次数", "help": "默认 2；用于打开/关闭/删除等短暂错误，创建接口另行收敛",
+    },
+    {
+        "key": "ROXY_API_RETRY_DELAY", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Roxy API 重试间隔", "help": "默认 1 秒；第二次前的短延迟",
     },
     {
         "key": "ROXY_EMAIL_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
@@ -352,7 +364,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_OTP_MAX_WAIT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
-        "label": "Roxy OTP单轮等待", "help": "Roxy 注册每轮收取邮箱 OTP 的最长秒数，默认 60",
+        "label": "Roxy OTP单轮等待", "help": "Roxy 注册每轮收取邮箱 OTP 的最长秒数，默认 25",
     },
     {
         "key": "ROXY_OTP_MAX_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
@@ -365,6 +377,18 @@ EDITABLE_FIELDS = [
     {
         "key": "ROXY_OTP_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
         "label": "OTP提交超时", "help": "提交 OTP 后等待资料页/登录态的主观察窗口，默认 15 秒",
+    },
+    {
+        "key": "ROXY_OTP_SUBMIT_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "OTP 表单提交次数", "help": "默认 2；首次无响应时刷新、重填同一验证码后只再提交一次",
+    },
+    {
+        "key": "ROXY_PASSWORD_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "密码提交总超时", "help": "密码表单的总观察秒数，默认 16；单次无响应会重新定位原表单",
+    },
+    {
+        "key": "ROXY_PASSWORD_SUBMIT_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "密码表单提交次数", "help": "默认 2；只允许一次快速重提，不重走整个注册流程",
     },
     {
         "key": "ROXY_PROFILE_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",

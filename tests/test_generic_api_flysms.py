@@ -133,6 +133,10 @@ class FlysmsPickupTests(unittest.TestCase):
 
         class SequenceSession:
             calls = 0
+            instances = 0
+
+            def __init__(self):
+                self.__class__.instances += 1
 
             def get(self, *_args, **_kwargs):
                 self.__class__.calls += 1
@@ -156,6 +160,35 @@ class FlysmsPickupTests(unittest.TestCase):
                 exclude_codes={"111111"},
             )
         self.assertEqual(code, "222222")
+        self.assertEqual(SequenceSession.instances, 1)
+
+    def test_settled_otp_returns_before_starting_another_network_request(self):
+        clock = [0.0]
+
+        class OneConnectionSession:
+            calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.__class__.calls += 1
+                return FakeResponse(status_code=200, text='{"code":"654321"}')
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", OneConnectionSession), \
+             patch("core.generic_api_mail_client.time.time", side_effect=lambda: clock[0]), \
+             patch("core.generic_api_mail_client.time.sleep", side_effect=advance):
+            code = fetch_latest_otp(
+                account.email,
+                max_wait=20,
+                poll_interval=2,
+                settle_seconds=1,
+            )
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(OneConnectionSession.calls, 1)
 
     def test_polling_html_mailbox_waits_for_mail_after_send_time(self):
         clock = [0.0]

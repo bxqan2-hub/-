@@ -2,10 +2,28 @@
 import unittest
 from unittest.mock import patch
 
-from core import db, registration_service
+from core import db, email_provider, registration_service
 
 
 class GenericApiEmailClaimTests(unittest.TestCase):
+    def test_provider_releases_generic_email_with_configured_failure_limit(self):
+        with patch.object(email_provider, "resolve_email_source", return_value="generic_api"), \
+             patch("core.db.release_unconsumed_generic_api_email", return_value=True) as release, \
+             patch("config.email.GENERIC_API_REGISTRATION_FAILURE_LIMIT", 3):
+            changed = email_provider.release_email_if_unconsumed(
+                "retry@example.test",
+                "OTP timeout",
+                count_failure=True,
+            )
+
+        self.assertTrue(changed)
+        release.assert_called_once_with(
+            "retry@example.test",
+            note="OTP timeout",
+            count_failure=True,
+            failure_limit=3,
+        )
+
     def test_only_mailbox_or_otp_errors_count_toward_quarantine(self):
         self.assertTrue(registration_service._should_count_registration_email_failure(
             "GenericApiTransportError: pickup endpoint timed out"

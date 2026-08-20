@@ -207,7 +207,9 @@ def probe_selenium_driver_exit_geo(
         probe_opened = True
         timeout_seconds = max(1, int(math.ceil(timeout)))
         driver.set_page_load_timeout(timeout_seconds)
-        driver.set_script_timeout(timeout_seconds)
+        # Selenium 的 async callback 还需要极短的收尾空间；所有 IP 服务在浏览器
+        # 内并行请求，因此一次尝试只消耗一个 timeout，而不是 endpoints * timeout。
+        driver.set_script_timeout(timeout_seconds + 1)
         configured_attempts = int(attempts if attempts is not None else 1)
         max_attempts = max(1, min(10, configured_attempts or 1))
         delay = max(0.0, float(retry_delay or 0.0))
@@ -216,26 +218,50 @@ def probe_selenium_driver_exit_geo(
             attempt += 1
             if callable(stop_check):
                 stop_check()
-            for endpoint in endpoints:
-                if callable(stop_check):
-                    stop_check()
-                try:
-                    driver.get(endpoint)
-                    data = driver.execute_script(
-                        """
-                        const text = document.body?.innerText || document.documentElement?.innerText || '';
-                        try { return JSON.parse(text); } catch (_) { return null; }
-                        """
-                    )
-                    geo = normalize_browser_exit_geo(data)
-                    if geo.get("ip"):
-                        _log_detected(label, geo)
-                        return geo
-                except Exception as exc:
-                    logger.debug(
-                        "[%s] 浏览器出口 IP 探测失败 endpoint=%s attempt=%s/%s: %s: %s",
-                        label, endpoint, attempt, max_attempts, type(exc).__name__, exc,
-                    )
+            if callable(stop_check):
+                stop_check()
+            try:
+                data = driver.execute_async_script(
+                    """
+                    const endpoints = Array.isArray(arguments[0]) ? arguments[0] : [];
+                    const timeoutMs = Math.max(250, Number(arguments[1]) || 1000);
+                    const done = arguments[arguments.length - 1];
+                    const request = async url => {
+                      const controller = new AbortController();
+                      const timer = setTimeout(() => controller.abort(), timeoutMs);
+                      try {
+                        const response = await fetch(url, {
+                          method: 'GET',
+                          headers: {Accept: 'application/json'},
+                          cache: 'no-store',
+                          credentials: 'omit',
+                          signal: controller.signal,
+                        });
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        const payload = await response.json();
+                        const ip = String(payload?.ip || payload?.query || '').trim();
+                        if (!ip) throw new Error('missing_ip');
+                        return payload;
+                      } finally {
+                        clearTimeout(timer);
+                      }
+                    };
+                    Promise.any(endpoints.map(request))
+                      .then(payload => done(payload))
+                      .catch(() => done(null));
+                    """,
+                    endpoints,
+                    int(math.ceil(timeout * 1000)),
+                )
+                geo = normalize_browser_exit_geo(data)
+                if geo.get("ip"):
+                    _log_detected(label, geo)
+                    return geo
+            except Exception as exc:
+                logger.debug(
+                    "[%s] 浏览器出口 IP 并行探测失败 attempt=%s/%s: %s: %s",
+                    label, attempt, max_attempts, type(exc).__name__, exc,
+                )
             if attempt >= max_attempts:
                 break
             if delay:

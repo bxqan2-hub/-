@@ -257,6 +257,7 @@ def release_email_if_unconsumed(
 
     source = resolve_email_source(email)
     from core import db
+    from config import email as _email_cfg
 
     if source == "outlook":
         changed = db.release_unconsumed_outlook(email, note=note)

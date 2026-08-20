@@ -65,6 +65,7 @@ class _SeleniumDriver:
         self.closed_handles = []
         self.page_load_timeouts = []
         self.script_timeouts = []
+        self.async_calls = []
 
     def set_page_load_timeout(self, value):
         self.page_load_timeouts.append(value)
@@ -76,6 +77,13 @@ class _SeleniumDriver:
         self.urls.append(url)
 
     def execute_script(self, _script):
+        if isinstance(self.payload, list):
+            return self.payload.pop(0)
+        return self.payload
+
+    def execute_async_script(self, _script, endpoints, timeout_ms):
+        self.async_calls.append((list(endpoints), timeout_ms))
+        self.urls.extend(endpoints)
         if isinstance(self.payload, list):
             return self.payload.pop(0)
         return self.payload
@@ -156,6 +164,21 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
         self.assertEqual(driver.current_window_handle, "registration")
         self.assertEqual(driver.page_load_timeouts[-1], 90)
         self.assertEqual(driver.script_timeouts[-1], 12)
+
+    @patch(
+        "core.browser_exit_geo._probe_settings",
+        return_value=(["https://geo-a.example/json", "https://geo-b.example/json"], 4.0),
+    )
+    def test_selenium_probe_queries_all_endpoints_in_one_parallel_call(self, _settings):
+        driver = _SeleniumDriver({"ip": "198.51.100.30", "country": "GB"})
+
+        geo = probe_selenium_driver_exit_geo(driver, label="Roxy registration")
+
+        self.assertEqual(geo["ip"], "198.51.100.30")
+        self.assertEqual(driver.async_calls, [(
+            ["https://geo-a.example/json", "https://geo-b.example/json"],
+            4000,
+        )])
 
     @patch("core.browser_exit_geo.time.sleep")
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))

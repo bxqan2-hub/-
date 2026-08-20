@@ -525,6 +525,33 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         _deactivate_job(job_id)
 
 
+def _reconcile_finished_registration_future(job_id: int, future: Any) -> None:
+    """Future 结束后保证 DB 也已进入终态，防止 worker 无声消失。"""
+    job = db.get_job(int(job_id)) or {}
+    if str(job.get("status") or "").lower() not in {"pending", "running", "stopping"}:
+        return
+    try:
+        exc = future.exception()
+    except BaseException as future_exc:
+        exc = future_exc
+    if exc is None:
+        detail = "执行线程已结束，但任务未写入终态"
+    else:
+        detail = f"执行线程异常结束：{type(exc).__name__}: {exc}"
+    profile_id = str(job.get("roxy_profile_id") or "").strip()
+    if profile_id:
+        _cleanup_roxy_on_stop(int(job_id), profile_id)
+    _release_unconsumed_job_email(job.get("email"), detail)
+    db.update_job(
+        int(job_id),
+        status="failed",
+        error=detail[:500],
+        completed_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    _append_job_log(int(job_id), f"任务终态看门狗已收敛异常任务：{detail}")
+    logger.error("[Service] 任务 #%s 的 Future 已结束但 DB 仍非终态，已标记 failed", job_id)
+
+
 def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int) -> None:
     """把 Codex 补跑作为标准任务执行，并复用任务状态、日志和停止入口。"""
     _activate_job(job_id)
@@ -636,7 +663,10 @@ def submit_registration(
                 proxy_mode=proxy_mode,
             )
             try:
-                executor.submit(_run_one_job, job["id"], job["log_file"])
+                future = executor.submit(_run_one_job, job["id"], job["log_file"])
+                future.add_done_callback(
+                    lambda completed, jid=int(job["id"]): _reconcile_finished_registration_future(jid, completed)
+                )
             except Exception as exc:
                 db.update_job(
                     int(job["id"]),

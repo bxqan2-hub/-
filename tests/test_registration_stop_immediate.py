@@ -1,12 +1,34 @@
 # -*- coding: utf-8 -*-
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core import registration_service
 
 
 class RegistrationImmediateStopTests(unittest.TestCase):
+    def test_finished_future_reconciles_a_stranded_running_job(self):
+        future = MagicMock()
+        future.exception.return_value = RuntimeError("worker vanished")
+        job = {
+            "id": 19,
+            "status": "running",
+            "email": "mail@example.test",
+            "roxy_profile_id": "profile-19",
+        }
+        with patch.object(registration_service.db, "get_job", return_value=job), \
+             patch.object(registration_service.db, "update_job") as update_job, \
+             patch.object(registration_service, "_cleanup_roxy_on_stop", return_value=True) as cleanup, \
+             patch.object(registration_service, "_release_unconsumed_job_email") as release_email, \
+             patch.object(registration_service, "_append_job_log") as append_log:
+            registration_service._reconcile_finished_registration_future(19, future)
+
+        cleanup.assert_called_once_with(19, "profile-19")
+        release_email.assert_called_once()
+        self.assertEqual(update_job.call_args.kwargs["status"], "failed")
+        self.assertIn("RuntimeError: worker vanished", update_job.call_args.kwargs["error"])
+        append_log.assert_called_once()
+
     def test_profile_created_after_stop_is_deleted_before_open(self):
         with patch.object(registration_service, "current_job_id", return_value=13), \
              patch.object(registration_service.db, "update_job") as update_job, \
