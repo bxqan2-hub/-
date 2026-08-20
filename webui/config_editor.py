@@ -444,6 +444,10 @@ EDITABLE_FIELDS = [
         "label": "通用取码熔断轮数", "help": "主请求+短重试都失败的连续轮数，达到后停止空转",
     },
     {
+        "key": "GENERIC_API_REGISTRATION_FAILURE_LIMIT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "邮箱注册失败停用阈值", "help": "同一取码邮箱连续失败达到该次数后停用，默认 2",
+    },
+    {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
         "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,domain_api,inbox_mate,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail",
     },

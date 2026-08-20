@@ -18,6 +18,7 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
             "ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS",
             "GENERIC_API_REQUEST_TIMEOUT",
             "GENERIC_API_MAX_CONSECUTIVE_ERRORS",
+            "GENERIC_API_REGISTRATION_FAILURE_LIMIT",
         }.issubset(keys))
 
     def test_roxy_fixed_os_is_exposed_as_windows_macos_choice(self):

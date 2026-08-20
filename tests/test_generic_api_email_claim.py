@@ -2,10 +2,21 @@
 import unittest
 from unittest.mock import patch
 
-from core import db
+from core import db, registration_service
 
 
 class GenericApiEmailClaimTests(unittest.TestCase):
+    def test_only_mailbox_or_otp_errors_count_toward_quarantine(self):
+        self.assertTrue(registration_service._should_count_registration_email_failure(
+            "GenericApiTransportError: pickup endpoint timed out"
+        ))
+        self.assertTrue(registration_service._should_count_registration_email_failure(
+            "OTP 等待超时"
+        ))
+        self.assertFalse(registration_service._should_count_registration_email_failure(
+            "WebDriverException: browser navigation failed"
+        ))
+
     def test_claim_prefers_newest_clean_email_over_old_recycled_email(self):
         rows = [
             {"id": 1, "email": "old@example.test", "code_url": "https://mail.test/1", "status": "available", "note": "旧失败"},
@@ -48,6 +59,50 @@ class GenericApiEmailClaimTests(unittest.TestCase):
             claimed = db.claim_next_generic_api_email()
 
         self.assertEqual(claimed["email"], "fresh@example.test")
+
+    def test_failed_unconsumed_email_is_requeued_then_disabled_at_limit(self):
+        rows = [
+            {"id": 1, "email": "retry@example.test", "code_url": "https://mail.test/1", "status": "used"},
+        ]
+        with patch.object(db, "_load_accounts", return_value=[]), \
+             patch.object(db, "_load_generic_api_emails", return_value=rows), \
+             patch.object(db, "_save_generic_api_emails") as save:
+            self.assertTrue(db.release_unconsumed_generic_api_email(
+                "retry@example.test",
+                note="OTP timeout",
+                count_failure=True,
+                failure_limit=2,
+            ))
+            self.assertEqual(rows[0]["status"], "available")
+            self.assertEqual(rows[0]["registration_failure_count"], 1)
+            self.assertEqual(rows[0]["retry_count"], 1)
+
+            rows[0]["status"] = "used"
+            self.assertTrue(db.release_unconsumed_generic_api_email(
+                "retry@example.test",
+                note="OTP timeout again",
+                count_failure=True,
+                failure_limit=2,
+            ))
+
+        self.assertEqual(rows[0]["status"], "disabled")
+        self.assertEqual(rows[0]["registration_failure_count"], 2)
+        self.assertEqual(rows[0]["retry_count"], 2)
+        self.assertEqual(save.call_count, 2)
+
+    def test_cancelled_unconsumed_email_does_not_count_as_failure(self):
+        rows = [
+            {"id": 1, "email": "cancel@example.test", "code_url": "https://mail.test/1", "status": "used"},
+        ]
+        with patch.object(db, "_load_accounts", return_value=[]), \
+             patch.object(db, "_load_generic_api_emails", return_value=rows), \
+             patch.object(db, "_save_generic_api_emails"):
+            self.assertTrue(db.release_unconsumed_generic_api_email(
+                "cancel@example.test",
+                note="user stopped",
+            ))
+        self.assertEqual(rows[0]["status"], "available")
+        self.assertNotIn("registration_failure_count", rows[0])
 
 
 if __name__ == "__main__":

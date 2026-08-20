@@ -62,9 +62,12 @@ ROXY_KEEP_BROWSER_OPEN: bool = False
 # 注册快速等待预算。这些值只限制单个阶段，成功信号仍会立即结束等待。
 # 旧逻辑把邮箱提交、OTP、session 请求共用 90s Selenium 超时，
 # 一次卡住的 async fetch 就可以超出上层 deadline。分开后可独立调整。
-ROXY_EMAIL_SUBMIT_TIMEOUT: int = 20
-ROXY_EMAIL_SUBMIT_ATTEMPTS: int = 2
-ROXY_OTP_MAX_WAIT: int = 60
+# 只提交一次并持续观察状态：真实线路的邮箱 -> OTP 跳转可能需要 20~50s。
+# 延长观察窗口不会拖慢成功路径（成功信号立即返回），但可避免超时后重复填写。
+ROXY_EMAIL_SUBMIT_TIMEOUT: int = 50
+ROXY_EMAIL_SUBMIT_ATTEMPTS: int = 1
+# 实测成功 OTP 在进入验证页后约 10s 内到达；40s 仍无码则快速换邮箱。
+ROXY_OTP_MAX_WAIT: int = 40
 ROXY_OTP_POLL_INTERVAL: int = 2
 ROXY_OTP_SETTLE_SECONDS: int = 1
 ROXY_OTP_MAX_ATTEMPTS: int = 2

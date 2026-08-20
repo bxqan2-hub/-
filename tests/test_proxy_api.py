@@ -15,7 +15,6 @@ class ProxyApiTests(unittest.TestCase):
         proxy_cfg._PROXY_API_CACHE["proxy"] = ""
         proxy_cfg._PROXY_API_CACHE["expires_at"] = 0.0
         proxy_cfg._PROXY_API_FLIGHTS.clear()
-        proxy_cfg._STATIC_PROXY_INDEX = 0
 
     def test_normalizes_fullwidth_socks5_punctuation(self):
         self.assertEqual(
@@ -23,14 +22,15 @@ class ProxyApiTests(unittest.TestCase):
             "socks5://user:pass@proxy.test:3010",
         )
 
-    def test_static_pool_uses_round_robin(self):
-        with patch.object(proxy_cfg, "PROXY_POOL", [
+    def test_static_pool_randomly_picks_one_entry(self):
+        pool = [
             "socks5h://one.example:3010",
             "socks5h://two.example:3010",
-        ]):
-            self.assertEqual(proxy_cfg._pick_static_or_system_proxy(), "socks5h://one.example:3010")
-            self.assertEqual(proxy_cfg._pick_static_or_system_proxy(), "socks5h://two.example:3010")
-            self.assertEqual(proxy_cfg._pick_static_or_system_proxy(), "socks5h://one.example:3010")
+        ]
+        with patch.object(proxy_cfg, "PROXY_POOL", pool), \
+             patch.object(proxy_cfg.random, "choice", return_value=pool[1]) as choice:
+            self.assertEqual(proxy_cfg._pick_static_or_system_proxy(), pool[1])
+        choice.assert_called_once_with(pool)
 
     def test_parse_cliproxy_txt_host_port(self):
         self.assertEqual(

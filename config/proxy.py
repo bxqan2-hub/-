@@ -2,7 +2,7 @@
 """
 代理池配置
 
-每次注册轮询抽取一个代理，避免并发窗口随机撞到同一池条目。
+每个注册窗口随机抽取一个代理，并在该窗口全流程内固定使用。
 
 协议说明：
     - http:// / https://   HTTP(S) 代理
@@ -114,8 +114,6 @@ _SUPPORTED_PROXY_PROTOCOLS = {"http", "https", "socks5", "socks5h"}
 _PROXY_API_LOCK = threading.Lock()
 _PROXY_API_CACHE = {"key": None, "proxy": "", "expires_at": 0.0}
 _PROXY_API_FLIGHTS = {}
-_STATIC_PROXY_LOCK = threading.Lock()
-_STATIC_PROXY_INDEX = 0
 
 
 def _normalize_proxy_url(raw: str) -> str:
@@ -592,7 +590,6 @@ def fetch_proxy_from_api(
 
 
 def _pick_static_or_system_proxy(*, strict: bool = False) -> str:
-    global _STATIC_PROXY_INDEX
     entries = list(PROXY_POOL or [])
     if not entries:
         return detect_system_proxy()
@@ -609,18 +606,15 @@ def _pick_static_or_system_proxy(*, strict: bool = False) -> str:
                 raise RuntimeError("PROXY_POOL_ACTIVE 不在当前 PROXY_POOL 中，已停止避免错用代理")
             return active
         if strict and len(resolved) > 1:
-            raise RuntimeError("纯协议注册要求先选择 PROXY_POOL_ACTIVE，禁止在多条静态代理之间轮询")
-        with _STATIC_PROXY_LOCK:
-            selected = resolved[_STATIC_PROXY_INDEX % len(resolved)]
-            _STATIC_PROXY_INDEX += 1
-        return selected
+            raise RuntimeError("纯协议注册要求先选择 PROXY_POOL_ACTIVE，禁止在多条静态代理之间随机选择")
+        return random.choice(resolved)
     if strict:
         raise RuntimeError("严格代理出口未解析到静态代理或系统代理")
     return detect_system_proxy()
 
 
 def pick_proxy(*, strict: bool = False) -> str:
-    """从代理池中轮询抽取一个代理 URL。
+    """从代理池中随机抽取一个代理 URL。
 
     - 池为空，或条目为 system/auto：跟随当前系统代理
     - 系统代理也没有时返回空串（直连；TUN 模式通常也是这种）

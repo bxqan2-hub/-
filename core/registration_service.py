@@ -191,14 +191,23 @@ def _resolve_registration_proxy(proxy_mode: str | None) -> str | None:
     return proxy
 
 
-def _release_unconsumed_job_email(email: str | None, reason: str) -> None:
+def _release_unconsumed_job_email(
+    email: str | None,
+    reason: str,
+    *,
+    count_failure: bool = False,
+) -> None:
     """可恢复失败：回收未生成账号的邮箱，并把它放到重试队列末尾。"""
     if not email:
         return
     try:
         from core.email_provider import release_email_if_unconsumed
 
-        release_email_if_unconsumed(email, note=f"可重试，已移至队尾: {reason[:180]}")
+        release_email_if_unconsumed(
+            email,
+            note=f"可重试，已移至队尾: {reason[:180]}",
+            count_failure=count_failure,
+        )
     except Exception:
         logger.exception("[Service] 回收未消耗邮箱失败: %s", email)
 
@@ -235,6 +244,19 @@ def _should_disable_failed_registration_email(error: object) -> bool:
         or "账号已删除或停用" in text
         or "账号已被封禁" in text
     )
+
+
+def _should_count_registration_email_failure(error: object) -> bool:
+    """Count only mailbox/OTP failures; proxy or browser failures must not poison a mailbox."""
+    text = str(error or "")
+    lowered = text.lower()
+    return any(marker in lowered for marker in (
+        "genericapimailerror",
+        "genericapitransporterror",
+        "otp",
+        "验证码",
+        "取码接口",
+    ))
 
 
 def _disable_job_email(email: str | None, reason: str) -> bool:
@@ -458,7 +480,11 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 if _should_disable_failed_registration_email(err):
                     _disable_job_email(email_to_handle, str(err))
                 else:
-                    _release_unconsumed_job_email(email_to_handle, str(err))
+                    _release_unconsumed_job_email(
+                        email_to_handle,
+                        str(err),
+                        count_failure=_should_count_registration_email_failure(err),
+                    )
                 log_logger.error(f"[Job {job_id}] 失败: {err}")
     except StopRequested as exc:
         _release_unconsumed_job_email(email, str(exc))
@@ -474,7 +500,11 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         if _should_disable_failed_registration_email(err_text):
             _disable_job_email(email, err_text)
         else:
-            _release_unconsumed_job_email(email, err_text)
+            _release_unconsumed_job_email(
+                email,
+                err_text,
+                count_failure=_should_count_registration_email_failure(err_text),
+            )
         if is_stop_requested(job_id):
             log_logger.warning(f"[Job {job_id}] 停止中捕获异常，按停止处理: {type(exc).__name__}: {exc}")
             db.update_job(

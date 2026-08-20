@@ -2620,8 +2620,18 @@ def release_generic_api_email(email: str, status: str = "available", note: str |
         _save_generic_api_emails(rows)
 
 
-def release_unconsumed_generic_api_email(email: str, note: str | None = None) -> bool:
-    """原子回收未生成本地账号且仍为 used 的通用 API 邮箱。"""
+def release_unconsumed_generic_api_email(
+    email: str,
+    note: str | None = None,
+    *,
+    count_failure: bool = False,
+    failure_limit: int = 0,
+) -> bool:
+    """原子回收未生成本地账号且仍为 used 的通用 API 邮箱。
+
+    真实注册失败会累加 ``registration_failure_count`` 并移到队尾；达到阈值后
+    直接停用。用户停止/取消只做无损回收，不计失败。
+    """
     with _LOCK:
         if _find_by_email(_load_accounts(), email) is not None:
             return False
@@ -2629,8 +2639,20 @@ def release_unconsumed_generic_api_email(email: str, note: str | None = None) ->
         row = _find_by_email(rows, email)
         if row is None or row.get("status") != "used":
             return False
-        row["status"] = "available"
-        row["used_at"] = None
+        if count_failure:
+            failures = int(row.get("registration_failure_count") or 0) + 1
+            row["registration_failure_count"] = failures
+            row["retry_count"] = int(row.get("retry_count") or 0) + 1
+            row["retry_queue_seq"] = max(
+                (int(item.get("retry_queue_seq") or 0) for item in rows),
+                default=0,
+            ) + 1
+            should_disable = int(failure_limit or 0) > 0 and failures >= int(failure_limit)
+            row["status"] = "disabled" if should_disable else "available"
+            row["used_at"] = _now() if should_disable else None
+        else:
+            row["status"] = "available"
+            row["used_at"] = None
         if note is not None:
             row["note"] = note
         _save_generic_api_emails(rows)

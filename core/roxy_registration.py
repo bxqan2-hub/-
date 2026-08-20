@@ -702,7 +702,7 @@ def _click_email_entry_option(driver) -> bool:
     return False
 
 
-def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
+def _type_email_address(driver, email: str, timeout: int | None = None) -> str | None:
     """进入邮箱登录/注册方式并填写邮箱。全程不依赖页面可见文字，避免非日本出口本地化后误点 Google。"""
     end = time.time() + (timeout or int(_cfg.ROXY_SELENIUM_TIMEOUT))
     last_state = None
@@ -710,10 +710,22 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
     empty_shell_since = None
     empty_shell_reloaded = False
     while time.time() < end:
+        # A late SPA/server transition can arrive after the caller's previous
+        # observation budget.  Detect that state before looking for an email
+        # input again so an existing OTP/password page is never misreported as
+        # a missing email field.
         el = _find_visible_email_input_js(driver)
         if el:
             _human_type_text(driver, el, email, clear=True)
-            return
+            return None
+        if _is_email_verification_page(driver):
+            return "otp"
+        if _is_signup_password_page(driver):
+            return "password"
+        if _is_login_password_page(driver):
+            return "login_password"
+        if _has_access_token(driver):
+            return "logged_in"
         last_state = _email_entry_state(driver)
         if _is_empty_login_shell(last_state):
             empty_shell_since = empty_shell_since or time.time()
@@ -1217,7 +1229,15 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
             return "password"
         if _has_access_token(driver):
             return "logged_in"
-        _type_email_address(driver, email, timeout=20)
+        typed_state = _type_email_address(driver, email, timeout=20)
+        if typed_state == "login_password":
+            raise RuntimeError(
+                f"Email transitioned to an existing-account password page: "
+                f"url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}"
+            )
+        if typed_state in ("password", "otp", "logged_in"):
+            logger.info("%s email advanced while preparing a retry: %s", _log_prefix(driver), typed_state)
+            return typed_state
         state = _email_input_value_state(driver)
         last_state = state
         values = [str(i.get("value") or "") for i in (state.get("inputs") or [])]
@@ -1894,6 +1914,16 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
     return 'accepted'
 
 
+def _require_confirmed_otp_submit(outcome: str, observed_seconds: int) -> str:
+    """Never convert an unchanged verification form into a successful OTP submit."""
+    if outcome == "pending":
+        raise RuntimeError(
+            f"OTP submit stayed on the verification page for {max(0, int(observed_seconds))}s "
+            "without an acceptance signal; profile progression was stopped"
+        )
+    return outcome
+
+
 def _click_continue(driver) -> None:
     """只点击 OTP 表单自己的提交按钮，禁止在跳转后的登录页误点第三方登录。"""
     _click_any(driver, [
@@ -2273,7 +2303,12 @@ def _password_page_state(driver) -> dict:
           type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
           disabled: !!el.disabled, visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
         })).slice(0, 30);
-        return {url: location.href, inputs, forms, buttons};
+        const errors = [...document.querySelectorAll('[role="alert"],[aria-live="assertive"],[data-error],.error,.text-error')]
+          .filter(visible)
+          .map(el => (el.textContent || el.getAttribute('data-error') || '').trim())
+          .filter(Boolean)
+          .slice(0, 12);
+        return {url: location.href, inputs, forms, buttons, errors};
         """) or {}
     except Exception as exc:
         return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
@@ -2404,12 +2439,14 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                 if _has_access_token(driver):
                     logger.info("%s 一次性验证码入口后已检测到登录态", _log_prefix(driver))
                     return None
+                last = _password_page_state(driver)
+                errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
+                if errors:
+                    raise RuntimeError(f"一次性验证码入口提交被拒绝: errors={errors} state={last}")
                 time.sleep(0.5)
-            logger.info("%s 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理", _log_prefix(driver))
-            return None
+            raise RuntimeError(f"一次性验证码入口提交后仍停留在密码页: state={last}")
         if is_login_password:
-            logger.info("%s 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：state=%s", _log_prefix(driver), last)
-            return None
+            raise RuntimeError(f"当前是登录密码页且无一次性验证码入口，邮箱按已注册/不可用处理: state={last}")
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
         result = driver.execute_script(r"""
@@ -2426,13 +2463,22 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
           .map((el, idx) => {
             const r = el.getBoundingClientRect();
             const ir = input.getBoundingClientRect();
-            return {el, idx, below: r.top >= ir.bottom - 10, dist: Math.max(0, r.top - ir.bottom) + Math.abs((r.left+r.right-ir.left-ir.right)/2)/10};
+            const type = String(el.getAttribute('type') || '').toLowerCase();
+            const cls = String(el.className || '').toLowerCase();
+            const isSubmit = type === 'submit';
+            const isPrimary = /\bbtn-primary\b|\b_primary_|\bw-full\b/.test(cls);
+            const dist = Math.max(0, r.top - ir.bottom) + Math.abs((r.left+r.right-ir.left-ir.right)/2)/10;
+            // Password visibility toggles are type=button and are often closer
+            // to the input than the real submit button.  Always rank a real
+            // form submit first; distance only breaks ties inside that class.
+            const score = (isSubmit ? 1000 : 0) + (isPrimary ? 100 : 0) - dist;
+            return {el, idx, type, isSubmit, isPrimary, below: r.top >= ir.bottom - 10, dist, score};
           })
           .filter(x => x.below)
-          .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
+          .sort((a,b) => b.score - a.score || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
         buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
+        return {ok:true, reason:'password_targets', input, button: buttons[0].el, buttonType: buttons[0].type, isSubmit: buttons[0].isSubmit};
         """) or {}
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
@@ -2451,8 +2497,12 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                 return password
             if not _is_signup_password_page(driver):
                 return password
+            last = _password_page_state(driver)
+            errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
+            if errors:
+                raise RuntimeError(f"创建账号密码提交被拒绝: errors={errors} state={last}")
             time.sleep(0.5)
-        return password
+        raise RuntimeError(f"创建账号密码提交后仍停留在密码页: state={last}")
     logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
     return None
 
@@ -3227,9 +3277,12 @@ def run_roxy_registration(
                     outcome = _wait_after_email_otp_submit(driver, timeout=pending_grace)
                 if outcome == 'pending':
                     logger.info(
-                        "[Roxy][OTP] 等待预算结束仍无明确错误；继续观察资料页，不盲目重发 OTP"
+                        "[Roxy][OTP] 等待预算结束仍无接受信号；停止误进入资料页"
                     )
-                    outcome = 'accepted'
+            outcome = _require_confirmed_otp_submit(
+                outcome,
+                otp_submit_timeout + (pending_grace if outcome == 'pending' else 0),
+            )
             if outcome == 'accepted':
                 break
             if outcome == 'email_verified':

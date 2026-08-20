@@ -93,6 +93,27 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(state, "otp")
         type_email.assert_not_called()
 
+    def test_type_email_detects_late_otp_transition_before_trying_to_type(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._find_visible_email_input_js", return_value=None), \
+             patch("core.roxy_registration._human_type_text") as type_text:
+            state = roxy_registration._type_email_address(driver, "mail@example.test", timeout=1)
+        self.assertEqual(state, "otp")
+        type_text.assert_not_called()
+
+    def test_email_retry_returns_late_transition_reported_by_type_step(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_email_verification_page", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=False), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._type_email_address", return_value="otp"), \
+             patch("core.roxy_registration._email_input_value_state") as input_state:
+            state = roxy_registration._submit_email_and_wait_next(driver, "mail@example.test", attempts=1)
+        self.assertEqual(state, "otp")
+        input_state.assert_not_called()
+
     def test_email_submit_uses_nextauth_once_when_ui_route_stalls(self):
         driver = MagicMock()
         with patch("core.roxy_registration._is_email_verification_page", return_value=False), \
@@ -300,6 +321,42 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
              patch("core.roxy_registration._email_otp_page_state", return_value={"inputs": [], "errors": []}):
             outcome = roxy_registration._wait_after_email_otp_submit(driver, timeout=0)
         self.assertEqual(outcome, "pending")
+
+    def test_pending_otp_submit_never_becomes_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "without an acceptance signal"):
+            roxy_registration._require_confirmed_otp_submit("pending", 20)
+
+    def test_confirmed_otp_submit_state_is_preserved(self):
+        self.assertEqual(
+            roxy_registration._require_confirmed_otp_submit("accepted", 20),
+            "accepted",
+        )
+
+    def test_password_rejection_stops_before_otp_polling(self):
+        driver = MagicMock()
+        driver.execute_script.return_value = {
+            "ok": True,
+            "input": MagicMock(),
+            "button": MagicMock(),
+        }
+        with patch("core.roxy_registration._is_email_verification_page", return_value=False), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration._is_login_password_page", return_value=False), \
+             patch("core.roxy_registration._password_page_state", side_effect=[
+                 {"url": "https://auth.openai.com/create-account/password", "errors": []},
+                 {"url": "https://auth.openai.com/create-account/password", "errors": ["Failed to create account"]},
+             ]), \
+             patch("core.roxy_registration._click_passwordless_signup_if_present", return_value={"ok": False}), \
+             patch("core.roxy_registration._registration_password", return_value="Password1!"), \
+             patch("core.roxy_registration._human_type_text"), \
+             patch("core.roxy_registration._human_click"), \
+             patch("core.roxy_registration.human_delay"):
+            with self.assertRaisesRegex(RuntimeError, "Failed to create account"):
+                roxy_registration._fill_password_page_if_present(driver, "mail@example.test", timeout=1)
+        password_target_script = driver.execute_script.call_args.args[0]
+        self.assertIn("isSubmit ? 1000", password_target_script)
+        self.assertIn("b.score - a.score", password_target_script)
 
     def test_email_already_verified_page_is_success_not_invalid_otp(self):
         driver = MagicMock()
