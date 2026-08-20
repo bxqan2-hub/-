@@ -16,9 +16,12 @@ from config import roxybrowser as _cfg
 
 logger = logging.getLogger(__name__)
 
-# Roxy's local API accepts only one profile creation reliably at a time. Keep
-# registration workers concurrent, but serialize the short /browser/create call.
-_ROXY_CREATE_LOCK = threading.Lock()
+# Roxy's local OpenAPI is effectively single-lane for profile lifecycle work.
+# The latest 10-worker batch showed /open and /close calls timing out while a
+# /create was in flight.  Keep browser workers concurrent, but serialize only
+# the short local create/open/close/delete HTTP calls.
+_ROXY_LIFECYCLE_LOCK = threading.RLock()
+_ROXY_CREATE_LOCK = _ROXY_LIFECYCLE_LOCK
 
 
 @dataclass
@@ -202,6 +205,10 @@ class RoxyBrowserClient:
         # create 网络超时后服务端可能已创建环境，直接重试可能产生孤儿环境；
         # 只对 Roxy 明确返回的“正在创建中”忙碌状态重试。
         is_create = str(path or "").rstrip("/").endswith("/create") or "browser/create" in str(path or "")
+        is_lifecycle = any(
+            marker in str(path or "").lower()
+            for marker in ("browser/create", "browser/open", "browser/close", "browser/delete")
+        )
         configured_attempts = max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
         create_attempts = max(
             1,
@@ -216,13 +223,16 @@ class RoxyBrowserClient:
                     "[Roxy] %s %s params=%s body=%s attempt=%s/%s",
                     method, url, params, json_body, attempt, max_attempts,
                 )
-                resp = self.http.request(
-                    method_u,
-                    url,
-                    params=params or None,
-                    json=json_body if json_body is not None else None,
-                    timeout=max(3, int(getattr(_cfg, "ROXY_API_TIMEOUT", 15) or 15)),
-                )
+                request_kwargs = {
+                    "params": params or None,
+                    "json": json_body if json_body is not None else None,
+                    "timeout": max(3, int(getattr(_cfg, "ROXY_API_TIMEOUT", 15) or 15)),
+                }
+                if is_lifecycle:
+                    with _ROXY_LIFECYCLE_LOCK:
+                        resp = self.http.request(method_u, url, **request_kwargs)
+                else:
+                    resp = self.http.request(method_u, url, **request_kwargs)
                 text = resp.text or ""
                 try:
                     payload = resp.json()

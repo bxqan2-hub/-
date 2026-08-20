@@ -2548,6 +2548,57 @@ def import_generic_api_emails(records: list[dict]) -> tuple[int, int]:
         return inserted, skipped
 
 
+def quarantine_exhausted_generic_api_emails(
+    failure_limit: int,
+    provider: str | None = "generic_api",
+) -> int:
+    """Disable retry-exhausted API mailboxes, including legacy retry records.
+
+    Older Roxy error handling returned a mailbox to ``available`` before the
+    service could increment ``registration_failure_count``.  Those rows still
+    carry an ASCII exception type in ``note`` and an accurate ``retry_count``.
+    Migrate only that mailbox-specific history; proxy/browser failures remain
+    reusable and never poison a mailbox.
+    """
+    limit = max(1, int(failure_limit or 1))
+    provider_filter = str(provider or "").strip().lower()
+    mailbox_markers = (
+        "genericapimailerror",
+        "genericapitransporterror",
+        "mailbox",
+        "pickup endpoint",
+        " otp",
+        '"code":null',
+        "ai100.my",
+    )
+    with _LOCK:
+        rows = _load_generic_api_emails()
+        changed = 0
+        for row in rows:
+            if row.get("status") != "available":
+                continue
+            row_provider = str(row.get("provider") or "").strip().lower()
+            if provider_filter == "generic_api" and row_provider not in ("", "generic_api"):
+                continue
+            if provider_filter not in ("", "generic_api") and row_provider != provider_filter:
+                continue
+            failures = int(row.get("registration_failure_count") or 0)
+            note = str(row.get("note") or "").lower()
+            if failures <= 0 and any(marker in note for marker in mailbox_markers):
+                failures = int(row.get("retry_count") or 0)
+                if failures:
+                    row["registration_failure_count"] = failures
+            if failures < limit:
+                continue
+            row["status"] = "disabled"
+            row["used_at"] = row.get("used_at") or _now()
+            row["note"] = f"Auto-disabled after {failures} mailbox/OTP failures: {str(row.get('note') or '')[:180]}"
+            changed += 1
+        if changed:
+            _save_generic_api_emails(rows)
+        return changed
+
+
 def claim_next_generic_api_email(provider: str | None = None) -> dict | None:
     """原子领取一个可用通用 API 邮箱并标记为 used。
 

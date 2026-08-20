@@ -177,12 +177,12 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
         self.assertEqual(geo["ip"], "198.51.100.30")
         self.assertEqual(driver.async_calls, [(
             ["https://geo-a.example/json", "https://geo-b.example/json"],
-            4000,
+            2000,
         )])
 
     @patch("core.browser_exit_geo.time.sleep")
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))
-    def test_selenium_probe_retries_until_exit_ip_is_available(self, _settings, sleep):
+    def test_selenium_probe_uses_one_direct_fallback_when_parallel_fetch_is_empty(self, _settings, sleep):
         driver = _SeleniumDriver([None, {"ip": "198.51.100.31", "country": "JP"}])
         geo = probe_selenium_driver_exit_geo(
             driver,
@@ -192,7 +192,8 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
         )
         self.assertEqual(geo["ip"], "198.51.100.31")
         self.assertEqual(driver.urls, ["https://geo.example/json", "https://geo.example/json"])
-        sleep.assert_called_once_with(2.0)
+        self.assertEqual(len(driver.async_calls), 1)
+        sleep.assert_not_called()
 
     @patch("core.browser_exit_geo.time.sleep")
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))

@@ -293,6 +293,35 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertEqual(sorted(profile_ids), ["1", "2"])
         self.assertEqual(max_active, 1)
 
+    def test_open_and_close_lifecycle_calls_share_one_local_api_lane(self):
+        guard = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def fake_request(*_args, **_kwargs):
+            nonlocal active, max_active
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.03)
+            with guard:
+                active -= 1
+            response = MagicMock(status_code=200, text='{"code":0}')
+            response.json.return_value = {"code": 0, "data": {}}
+            return response
+
+        clients = [RoxyBrowserClient(), RoxyBrowserClient()]
+        with patch.object(clients[0].http, "request", side_effect=fake_request), \
+             patch.object(clients[1].http, "request", side_effect=fake_request), \
+             ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(clients[0].request, "POST", "/browser/open", json_body={}),
+                pool.submit(clients[1].request, "POST", "/browser/close", json_body={}),
+            ]
+            [future.result() for future in futures]
+
+        self.assertEqual(max_active, 1)
+
     def test_delete_missing_profile_is_idempotent_success(self):
         client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
         error = RuntimeError("Roxy API 返回失败 POST /browser/delete: 窗口/数据不存在，请刷新页面后重试")

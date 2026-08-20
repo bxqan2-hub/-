@@ -7,6 +7,23 @@ from core import registration_service, roxy_registration
 
 
 class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
+    def test_generic_mail_failure_is_counted_before_service_can_requeue_it(self):
+        class GenericApiMailError(Exception):
+            pass
+
+        with patch("core.email_provider.release_email_if_unconsumed", return_value=True) as release_unconsumed, \
+             patch("core.email_provider.release_email") as release_email:
+            state = roxy_registration._release_roxy_registration_email_failure(
+                "mail@example.test",
+                GenericApiMailError("code null"),
+                create_acknowledged=False,
+            )
+
+        self.assertEqual(state, "mailbox_failure")
+        release_unconsumed.assert_called_once()
+        self.assertTrue(release_unconsumed.call_args.kwargs["count_failure"])
+        release_email.assert_not_called()
+
     def test_email_auth_error_is_eligible_for_normal_network_recovery(self):
         driver = MagicMock()
         driver.current_url = "https://chatgpt.com/auth/error?error=undefined"

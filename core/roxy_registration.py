@@ -3090,6 +3090,39 @@ def _registration_stop_requested() -> bool:
         return False
 
 
+def _release_roxy_registration_email_failure(
+    email: str,
+    exc: Exception,
+    *,
+    create_acknowledged: bool,
+) -> str:
+    """Apply the pool transition once, before the service observes the result."""
+    from core.email_provider import release_email, release_email_if_unconsumed
+
+    error_text = f"{type(exc).__name__}: {exc}"
+    lowered = error_text.lower()
+    if any(marker in lowered for marker in (
+        "account_deactivated", "account_disabled", "account_banned",
+    )):
+        release_email(email, status="disabled", note=f"Roxy registration failed: {error_text[:180]}")
+        return "disabled"
+    if create_acknowledged:
+        release_email(email, status="failed", note=f"Roxy registration failed after account creation: {error_text[:180]}")
+        return "failed"
+    mailbox_failure = any(marker in lowered for marker in (
+        "genericapimailerror",
+        "genericapitransporterror",
+        "domainapimailerror",
+        "inboxmatemailerror",
+    ))
+    release_email_if_unconsumed(
+        email,
+        note=f"Retryable Roxy registration failure: {error_text[:180]}",
+        count_failure=mailbox_failure,
+    )
+    return "mailbox_failure" if mailbox_failure else "available"
+
+
 def run_roxy_registration(
     email: str,
     name: str,
@@ -3481,18 +3514,17 @@ def run_roxy_registration(
     except Exception as exc:
         logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Roxy注册] 失败详情", exc_info=True)
-        # 未确认创建前回收邮箱；确认后避免重复使用。
+        # 在返回 service 前一次完成邮箱状态转换。旧逻辑先放回
+        # available，导致 service 无法累加失败次数，同一个不出码邮箱被反复领取。
         try:
-            from core.email_provider import release_email
-            error_text = str(exc)
-            terminal_email_failure = "account_deactivated" in error_text.lower()
-            release_email(
+            release_state = _release_roxy_registration_email_failure(
                 email,
-                status="disabled" if terminal_email_failure else ("failed" if create_acknowledged else "available"),
-                note=f"Roxy注册失败: {error_text[:180]}",
+                exc,
+                create_acknowledged=create_acknowledged,
             )
+            logger.info("[Roxy注册] 失败邮箱状态已收敛：state=%s", release_state)
         except Exception:
-            pass
+            logger.exception("[Roxy注册] 失败邮箱状态收敛失败")
         if traffic_summary is None:
             traffic_summary = _finish_traffic_optimizer(traffic_optimizer)
             traffic_optimizer = None

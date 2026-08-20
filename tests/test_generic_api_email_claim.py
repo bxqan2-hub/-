@@ -6,6 +6,34 @@ from core import db, email_provider, registration_service
 
 
 class GenericApiEmailClaimTests(unittest.TestCase):
+    def test_legacy_mailbox_failures_are_quarantined_without_poisoning_proxy_failures(self):
+        rows = [
+            {
+                "id": 1,
+                "email": "no-code@example.test",
+                "status": "available",
+                "retry_count": 2,
+                "note": 'Roxy registration failed: response={"code":null,"mail":null}',
+            },
+            {
+                "id": 2,
+                "email": "proxy-failed@example.test",
+                "status": "available",
+                "retry_count": 5,
+                "note": "Roxy registration failed: browser exit IP unavailable",
+            },
+        ]
+        with patch.object(db, "_load_generic_api_emails", return_value=rows), \
+             patch.object(db, "_save_generic_api_emails") as save:
+            changed = db.quarantine_exhausted_generic_api_emails(2)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(rows[0]["status"], "disabled")
+        self.assertEqual(rows[0]["registration_failure_count"], 2)
+        self.assertEqual(rows[1]["status"], "available")
+        self.assertNotIn("registration_failure_count", rows[1])
+        save.assert_called_once_with(rows)
+
     def test_provider_releases_generic_email_with_configured_failure_limit(self):
         with patch.object(email_provider, "resolve_email_source", return_value="generic_api"), \
              patch("core.db.release_unconsumed_generic_api_email", return_value=True) as release, \

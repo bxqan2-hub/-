@@ -521,6 +521,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             error=f"{type(exc).__name__}: {exc}"[:500],
             completed_at=datetime.now().isoformat(timespec="seconds"),
         )
+        _append_job_log(job_id, f"[Job {job_id}] 终止异常: {type(exc).__name__}: {str(exc)[:500]}")
     finally:
         _deactivate_job(job_id)
 

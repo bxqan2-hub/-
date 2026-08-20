@@ -709,11 +709,22 @@ def _fetch_inline_messages_page_otp(
 
 def pick_account(provider: str | None = "generic_api") -> GenericApiEmailAccount:
     """领取一个可用通用 API 邮箱。"""
-    from core.db import claim_next_generic_api_email, generic_api_email_pool_summary
+    from core.db import (
+        claim_next_generic_api_email,
+        generic_api_email_pool_summary,
+        quarantine_exhausted_generic_api_emails,
+    )
 
     inserted, skipped = import_from_file()
     if inserted:
         logger.info(f"[GenericAPI] 已自动从 {_ACCOUNTS_FILE.name} 导入 {inserted} 个邮箱（跳过 {skipped} 个）")
+
+    quarantined = quarantine_exhausted_generic_api_emails(
+        max(1, int(getattr(_email_cfg, "GENERIC_API_REGISTRATION_FAILURE_LIMIT", 2) or 2)),
+        provider=provider,
+    )
+    if quarantined:
+        logger.warning("[GenericAPI] 已隔离 %s 个达到邮箱/OTP 失败上限的历史条目", quarantined)
 
     row = claim_next_generic_api_email(provider=provider)
     if row is None:

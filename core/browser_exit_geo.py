@@ -221,6 +221,10 @@ def probe_selenium_driver_exit_geo(
             if callable(stop_check):
                 stop_check()
             try:
+                # Give the CORS-based parallel fast path at most two seconds.
+                # A direct navigation fallback below then gets the normal page
+                # timeout, keeping the full recovery bounded to about six seconds.
+                parallel_timeout_ms = max(250, min(2000, int(math.ceil(timeout * 1000))))
                 data = driver.execute_async_script(
                     """
                     const endpoints = Array.isArray(arguments[0]) ? arguments[0] : [];
@@ -251,12 +255,32 @@ def probe_selenium_driver_exit_geo(
                       .catch(() => done(null));
                     """,
                     endpoints,
-                    int(math.ceil(timeout * 1000)),
+                    parallel_timeout_ms,
                 )
                 geo = normalize_browser_exit_geo(data)
                 if geo.get("ip"):
                     _log_detected(label, geo)
                     return geo
+                # about:blank fetch occasionally returns null inside Roxy even
+                # though the same proxy passed preflight. Navigate one endpoint
+                # directly to remove CORS/fetch-context ambiguity; do not walk
+                # every endpoint sequentially.
+                if endpoints:
+                    if callable(stop_check):
+                        stop_check()
+                    fallback_endpoint = endpoints[-1]
+                    logger.info("[%s] 并行出口检测无结果，改用一次同窗口直达复核", label)
+                    driver.get(fallback_endpoint)
+                    fallback_data = driver.execute_script(
+                        """
+                        const text = document.body?.innerText || document.documentElement?.innerText || '';
+                        try { return JSON.parse(text); } catch (_) { return null; }
+                        """
+                    )
+                    geo = normalize_browser_exit_geo(fallback_data)
+                    if geo.get("ip"):
+                        _log_detected(label, geo)
+                        return geo
             except Exception as exc:
                 logger.debug(
                     "[%s] 浏览器出口 IP 并行探测失败 attempt=%s/%s: %s: %s",
