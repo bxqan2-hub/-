@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import requests
+
+from core import generic_api_mail_client as generic_client
 from core.generic_api_mail_client import (
     GenericApiEmailAccount,
     GenericApiMailError,
+    GenericApiTransportError,
     _extract_code,
     _fetch_flysms_otp,
     _parse_flysms_pickup_url,
@@ -52,6 +56,24 @@ class FakeSession:
 
 
 class FlysmsPickupTests(unittest.TestCase):
+    def test_generic_code_endpoint_fast_fails_after_bounded_transport_errors(self):
+        account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")
+        session = MagicMock()
+        session.get.side_effect = requests.exceptions.ConnectTimeout("mail endpoint unavailable")
+
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", return_value=session), \
+             patch("core.generic_api_mail_client.time.sleep"), \
+             patch.object(generic_client._email_cfg, "GENERIC_API_MAX_CONSECUTIVE_ERRORS", 1), \
+             patch.object(generic_client._email_cfg, "GENERIC_API_REQUEST_TIMEOUT", 8), \
+             patch.object(generic_client._email_cfg, "GENERIC_API_RETRY_TIMEOUT", 5):
+            with self.assertRaisesRegex(GenericApiTransportError, "连续网络失败"):
+                fetch_latest_otp(account.email, max_wait=60)
+
+        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(session.get.call_args_list[0].kwargs["timeout"], 8)
+        self.assertEqual(session.get.call_args_list[1].kwargs["timeout"], 5)
+
     def test_html_css_color_is_not_treated_as_otp(self):
         html = """
         <style>body { color: #171717; background: #f6f7f9; }</style>

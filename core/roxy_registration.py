@@ -18,16 +18,23 @@ from core.account_export import save_account_data
 from core.browser_exit_geo import probe_selenium_driver_exit_geo
 from core.browser_traffic import RoxyTrafficOptimizer
 from core.email_provider import wait_for_otp, resolve_email_source
+from core.generic_api_mail_client import GenericApiMailError, GenericApiTransportError
 from core.humanize import delay as human_delay
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 
 logger = logging.getLogger(__name__)
 
 _LOCAL_PROXY_BYPASS = ("127.0.0.1", "localhost", "::1")
-_ROXY_OTP_MAX_WAIT = 90
-_ROXY_OTP_POLL_INTERVAL = 3
-_ROXY_OTP_SETTLE_SECONDS = 3
-_ROXY_OTP_MAX_ATTEMPTS = 2
+_ROXY_OTP_MAX_WAIT = max(10, int(getattr(_cfg, "ROXY_OTP_MAX_WAIT", 60) or 60))
+_ROXY_OTP_POLL_INTERVAL = max(1, int(getattr(_cfg, "ROXY_OTP_POLL_INTERVAL", 2) or 2))
+_ROXY_OTP_SETTLE_SECONDS = max(0, int(getattr(_cfg, "ROXY_OTP_SETTLE_SECONDS", 1) or 0))
+_ROXY_OTP_MAX_ATTEMPTS = max(1, int(getattr(_cfg, "ROXY_OTP_MAX_ATTEMPTS", 2) or 2))
+
+
+def _session_request_timeout_ms() -> int:
+    """Return a bounded in-page fetch timeout that cannot inherit Selenium's 90s script timeout."""
+    seconds = max(1, min(15, int(getattr(_cfg, "ROXY_SESSION_REQUEST_TIMEOUT", 6) or 6)))
+    return seconds * 1000
 
 
 class ChatGPTSessionExpiredError(RuntimeError):
@@ -1201,6 +1208,7 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
     """填写并提交邮箱，必须确认进入 password/otp/logged_in 才返回。"""
     last_state = None
     nextauth_fallback_used = False
+    wait_timeout = max(5, int(getattr(_cfg, "ROXY_EMAIL_SUBMIT_TIMEOUT", 25) or 25))
     for attempt in range(1, attempts + 1):
         if _is_email_verification_page(driver):
             logger.info("%s 重试填写邮箱前确认已进入 OTP 页面，停止重填", _log_prefix(driver))
@@ -1221,7 +1229,7 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         human_delay("form")
         _submit_email_step(driver, email)
         logger.info("%s 已提交邮箱，等待进入密码页或验证码页（%s/%s）", _log_prefix(driver), attempt, attempts)
-        state_name = _wait_email_submit_next_state(driver, email, timeout=45)
+        state_name = _wait_email_submit_next_state(driver, email, timeout=wait_timeout)
         if state_name == "login_password":
             raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
         if state_name in ("password", "otp", "logged_in"):
@@ -1236,7 +1244,7 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
             nextauth_fallback_used = True
             fallback = _submit_email_via_browser_nextauth(driver, email)
             logger.info("%s 邮箱 UI 提交停滞，尝试一次 NextAuth 跳转兜底：%s", _log_prefix(driver), fallback)
-            fallback_state = _wait_email_submit_next_state(driver, email, timeout=45)
+            fallback_state = _wait_email_submit_next_state(driver, email, timeout=wait_timeout)
             if fallback_state == "login_password":
                 raise RuntimeError(
                     f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: "
@@ -1942,12 +1950,30 @@ def _page_snapshot(driver) -> dict:
 
 def _has_access_token(driver) -> bool:
     try:
+        if "chatgpt.com" not in str(driver.current_url or "").lower():
+            return False
+    except Exception:
+        return False
+    try:
         result = driver.execute_async_script(r"""
-        const done = arguments[0];
-        fetch('https://chatgpt.com/api/auth/session', {credentials:'include'})
-          .then(r => r.json()).then(j => done(Boolean(j && j.accessToken)))
-          .catch(() => done(false));
-        """)
+        const timeoutMs = Number(arguments[0]) || 6000;
+        const done = arguments[1];
+        const controller = new AbortController();
+        let finished = false;
+        const finish = value => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          done(Boolean(value));
+        };
+        const timer = setTimeout(() => { controller.abort(); finish(false); }, timeoutMs);
+        fetch('/api/auth/session', {
+          credentials:'include', cache:'no-store', signal:controller.signal,
+          headers:{'accept':'application/json','cache-control':'no-cache'}
+        })
+          .then(r => r.json()).then(j => finish(j && j.accessToken))
+          .catch(() => finish(false));
+        """, _session_request_timeout_ms())
         return bool(result)
     except Exception:
         return False
@@ -2496,6 +2522,9 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
     today = date.today()
     age = today.year - int(y) - ((today.month, today.day) < (int(m), int(d)))
     last_snapshot = {}
+    stalled_signature = None
+    stalled_count = 0
+    stall_limit = max(1, int(getattr(_cfg, "ROXY_PROFILE_STALL_LIMIT", 3) or 3))
     while time.time() < end:
         time.sleep(1)
         if _has_access_token(driver):
@@ -2537,7 +2566,30 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
 
         if not name_ok or not birth_ok:
             logger.warning('%s 资料页字段未填完整 name_ok=%s birth_ok=%s snapshot=%s', _log_prefix(driver), name_ok, birth_ok, snap)
+            signature = (
+                str(snap.get("url") or ""),
+                tuple(
+                    (str(item.get("name") or ""), str(item.get("type") or ""), str(item.get("value") or ""))
+                    for item in (snap.get("inputs") or [])
+                ),
+                tuple(
+                    (str(item.get("role") or ""), str(item.get("dataType") or ""), str(item.get("aria") or ""))
+                    for item in (snap.get("widgets") or [])
+                ),
+                bool(name_ok),
+                bool(birth_ok),
+            )
+            stalled_count = stalled_count + 1 if signature == stalled_signature else 1
+            stalled_signature = signature
+            if stalled_count >= stall_limit:
+                raise RuntimeError(
+                    f'资料页连续 {stalled_count} 次没有可操作字段变化，已快速结束；'
+                    f'name_ok={name_ok} birth_ok={birth_ok} snapshot={snap}'
+                )
             continue
+
+        stalled_signature = None
+        stalled_count = 0
 
         _accept_profile_consents(driver)
         human_delay('form')
@@ -2594,21 +2646,35 @@ def _click_if_enabled_submit(driver) -> bool:
 def _read_chatgpt_session_once(driver) -> dict | None:
     """当前页面必须在 chatgpt.com；读取并返回完整 session 响应。"""
     script = r"""
-    const done = arguments[0];
-    fetch('https://chatgpt.com/api/auth/session', {
+    const timeoutMs = Number(arguments[0]) || 6000;
+    const done = arguments[1];
+    const controller = new AbortController();
+    let finished = false;
+    const finish = value => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      done(value);
+    };
+    const timer = setTimeout(() => {
+      controller.abort();
+      finish({ok:false, error:'session fetch timeout'});
+    }, timeoutMs);
+    fetch('/api/auth/session', {
       credentials: 'include',
       cache: 'no-store',
+      signal: controller.signal,
       headers: {'accept': 'application/json', 'cache-control': 'no-cache'}
     })
       .then(async r => {
         const text = await r.text();
         let data = null;
         try { data = JSON.parse(text); } catch (_) { data = {text: text.slice(0, 500)}; }
-        done({ok: true, status: r.status, data});
+        finish({ok: true, status: r.status, data});
       })
-      .catch(e => done({ok: false, error: String(e)}));
+      .catch(e => finish({ok: false, error: String(e)}));
     """
-    result = driver.execute_async_script(script)
+    result = driver.execute_async_script(script, _session_request_timeout_ms())
     if result and result.get("ok"):
         data = result.get("data") or {}
         if not isinstance(data, dict):
@@ -2715,9 +2781,15 @@ def _fetch_chatgpt_session_once(
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
                     logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
-                    _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
+                    _safe_get(
+                        driver,
+                        "https://chatgpt.com/",
+                        timeout=max(10, int(getattr(_cfg, "ROXY_SESSION_WAIT_TIMEOUT", 25) or 25)),
+                        attempts=1,
+                        accept_hosts=("chatgpt.com",),
+                    )
                     forced_chatgpt_open = True
-                    time.sleep(3)
+                    time.sleep(1)
                     current = str(getattr(driver, "current_url", "") or "")
                 except Exception as exc:
                     last_data = f"{type(exc).__name__}: {exc}"
@@ -2814,7 +2886,10 @@ def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None)
         _type_otp(driver, code)
         if _is_email_verification_page(driver):
             _click_continue(driver)
-        outcome = _wait_after_email_otp_submit(driver, timeout=45)
+        outcome = _wait_after_email_otp_submit(
+            driver,
+            timeout=max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 35) or 35)),
+        )
         if outcome not in {"accepted", "email_verified", "profile", "logged_in"}:
             raise RuntimeError(f"可见窗口 OTP 恢复未完成: {outcome}")
         if outcome == "email_verified":
@@ -2866,8 +2941,8 @@ def _fetch_or_recover_chatgpt_session(
     try:
         return _fetch_chatgpt_session(
             driver,
-            timeout=35,
-            auto_jump_wait=15,
+            timeout=max(10, int(getattr(_cfg, "ROXY_SESSION_WAIT_TIMEOUT", 25) or 25)),
+            auto_jump_wait=max(3, int(getattr(_cfg, "ROXY_SESSION_AUTO_JUMP_WAIT", 8) or 8)),
             refresh_attempts=0,
             stop_check=stop_check if callable(should_stop) else None,
         )
@@ -3013,7 +3088,11 @@ def run_roxy_registration(
         # 填邮箱。OpenAI UI 会随出口 IP/语言变化；这里只按 DOM 技术属性找邮箱入口，
         # 并排除 Google/Apple/Microsoft 等第三方入口，不依赖按钮可见文字。
         try:
-            next_state = _submit_email_and_wait_next(driver, email, attempts=3)
+            next_state = _submit_email_and_wait_next(
+                driver,
+                email,
+                attempts=max(1, int(getattr(_cfg, "ROXY_EMAIL_SUBMIT_ATTEMPTS", 2) or 2)),
+            )
         except RuntimeError as exc:
             if traffic_optimizer is None or not _should_retry_email_entry_without_optimization(driver, exc):
                 raise
@@ -3054,6 +3133,21 @@ def run_roxy_registration(
                                 continue
                         break
                     if otp_attempt >= max_otp_attempts:
+                        raise
+                    if isinstance(exc, GenericApiTransportError):
+                        logger.warning(
+                            "[Roxy注册][OTP] 取码端点经短重试仍不可达，停止重发 OTP：%s",
+                            str(exc)[:240],
+                        )
+                        raise
+                    if (
+                        isinstance(exc, GenericApiMailError)
+                        and not bool(getattr(_cfg, "ROXY_OTP_RETRY_ON_MAIL_TIMEOUT", False))
+                    ):
+                        logger.warning(
+                            "[Roxy注册][OTP] 单轮取码已结束，快速模式不再盲目重发 OTP：%s",
+                            str(exc)[:240],
+                        )
                         raise
                     if advanced_state == "email_login":
                         logger.warning(
@@ -3124,10 +3218,18 @@ def run_roxy_registration(
             else:
                 logger.info("[Roxy注册][OTP] 输入后已离开验证码页，判定页面已自动提交")
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=45)
+            otp_submit_timeout = max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 35) or 35))
+            pending_grace = max(0, int(getattr(_cfg, "ROXY_OTP_PENDING_GRACE", 10) or 0))
+            outcome = _wait_after_email_otp_submit(driver, timeout=otp_submit_timeout)
             if outcome == 'pending':
-                logger.info("[Roxy][OTP] No explicit error; waiting 20 more seconds before any resend")
-                outcome = _wait_after_email_otp_submit(driver, timeout=20)
+                if pending_grace:
+                    logger.info("[Roxy][OTP] No explicit error; waiting %s more seconds before any resend", pending_grace)
+                    outcome = _wait_after_email_otp_submit(driver, timeout=pending_grace)
+                if outcome == 'pending':
+                    logger.info(
+                        "[Roxy][OTP] 等待预算结束仍无明确错误；继续观察资料页，不盲目重发 OTP"
+                    )
+                    outcome = 'accepted'
             if outcome == 'accepted':
                 break
             if outcome == 'email_verified':
@@ -3170,7 +3272,12 @@ def run_roxy_registration(
         # about-you / profile 信息页：必须完成或确认已有登录态，不能静默跳过。
         logger.info("[Roxy注册] 开始等待资料页/登录态")
         _check_manual_stop()
-        profile_submitted = _complete_profile_page(driver, name, birthday, timeout=60)
+        profile_submitted = _complete_profile_page(
+            driver,
+            name,
+            birthday,
+            timeout=max(10, int(getattr(_cfg, "ROXY_PROFILE_TIMEOUT", 35) or 35)),
+        )
         if profile_submitted:
             create_acknowledged = True
             # 给 OAuth 回调 / session cookie 写入一点时间。

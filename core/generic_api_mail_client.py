@@ -50,6 +50,10 @@ class GenericApiMailError(RuntimeError):
     """通用 API 取码邮箱错误。"""
 
 
+class GenericApiTransportError(GenericApiMailError):
+    """取码端点经主请求+短重试后仍不可达，上层应停止盲目重发 OTP。"""
+
+
 @dataclass
 class GenericApiEmailAccount:
     email: str
@@ -846,6 +850,11 @@ def fetch_latest_otp(
     best_otp: str | None = None
     best_seen_at: float = 0.0
     settle_until: float | None = None
+    consecutive_transport_errors = 0
+    max_transport_errors = max(
+        1,
+        int(getattr(_email_cfg, "GENERIC_API_MAX_CONSECUTIVE_ERRORS", 2) or 2),
+    )
     logger.info(
         f"[GenericAPI] 开始轮询取码地址: {email}，"
         f"最长 {max_wait or _email_cfg.OTP_MAX_WAIT}s, settle={settle}s"
@@ -965,7 +974,13 @@ def fetch_latest_otp(
                     resp = None
                     text = ""
                 else:
-                    request_timeout = max(1.0, min(20.0, deadline - time.time()))
+                    request_timeout = max(
+                        1.0,
+                        min(
+                            float(getattr(_email_cfg, "GENERIC_API_REQUEST_TIMEOUT", 8) or 8),
+                            deadline - time.time(),
+                        ),
+                    )
                     try:
                         resp = session.get(account.code_url, headers=headers, timeout=request_timeout, verify=False)
                     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
@@ -974,7 +989,13 @@ def fetch_latest_otp(
                         remaining_after_error = deadline - time.time()
                         if remaining_after_error <= 2:
                             raise
-                        retry_timeout = max(1.0, min(12.0, remaining_after_error))
+                        retry_timeout = max(
+                            1.0,
+                            min(
+                                float(getattr(_email_cfg, "GENERIC_API_RETRY_TIMEOUT", 5) or 5),
+                                remaining_after_error,
+                            ),
+                        )
                         logger.warning(
                             "[GenericAPI] 取码接口瞬时网络失败，短间隔重试一次：%s: %s",
                             type(exc).__name__,
@@ -982,6 +1003,7 @@ def fetch_latest_otp(
                         )
                         time.sleep(min(0.8, max(0.1, remaining_after_error / 10)))
                         resp = session.get(account.code_url, headers=headers, timeout=retry_timeout, verify=False)
+                    consecutive_transport_errors = 0
                     text = resp.text or ""
             if resp is None:
                 pass
@@ -1048,6 +1070,16 @@ def fetch_latest_otp(
                     last_error = no_code_reason or f"HTTP 200 但未提取到 6 位验证码，响应预览: {text[:160]}"
             else:
                 last_error = f"HTTP {resp.status_code}: {text[:160]}"
+        except GenericApiTransportError:
+            raise
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            consecutive_transport_errors += 1
+            if not best_otp and consecutive_transport_errors >= max_transport_errors:
+                raise GenericApiTransportError(
+                    "取码接口连续网络失败，已快速结束本轮 OTP 等待: "
+                    f"{email}; attempts={consecutive_transport_errors}; {last_error}"
+                ) from exc
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
 

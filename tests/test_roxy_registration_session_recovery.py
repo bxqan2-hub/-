@@ -18,6 +18,16 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
 
         self.assertEqual(result["WARNING_BANNER"], "temporary")
         self.assertEqual(result["_http_status"], 200)
+        script, timeout_ms = driver.execute_async_script.call_args.args
+        self.assertIn("AbortController", script)
+        self.assertEqual(timeout_ms, 6000)
+
+    def test_access_token_probe_skips_cross_origin_auth_page(self):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+
+        self.assertFalse(roxy_registration._has_access_token(driver))
+        driver.execute_async_script.assert_not_called()
 
     @patch.object(roxy_registration.time, "sleep")
     def test_repeated_warning_banner_short_circuits_to_relogin(self, _sleep):
@@ -83,8 +93,8 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
         self.assertEqual(result["_at_recovery"], "email_otp_relogin")
         _fetch.assert_called_once_with(
             ANY,
-            timeout=35,
-            auto_jump_wait=15,
+            timeout=25,
+            auto_jump_wait=8,
             refresh_attempts=0,
             stop_check=None,
         )

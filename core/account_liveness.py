@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from config import roxybrowser as _roxy_cfg
 from core.session import BrowserSession
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
@@ -47,10 +48,15 @@ def _is_retryable_network_error(exc: BaseException) -> bool:
 def _network_preflight_with_retry(
     email: str,
     proxy: str | None,
-    max_attempts: int = 4,
+    max_attempts: int | None = None,
     should_stop=None,
 ) -> tuple[BrowserSession, str]:
     """Providers → CSRF → Signin 网络预检；失败换新 IP 重试（每轮新会话新代理）。"""
+    if max_attempts is None:
+        max_attempts = max(
+            1,
+            int(getattr(_roxy_cfg, "ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS", 2) or 2),
+        )
     session: BrowserSession | None = None
     last_exc: BaseException | None = None
     for attempt in range(1, max_attempts + 1):

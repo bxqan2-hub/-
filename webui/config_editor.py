@@ -327,6 +327,46 @@ EDITABLE_FIELDS = [
         "label": "删除接口路径", "help": "默认 /browser/delete；如 Roxy 版本不同可调整",
     },
     {
+        "key": "ROXY_EMAIL_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "邮箱提交单轮超时", "help": "等待进入密码/OTP 页的单轮秒数，默认 25",
+    },
+    {
+        "key": "ROXY_EMAIL_SUBMIT_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "邮箱提交次数", "help": "UI + NextAuth 兜底后的最大轮数，默认 2",
+    },
+    {
+        "key": "ROXY_OTP_MAX_WAIT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Roxy OTP单轮等待", "help": "Roxy 注册每轮收取邮箱 OTP 的最长秒数，默认 60",
+    },
+    {
+        "key": "ROXY_OTP_MAX_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Roxy OTP最大轮数", "help": "仅验证码被拒绝/过期时重发；取码端点不可达会快速结束",
+    },
+    {
+        "key": "ROXY_OTP_RETRY_ON_MAIL_TIMEOUT", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
+        "label": "取码超时后重发", "help": "默认关闭：单轮取码超时就结束；开启后才重发并再等一轮",
+    },
+    {
+        "key": "ROXY_OTP_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "OTP提交超时", "help": "提交 OTP 后等待资料页/登录态的单轮秒数，默认 35",
+    },
+    {
+        "key": "ROXY_PROFILE_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "资料页超时", "help": "姓名/生日页总预算，相同 DOM 连续停滞会更早失败",
+    },
+    {
+        "key": "ROXY_SESSION_WAIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Session总等待", "help": "注册后等待 ChatGPT accessToken 的秒数，默认 25",
+    },
+    {
+        "key": "ROXY_SESSION_REQUEST_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Session单请求超时", "help": "页面内 /api/auth/session fetch 的硬超时，防止超出上层 deadline",
+    },
+    {
+        "key": "ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "AT恢复预检次数", "help": "后台邮箱登录恢复 AT 时的网络预检次数，默认 2",
+    },
+    {
         "key": "CODEX_OAUTH_DRIVER", "file": "codex.py", "type": "str", "group": "Codex",
         "label": "Codex授权驱动", "help": "默认推荐 roxy；protocol=原协议授权；roxy=用 RoxyBrowser；cloak=用 CloakBrowser；browser_use=用 Browser Use Cloud；skyvern=用 Skyvern；same_as_registration=跟随注册驱动",
     },
@@ -386,6 +426,18 @@ EDITABLE_FIELDS = [
     {
         "key": "OTP_POLL_INTERVAL", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
         "label": "OTP 轮询间隔(秒)", "help": "每隔多少秒查一次新邮件",
+    },
+    {
+        "key": "GENERIC_API_REQUEST_TIMEOUT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "通用取码请求超时", "help": "取码 URL 主请求的秒数，默认 8",
+    },
+    {
+        "key": "GENERIC_API_RETRY_TIMEOUT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "通用取码短重试超时", "help": "主请求网络失败后立即重试一次的秒数，默认 5",
+    },
+    {
+        "key": "GENERIC_API_MAX_CONSECUTIVE_ERRORS", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "通用取码熔断轮数", "help": "主请求+短重试都失败的连续轮数，达到后停止空转",
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",

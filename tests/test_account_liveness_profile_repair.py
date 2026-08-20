@@ -6,6 +6,21 @@ from core import account_liveness
 
 
 class AccountLivenessProfileRepairTests(unittest.TestCase):
+    def test_network_preflight_uses_bounded_configured_attempts(self):
+        sessions = [MagicMock(), MagicMock()]
+        with patch.object(account_liveness._roxy_cfg, "ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS", 2), \
+             patch("core.account_liveness.BrowserSession", side_effect=sessions) as session_factory, \
+             patch("core.account_liveness.get_providers", side_effect=RuntimeError("HTTP 403")), \
+             patch("core.account_liveness.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "403"):
+                account_liveness._network_preflight_with_retry(
+                    "created@example.test",
+                    "socks5h://proxy.example:1080",
+                )
+
+        self.assertEqual(session_factory.call_count, 2)
+        sleep.assert_called_once_with(2)
+
     def test_normal_liveness_does_not_complete_about_you(self):
         session = MagicMock()
         result = {

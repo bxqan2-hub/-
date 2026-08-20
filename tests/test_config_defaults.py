@@ -8,6 +8,17 @@ from webui import config_editor
 
 
 class ConfigDefaultFallbackTests(unittest.TestCase):
+    def test_registration_timing_budgets_are_editable(self):
+        keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
+        self.assertTrue({
+            "ROXY_EMAIL_SUBMIT_TIMEOUT",
+            "ROXY_OTP_MAX_WAIT",
+            "ROXY_SESSION_REQUEST_TIMEOUT",
+            "ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS",
+            "GENERIC_API_REQUEST_TIMEOUT",
+            "GENERIC_API_MAX_CONSECUTIVE_ERRORS",
+        }.issubset(keys))
+
     def test_roxy_fixed_os_is_exposed_as_windows_macos_choice(self):
         field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ROXY_DEFAULT_OS")
         self.assertEqual(field["options"], ["Windows", "macOS"])

@@ -109,6 +109,44 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(state, "otp")
         nextauth.assert_called_once_with(driver, "mail@example.test")
 
+    def test_email_submit_uses_fast_configured_wait_budget(self):
+        driver = MagicMock()
+        with patch.object(roxy_registration._cfg, "ROXY_EMAIL_SUBMIT_TIMEOUT", 17), \
+             patch("core.roxy_registration._is_email_verification_page", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=False), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._type_email_address"), \
+             patch("core.roxy_registration._email_input_value_state", return_value={"inputs": [{"value": "mail@example.test"}]}), \
+             patch("core.roxy_registration._submit_email_step"), \
+             patch("core.roxy_registration._wait_email_submit_next_state", return_value="otp") as wait_next, \
+             patch("core.roxy_registration.human_delay"):
+            state = roxy_registration._submit_email_and_wait_next(driver, "mail@example.test", attempts=1)
+
+        self.assertEqual(state, "otp")
+        wait_next.assert_called_once_with(driver, "mail@example.test", timeout=17)
+
+    def test_profile_page_fast_fails_when_dom_stays_incomplete(self):
+        driver = MagicMock()
+        snapshot = {
+            "url": "https://auth.openai.com/about-you",
+            "inputs": [{"name": "name", "type": "text", "value": "Ready User"}],
+            "widgets": [],
+        }
+        with patch.object(roxy_registration._cfg, "ROXY_PROFILE_STALL_LIMIT", 2), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._page_snapshot", return_value=snapshot), \
+             patch("core.roxy_registration._is_profile_like", return_value=True), \
+             patch("core.roxy_registration._select_or_type", return_value=True), \
+             patch("core.roxy_registration._fill_birthday_or_age", return_value=None), \
+             patch("core.roxy_registration.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "快速结束"):
+                roxy_registration._complete_profile_page(
+                    driver,
+                    "Ready User",
+                    "1990-01-01",
+                    timeout=60,
+                )
+
     def test_resend_atomic_snapshot_happens_before_click(self):
         driver = MagicMock()
         driver.execute_script.return_value = {"ok": True, "text": "もう一度試す", "kind": "retry"}
