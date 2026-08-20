@@ -32,6 +32,16 @@ class ProxyApiTests(unittest.TestCase):
             self.assertEqual(proxy_cfg._pick_static_or_system_proxy(), pool[1])
         choice.assert_called_once_with(pool)
 
+    def test_static_pool_random_choice_receives_all_1000_entries(self):
+        pool = [f"socks5h://proxy-{index}.example:3010" for index in range(1000)]
+        with patch.object(proxy_cfg, "PROXY_POOL", pool), \
+             patch.object(proxy_cfg, "PROXY_POOL_ACTIVE", pool[0]), \
+             patch.object(proxy_cfg.random, "choice", return_value=pool[-1]) as choice:
+            self.assertEqual(proxy_cfg._pick_static_or_system_proxy(), pool[-1])
+        selected_from = choice.call_args.args[0]
+        self.assertEqual(len(selected_from), 1000)
+        self.assertEqual(selected_from, pool)
+
     def test_parse_cliproxy_txt_host_port(self):
         self.assertEqual(
             proxy_cfg.parse_proxy_api_response("107.151.197.81:22403\n", "socks5h"),

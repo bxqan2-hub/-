@@ -122,6 +122,15 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("oninput=\"pagerDraftSize('${id}',this.value)\"", html)
         self.assertIn("startsWith('pagerSizeInput-')", html)
 
+    def test_proxy_pool_uses_large_unbounded_editor(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('class="proxy-pool-editor-v2"', html)
+        self.assertIn('data-bulk-list-toggle', html)
+        self.assertIn('不设条数上限', html)
+        self.assertIn('proxyPoolEntryCountV2', html)
+        self.assertNotIn('maxlength="10"', html)
+
     def test_plan_check_ui_bursts_until_completed_result_is_rendered(self):
         html = self.client.get("/").get_data(as_text=True)
 

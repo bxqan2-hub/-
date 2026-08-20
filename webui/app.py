@@ -3451,6 +3451,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "ok": True,
             "updated": result["updated"],
             "ignored": result["ignored"],
+            "runtime_file_updated": result.get("runtime_file_updated", []),
             "reloaded": reload_ok,
             "note": (
                 "✅ 已保存并热加载，新值立即生效"

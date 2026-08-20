@@ -5,8 +5,8 @@
 设计原则：
     1. 白名单：只暴露"运行时安全"的开关/数值/默认值，协议级常量
        （client_id / scope / sentinel 版本等）一律不开放，避免一改就废号。
-    2. 所有 WebUI 可编辑项统一写入项目根 `.env`，不再修改 `config/*.py`。
-    3. `config/*.py` 只保留默认值；运行时通过 config.env_loader 用 `.env` 覆盖。
+    2. WebUI 可编辑项默认写入项目根 `.env`；超大代理池写入忽略目录中的运行时文件。
+    3. `config/*.py` 只保留默认值；运行时通过 config.env_loader 加载持久化覆盖。
     4. 读取时优先 `.env`，缺失时回退解析 `config/*.py` 默认值。
 """
 import ast
@@ -590,7 +590,9 @@ EDITABLE_FIELDS = [
     # ---- 代理池 ----
     {
         "key": "PROXY_POOL", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "静态代理池(每行一个)", "help": "API代理开启时可留空；关闭API代理时，每行填写一个代理 URL",
+        "label": "粘性代理池(每行一个)",
+        "help": "不限制为 10 条，可直接粘贴 1000+ 条代理；关闭 API 代理后，每个新注册窗口从完整列表随机挑选一条，并在该窗口全流程固定使用",
+        "ui_variant": "large_pool", "storage": "runtime_file",
     },
     {
         "key": "PROXY_POOL_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
@@ -982,7 +984,14 @@ def get_config() -> list[dict]:
         source = path.read_text(encoding="utf-8") if path.exists() else ""
         fallback = _parse_value_from_source(source, key, field["type"])
 
-        if key in env_file_values:
+        runtime_value = None
+        if field.get("storage") == "runtime_file":
+            from config.env_loader import read_proxy_pool_file
+            runtime_value = read_proxy_pool_file()
+
+        if runtime_value is not None:
+            value = runtime_value
+        elif key in env_file_values:
             raw_env_value = env_file_values[key]
             if field["type"] == "list_str_multiline" and key in EXPLICIT_EMPTY_LIST_KEYS and str(raw_env_value).strip() == "":
                 value = []
@@ -996,7 +1005,7 @@ def get_config() -> list[dict]:
         if field["type"] in ("str", "list_str_multiline"):
             value = _normalize_config_value(value, field["type"])
         item = dict(field)
-        item["storage"] = "env"
+        item["storage"] = field.get("storage", "env")
         item["value"] = value
         out.append(item)
     return out
@@ -1131,16 +1140,23 @@ def _format_env_value(value, vtype: str) -> str:
 
 
 def update_config(updates: dict) -> dict:
-    """批量更新配置。所有 WebUI 可编辑项只写项目根 `.env`。"""
-    from config.env_loader import write_env_values, load_env
+    """批量更新配置；大代理池写运行时文件，其余字段写项目根 `.env`。"""
+    from config.env_loader import write_env_values, write_proxy_pool_file, load_env
 
-    updated, ignored = [], []
+    updated, ignored, runtime_file_updated = [], [], []
     env_updates: dict[str, str] = {}
 
     for key, value in updates.items():
         field = _FIELD_BY_KEY.get(key)
         if field is None:
             ignored.append(key)
+            continue
+        if field.get("storage") == "runtime_file":
+            write_proxy_pool_file(_normalize_config_value(value, field["type"]))
+            # 清掉 .env 中可能遗留的大字段，仅保留一个小占位值；运行时文件优先。
+            env_updates[key] = "[]"
+            updated.append(key)
+            runtime_file_updated.append(key)
             continue
         env_updates[key] = _format_env_value(value, field["type"])
         updated.append(key)
@@ -1150,4 +1166,9 @@ def update_config(updates: dict) -> dict:
     if env_updated:
         load_env(override=True)
 
-    return {"updated": updated, "ignored": ignored, "env_updated": env_updated}
+    return {
+        "updated": updated,
+        "ignored": ignored,
+        "env_updated": env_updated,
+        "runtime_file_updated": runtime_file_updated,
+    }

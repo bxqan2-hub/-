@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from config import env_loader
@@ -61,6 +63,33 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
 
     def test_config_editor_formats_empty_list_as_literal_empty_list(self):
         self.assertEqual(config_editor._format_env_value([], "list_str_multiline"), "[]")
+
+    def test_proxy_pool_editor_is_unbounded_and_round_trips_1000_entries(self):
+        field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "PROXY_POOL")
+        self.assertEqual(field["ui_variant"], "large_pool")
+
+        pool = [f"socks5h://user:pass@proxy-{index}.example:3010" for index in range(1000)]
+        serialized = config_editor._format_env_value(pool, "list_str_multiline")
+        parsed = config_editor._coerce_raw_value(serialized, [], "list_str_multiline")
+
+        self.assertEqual(len(parsed), 1000)
+        self.assertEqual(parsed[0], pool[0])
+        self.assertEqual(parsed[-1], pool[-1])
+
+    def test_proxy_pool_1000_entries_use_runtime_file_instead_of_large_environment_value(self):
+        pool = [f"socks5h://user:pass@proxy-{index}.example:3010" for index in range(1000)]
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("config.env_loader._PROXY_POOL_PATH", Path(tmp) / "proxy_pool.txt"), \
+             patch("config.env_loader._ENV_PATH", Path(tmp) / ".env"), \
+             patch.dict(os.environ, {}, clear=False):
+            result = config_editor.update_config({"PROXY_POOL": pool})
+            stored = env_loader.read_proxy_pool_file()
+            env_value = env_loader.read_env_file()["PROXY_POOL"]
+
+        self.assertEqual(result["runtime_file_updated"], ["PROXY_POOL"])
+        self.assertEqual(len(stored), 1000)
+        self.assertEqual(stored[-1], pool[-1])
+        self.assertEqual(env_value, "[]")
 
     def test_apply_env_overrides_does_not_let_blank_values_mask_defaults(self):
         old_loaded = env_loader._LOADED

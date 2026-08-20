@@ -18,7 +18,7 @@
 """
 from __future__ import annotations
 
-from config.env_loader import apply_env_overrides
+from config.env_loader import apply_env_overrides, read_proxy_pool_file
 import json
 import logging
 import os
@@ -601,7 +601,10 @@ def _pick_static_or_system_proxy(*, strict: bool = False) -> str:
             resolved.append(proxy)
     if resolved:
         active = _normalize_proxy_url(str(PROXY_POOL_ACTIVE or "").strip())
-        if active:
+        # PROXY_POOL_ACTIVE 只服务于需要固定出口的 strict/纯协议流程。
+        # 浏览器注册是非 strict 流程：每个新窗口从完整粘性池随机抽一条，
+        # 窗口创建后再由对应的浏览器客户端实例固定该代理。
+        if strict and active:
             if active not in resolved:
                 raise RuntimeError("PROXY_POOL_ACTIVE 不在当前 PROXY_POOL 中，已停止避免错用代理")
             return active
@@ -673,4 +676,7 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_MIN_INTERVAL': 'float',
     'PLAN_CHECK_JITTER': 'float',
 })
+_runtime_proxy_pool = read_proxy_pool_file()
+if _runtime_proxy_pool is not None:
+    PROXY_POOL = _runtime_proxy_pool
 PROXY = _pick_static_or_system_proxy()

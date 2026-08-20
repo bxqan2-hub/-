@@ -14,6 +14,7 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _PROJECT_ROOT / ".env"
+_PROXY_POOL_PATH = _PROJECT_ROOT / "data" / "proxy_pool.txt"
 _LOADED = False
 
 # 这些多行列表字段允许用空值显式覆盖为 []。
@@ -52,6 +53,38 @@ SECRET_ENV_KEYS: dict[str, str] = {
 
 def env_path() -> Path:
     return _ENV_PATH
+
+
+def proxy_pool_path() -> Path:
+    """返回大容量代理池文件路径（data/ 已由 .gitignore 排除）。"""
+    return _PROXY_POOL_PATH
+
+
+def read_proxy_pool_file() -> list[str] | None:
+    """读取大容量代理池；文件不存在时返回 None，以便兼容旧 .env 配置。"""
+    if not _PROXY_POOL_PATH.exists():
+        return None
+    return [
+        line.strip()
+        for line in _PROXY_POOL_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def write_proxy_pool_file(values) -> Path:
+    """原子写入不限条数的代理池，避免 Windows 单环境变量 32767 字符限制。"""
+    if isinstance(values, str):
+        source = values.splitlines()
+    elif isinstance(values, (list, tuple)):
+        source = values
+    else:
+        source = [] if values is None else [values]
+    lines = [str(value or "").strip() for value in source if str(value or "").strip()]
+    _PROXY_POOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PROXY_POOL_PATH.with_suffix(_PROXY_POOL_PATH.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    tmp.replace(_PROXY_POOL_PATH)
+    return _PROXY_POOL_PATH
 
 
 def load_env(*, override: bool = False) -> Path:
