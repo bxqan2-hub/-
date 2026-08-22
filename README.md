@@ -2,6 +2,10 @@
 
 ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目支持三套注册驱动：
 
+> **仓库身份（请勿与邮箱换绑分站混淆）**：当前 GitHub 仓库
+> [`bxqan2-hub/-.git`](https://github.com/bxqan2-hub/-.git) 是**注册与账号管理主站**。
+> 独立的“邮箱换绑分站”是另一个 Git 项目、另一个进程和另一套运行数据；它的服务端源码不在本仓库中。
+
 - **protocol**：纯协议注册，基于 `curl_cffi` + Sentinel/PoW；强制 TLS/UA/OS 三层对齐并固定代理出口。
 - **roxy**：RoxyBrowser 指纹浏览器 + Selenium 自动化注册，兼容新版页面流，例如 `create-account/password`、`about-you` 年龄/生日表单、地区本地化页面等。
 - **cloak**：CloakBrowser + Playwright 适配层自动化注册，支持免费 binary、无头模式、humanize、固定 fingerprint seed、代理 geoip。
@@ -15,6 +19,27 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 - TG 交流群：[https://t.me/+gu_cvEKq_vcyZWRl](https://t.me/+gu_cvEKq_vcyZWRl)
 
 > 开源版说明：仓库只保留源码、配置模板和文档；运行时账号、Token、邮箱池、Codex 凭证、日志等真实数据均已通过 `.gitignore` 排除。
+
+---
+
+## 主站与邮箱换绑分站的边界
+
+| 项目 | 注册与账号管理主站（本仓库） | 邮箱换绑分站（独立项目） |
+| --- | --- | --- |
+| 定位 | 注册账号、管理账号与分组、执行 Codex OAuth | 使用 Roxy 完成已有账号的邮箱换绑并刷新 AT |
+| 源码与 Git | 当前 GitHub 仓库 | 独立目录 `email-rebind-console`，拥有自己的 `.git`，不在本仓库 Git 历史中 |
+| 运行与数据 | 使用主站自己的 WebUI、配置和账号数据 | 独立监听 `127.0.0.1:5091`，只读写分站自己的 `data/` |
+| 联动职责 | 只提供“导入换绑邮箱”入口，并更新邮箱、AT 和目标分组 | 只输出换绑完成结果，不直接读写主站账号 JSON 或分组文件 |
+
+两个项目只通过文本格式联动，不共享服务端代码或运行数据库：
+
+```text
+主站导出给分站：原邮箱----OpenAI密码----MFA Secret
+分站导回主站：新邮箱----原OpenAI密码----原MFA Secret----新accessToken
+```
+
+主站使用“原密码 + 原 MFA Secret”识别旧账号，仅把邮箱和 AT 更新为分站结果，
+清除旧邮箱在原分组中的显示，再把新邮箱加入用户当前选择的分组。
 
 ---
 
