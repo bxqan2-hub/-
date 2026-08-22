@@ -1375,6 +1375,19 @@ def update_account_gcash(acc_id: int, result: dict | None = None) -> bool:
         row["gcash_checked_at"] = result.get("checked_at") or _now()
         row["gcash_completed_at"] = _now()
         row["gcash_error"] = None if ok else str(result.get("error") or "GCash 检测失败")[:500]
+        # 合并查询：同一会话返回的 kind/provider/processor 一并写入类型字段，
+        # 让 GC 查询同时刷新为这次会话的类型，避免和单独的“查询Checkout类型”
+        # 产生矛盾。只有结果明确带 kind 时才覆盖类型字段。
+        if str(result.get("kind") or "").strip():
+            row["checkout_kind_status"] = "success" if ok or not gcash else "failed"
+            row["checkout_kind_ok"] = ok or not gcash
+            row["checkout_kind"] = str(result.get("kind") or "unknown")[:32]
+            row["checkout_kind_provider"] = str(result.get("checkout_provider") or "")[:80]
+            row["checkout_kind_processor"] = str(result.get("processor_entity") or "")[:80]
+            row["checkout_kind_session_prefix"] = str(result.get("session_prefix") or "")[:32]
+            row["checkout_kind_confirm_sent"] = bool(result.get("confirm_sent"))
+            row["checkout_kind_checked_at"] = result.get("checked_at") or row.get("checkout_kind_checked_at")
+            row["checkout_kind_error"] = None if (ok or not gcash) else str(result.get("error") or "检测失败")[:500]
         row["updated_at"] = _now()
         _save_accounts(accounts)
         return True

@@ -3374,6 +3374,10 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
                  if str(item.get("id") or "").startswith("cpmt_")), "",
             )
         gcash = bool(custom_method_id)
+        # 合并查询：一次 PH Checkout 同时判定 session 类型（oaics/cs_live）与
+        # GCash 资格。能走到这里说明 session 是 OAICS（读到了 custom_payment_methods），
+        # kind 用 classify_checkout_kind 与类型查询共用同一套判定，保证不自相矛盾。
+        kind = classify_checkout_kind(checkout)
         # 只有走完完整成功探测（OAICS 读取方法列表 + 提交 PH 账单均 200）仍未
         # 发现 cpmt_ 时，才算是"确定无 GCash 资格"，返回 200；其余任何分支
         # （风控、非 OAICS、SSL/代理失败、网络错误）都已在上面以失败返回，
@@ -3381,6 +3385,7 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         return {
             "ok": True,
             "gcash": gcash,
+            "kind": kind,
             "detection_outcome": "qualified" if gcash else "no_cpmt_after_full_probe",
             "custom_payment_method_id": custom_method_id,
             "checkout_provider": str(checkout.get("checkout_provider") or ""),

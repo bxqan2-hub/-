@@ -4115,13 +4115,15 @@ function _gcashBadge(r) {
     return '<span class="pill status-muted" title="尚未检测 GCash 资格；选中后点击上方“查询GC”">未检测</span>';
   }
   if (r.gcash_eligible === true) {
+    const typeTag = String(r.checkout_kind || '').toLowerCase() === 'oaics' ? 'OAICS·' : '';
     const title = [
       r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '',
       r.gcash_payment_method_id ? `payment_method: ${r.gcash_payment_method_id}` : '',
+      `类型: ${esc(r.checkout_kind || '未知')}`,
       `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-      '支持 GCash 支付；未执行 confirm',
+      '合并查询：创建 Checkout 同时判定类型与 GCash 资格；未执行 confirm',
     ].filter(Boolean).join('；');
-    return `<span class="pill status-available" title="${esc(title)}">有GC</span>`;
+    return `<span class="pill status-available" title="${esc(title)}">${typeTag}有GC</span>`;
   }
   // 探测失败（风控/代理/非OAICS/网络）绝不归为“无GC”，要明确显示原因。
   if (status === 'failed') {
@@ -4134,13 +4136,15 @@ function _gcashBadge(r) {
     return `<span class="pill status-failed" title="${esc(title)}">失败</span>`;
   }
   // 只有完成完整成功探测仍未发现 cpmt_ 才算“无GC”。
+  const typeTag = String(r.checkout_kind || '').toLowerCase() === 'oaics' ? 'OAICS·' : '';
   const title = [
     `检测: ${r.gcash_checked_at || ''}`,
+    `类型: ${esc(r.checkout_kind || '未知')}`,
     `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-    '未发现 cpmt_ GCash 支付方式',
+    '完整探测未发现 cpmt_ GCash 支付方式',
     '未执行 confirm',
   ].filter(Boolean).join('；');
-  return `<span class="pill status-used" title="${esc(title)}">无GC</span>`;
+  return `<span class="pill status-used" title="${esc(title)}">${typeTag}无GC</span>`;
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();
