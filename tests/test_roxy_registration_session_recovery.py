@@ -36,11 +36,44 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
         driver.execute_async_script.side_effect = [
             {"ok": True, "status": 200, "data": {"WARNING_BANNER": "one"}},
             {"ok": True, "status": 200, "data": {"WARNING_BANNER": "two"}},
+            {"ok": True, "status": 200, "data": {"WARNING_BANNER": "three"}},
+            {"ok": True, "status": 200, "data": {"WARNING_BANNER": "four"}},
         ]
 
         with self.assertRaises(roxy_registration.ChatGPTSessionExpiredError):
             roxy_registration._fetch_chatgpt_session_once(driver, timeout=10, auto_jump_wait=1)
-        self.assertEqual(driver.execute_async_script.call_count, 2)
+        self.assertEqual(driver.execute_async_script.call_count, 4)
+
+    @patch.object(roxy_registration.time, "sleep")
+    def test_temporary_warning_banner_can_settle_into_access_token(self, _sleep):
+        driver = MagicMock()
+        driver.current_url = "https://chatgpt.com/"
+        driver.execute_async_script.side_effect = [
+            {"ok": True, "status": 200, "data": {"WARNING_BANNER": "one"}},
+            {"ok": True, "status": 200, "data": {"WARNING_BANNER": "two"}},
+            {"ok": True, "status": 200, "data": {"accessToken": "settled-at"}},
+        ]
+
+        result = roxy_registration._fetch_chatgpt_session_once(driver, timeout=10, auto_jump_wait=1)
+        self.assertEqual(result["accessToken"], "settled-at")
+
+    @patch.object(roxy_registration, "_fetch_chatgpt_session", return_value={"accessToken": "recovered-at"})
+    @patch.object(roxy_registration, "_wait_after_email_otp_submit", return_value="accepted")
+    @patch.object(roxy_registration, "_is_email_verification_page", return_value=False)
+    @patch.object(roxy_registration, "_type_otp")
+    @patch.object(roxy_registration, "wait_for_otp", return_value="222222")
+    @patch.object(roxy_registration, "_wait_for_otp_input", return_value=None)
+    @patch.object(roxy_registration, "_resume_chatgpt_login_callback", return_value="otp")
+    @patch.object(roxy_registration, "_snapshot_current_email_otp", return_value="111111")
+    def test_visible_recovery_excludes_previous_otp(
+        self, _snapshot, _resume, _wait_input, wait_otp, _type, _is_otp_page, _outcome, _fetch,
+    ):
+        result = roxy_registration._recover_chatgpt_session_in_browser(
+            MagicMock(), "created@example.com",
+        )
+
+        self.assertEqual(result["accessToken"], "recovered-at")
+        self.assertEqual(wait_otp.call_args.kwargs["exclude_codes"], {"111111"})
 
     def test_unauthorized_session_response_is_marked_expired(self):
         driver = MagicMock()

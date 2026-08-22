@@ -185,6 +185,67 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
                     timeout=60,
                 )
 
+    def test_plain_data_type_birthday_segments_are_typed_and_verified(self):
+        driver = MagicMock()
+        segments = {
+            '[data-type="year"]': MagicMock(),
+            '[data-type="month"]': MagicMock(),
+            '[data-type="day"]': MagicMock(),
+        }
+        driver.find_element.side_effect = lambda _by, selector: segments[selector]
+
+        def execute(script, *_args):
+            if "const birthday = String(arguments[0])" in script:
+                return {"ok": False, "mode": "segmented_date_needed"}
+            if "const numeric = el =>" in script:
+                return {"ok": True, "year": 1990, "month": 1, "day": 2}
+            return None
+
+        driver.execute_script.side_effect = execute
+        with patch("core.roxy_registration.time.sleep"):
+            mode = roxy_registration._fill_birthday_or_age(driver, "1990-01-02", 36)
+
+        self.assertEqual(mode, "segmented_date")
+        self.assertIn(call("1990"), segments['[data-type="year"]'].send_keys.call_args_list)
+        self.assertIn(call("01"), segments['[data-type="month"]'].send_keys.call_args_list)
+        self.assertIn(call("02"), segments['[data-type="day"]'].send_keys.call_args_list)
+
+    def test_profile_page_does_not_retype_name_when_target_value_is_present(self):
+        driver = MagicMock()
+        snapshot = {
+            "url": "https://auth.openai.com/about-you",
+            "inputs": [{"name": "name", "type": "text", "value": "Emma Roberts"}],
+            "widgets": [
+                {"dataType": "year", "value": "2026"},
+                {"dataType": "month", "value": "08"},
+                {"dataType": "day", "value": "23"},
+            ],
+        }
+        with patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._page_snapshot", return_value=snapshot), \
+             patch("core.roxy_registration._is_profile_like", return_value=True), \
+             patch("core.roxy_registration._select_or_type") as type_name, \
+             patch("core.roxy_registration._fill_birthday_or_age", return_value="segmented_date"), \
+             patch("core.roxy_registration._accept_profile_consents"), \
+             patch("core.roxy_registration._click_if_enabled_submit", return_value=True), \
+             patch("core.roxy_registration.human_delay"), \
+             patch("core.roxy_registration.time.sleep"):
+            submitted = roxy_registration._complete_profile_page(
+                driver, "Emma Roberts", "1990-01-02", timeout=10,
+            )
+
+        self.assertTrue(submitted)
+        type_name.assert_not_called()
+
+    def test_exit_geo_uses_same_proxy_preflight_when_browser_probe_is_temporarily_empty(self):
+        selected = roxy_registration._select_registration_exit_geo(
+            {},
+            {"ip": "203.0.113.9", "country": "JP"},
+            has_proxy=True,
+        )
+        self.assertEqual(selected["ip"], "203.0.113.9")
+        self.assertEqual(selected["verification_source"], "same_proxy_preflight_fallback")
+
     def test_resend_atomic_snapshot_happens_before_click(self):
         driver = MagicMock()
         driver.execute_script.return_value = {"ok": True, "text": "もう一度試す", "kind": "retry"}

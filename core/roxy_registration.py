@@ -2040,9 +2040,10 @@ def _page_snapshot(driver) -> dict:
           type: el.getAttribute('type') || '', visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
           disabled: !!el.disabled
         })).filter(x => x.visible).slice(0, 30);
-        const widgets = [...document.querySelectorAll('[role=spinbutton], .react-aria-Select, [data-testid="hidden-select-container"] select')].map(el => ({
+        const widgets = [...document.querySelectorAll('[role=spinbutton], [data-type="year"], [data-type="month"], [data-type="day"], .react-aria-Select, [data-testid="hidden-select-container"] select')].map(el => ({
           tag: el.tagName, role: el.getAttribute('role') || '', dataType: el.getAttribute('data-type') || '',
-          aria: el.getAttribute('aria-label') || '', text: (el.innerText || el.textContent || '').trim().slice(0, 80),
+          aria: el.getAttribute('aria-label') || '', value: el.value || el.getAttribute('aria-valuenow') || '',
+          text: (el.innerText || el.textContent || '').trim().slice(0, 80),
           visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
         })).slice(0, 30);
         return {url: location.href, title: document.title, text: (document.body?.innerText || '').slice(0, 2000), inputs, buttons, widgets};
@@ -2196,9 +2197,10 @@ def _select_or_type(driver, selectors: list[str], value: str, timeout: int = 3) 
 def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
     """填写 about-you 的年龄/生日控件。
 
-    参考 FlowPilot：优先处理直接年龄 input；否则兼容 hidden birthday/date、原生年月日
-    select/input、React Aria hidden native select、role=spinbutton[data-type=year/month/day]。
-    返回 age / birthday / ymd / react_select / spinbutton / None。
+    参考 FlowPilot/GPT-utral 的分段日期实现：优先处理直接年龄 input；否则兼容
+    hidden birthday/date、原生年月日 select/input、React Aria hidden native select，
+    以及没有 role=spinbutton 的 div[data-type=year/month/day]。
+    返回 age / birthday / ymd / react_select / segmented_date / None。
     """
     y, m, d = birthday.split('-')
     result = driver.execute_script(r"""
@@ -2285,15 +2287,15 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
       return {ok:true, mode:'react_select'};
     }
 
-    const spinYear = document.querySelector('[role="spinbutton"][data-type="year"]');
-    const spinMonth = document.querySelector('[role="spinbutton"][data-type="month"]');
-    const spinDay = document.querySelector('[role="spinbutton"][data-type="day"]');
-    if (spinYear && spinMonth && spinDay) return {ok:false, mode:'spinbutton_needed'};
+    const spinYear = document.querySelector('[data-type="year"]');
+    const spinMonth = document.querySelector('[data-type="month"]');
+    const spinDay = document.querySelector('[data-type="day"]');
+    if (spinYear && spinMonth && spinDay) return {ok:false, mode:'segmented_date_needed'};
     return {ok:false, mode:'missing'};
     """, birthday, y, m, d, str(age)) or {}
     if result.get('ok'):
         return str(result.get('mode') or 'birthday')
-    if result.get('mode') != 'spinbutton_needed':
+    if result.get('mode') != 'segmented_date_needed':
         return None
 
     try:
@@ -2307,9 +2309,9 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
         except Exception:
             pass
         for selector, value in [
-            ('[role="spinbutton"][data-type="year"]', y),
-            ('[role="spinbutton"][data-type="month"]', str(m).zfill(2)),
-            ('[role="spinbutton"][data-type="day"]', str(d).zfill(2)),
+            ('[data-type="year"]', y),
+            ('[data-type="month"]', str(m).zfill(2)),
+            ('[data-type="day"]', str(d).zfill(2)),
         ]:
             el = driver.find_element(By.CSS_SELECTOR, selector)
             driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].focus();", el)
@@ -2319,7 +2321,7 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
             el.send_keys(str(value))
             time.sleep(0.1)
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles:true})); arguments[0].dispatchEvent(new Event('change', {bubbles:true})); arguments[0].blur();", el)
-        driver.execute_script(r"""
+        verified = driver.execute_script(r"""
         const hidden = document.querySelector('input[name="birthday"]');
         if (hidden) {
           const value = arguments[0];
@@ -2328,10 +2330,25 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
           hidden.dispatchEvent(new Event('input', {bubbles:true}));
           hidden.dispatchEvent(new Event('change', {bubbles:true}));
         }
-        """, birthday)
-        return 'spinbutton'
+        const numeric = el => {
+          const raw = String(el?.value || el?.getAttribute?.('aria-valuenow') || el?.textContent || '').trim();
+          const match = raw.match(/\d+/);
+          return match ? Number(match[0]) : NaN;
+        };
+        const yy = document.querySelector('[data-type="year"]');
+        const mm = document.querySelector('[data-type="month"]');
+        const dd = document.querySelector('[data-type="day"]');
+        const ok = numeric(yy) === Number(arguments[1])
+          && numeric(mm) === Number(arguments[2])
+          && numeric(dd) === Number(arguments[3]);
+        return {ok, year:numeric(yy), month:numeric(mm), day:numeric(dd)};
+        """, birthday, y, m, d) or {}
+        if verified.get('ok'):
+            return 'segmented_date'
+        logger.warning('%s 分段生日控件写入后校验不一致：target=%s actual=%s', _log_prefix(driver), birthday, verified)
+        return None
     except Exception as exc:
-        logger.debug('%s spinbutton 生日填写失败：%s', _log_prefix(driver), exc)
+        logger.debug('%s 分段生日控件填写失败：%s', _log_prefix(driver), exc)
         return None
 
 
@@ -2741,16 +2758,25 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
             continue
 
         logger.info('%s 检测到资料页，开始填写姓名生日：url=%s inputs=%s', _log_prefix(driver), snap.get('url'), snap.get('inputs'))
-        name_ok = False
+        target_name = ' '.join(str(name or '').split()).casefold()
+        name_ok = any(
+            ' '.join(str(item.get('value') or '').split()).casefold() == target_name
+            and any(marker in ' '.join(str(item.get(key) or '') for key in ('name', 'id', 'placeholder', 'autocomplete', 'aria')).casefold()
+                    for marker in ('name', 'full_name', 'fullname'))
+            for item in (snap.get('inputs') or [])
+        )
+        if name_ok:
+            logger.info("%s 姓名字段已有目标值，跳过重复输入：%s", _log_prefix(driver), name)
         # 常见单姓名字段
-        for selectors in [
-            ["input[name='name']", "input[name='fullName']", "input[name='full_name']", "input[autocomplete='name']"],
-            ["input[placeholder*='Name']", "input[placeholder*='name']", "input[aria-label*='Name']", "input[aria-label*='name']"],
-        ]:
-            if _select_or_type(driver, selectors, name, timeout=3):
-                logger.info("%s 已填写姓名字段：%s", _log_prefix(driver), name)
-                name_ok = True
-                break
+        if not name_ok:
+            for selectors in [
+                ["input[name='name']", "input[name='fullName']", "input[name='full_name']", "input[autocomplete='name']"],
+                ["input[placeholder*='Name']", "input[placeholder*='name']", "input[aria-label*='Name']", "input[aria-label*='name']"],
+            ]:
+                if _select_or_type(driver, selectors, name, timeout=3):
+                    logger.info("%s 已填写姓名字段：%s", _log_prefix(driver), name)
+                    name_ok = True
+                    break
         # 兼容 first/last 分开
         if not name_ok:
             parts = name.split(' ', 1)
@@ -3019,10 +3045,15 @@ def _fetch_chatgpt_session_once(
                     )
                 if "WARNING_BANNER" in data:
                     warning_banner_count += 1
-                    if warning_banner_count >= 2:
+                    # 新账号 callback 后 WARNING_BANNER 可能只是 session cookie 尚未完成
+                    # 写入；两次（约 4 秒）就重登会额外申请 OTP，并容易取回上一封旧码。
+                    # 连续观察四次再判定失效，仍明显短于整轮 session 等待预算。
+                    if warning_banner_count >= 4:
                         raise ChatGPTSessionExpiredError(
                             "session 连续返回 WARNING_BANNER，判定当前登录态已失效"
                         )
+                else:
+                    warning_banner_count = 0
             except ChatGPTSessionExpiredError:
                 raise
             except Exception as exc:
@@ -3065,11 +3096,29 @@ def _fetch_chatgpt_session(
     raise RuntimeError(f"accessToken 多轮等待仍未完成: {last_error}")
 
 
+def _snapshot_current_email_otp(email: str) -> str | None:
+    """读取 Generic/Inbox 邮箱当前最新 OTP，供下一次取码排除历史码。"""
+    source = resolve_email_source(email)
+    if source not in {"generic_api", "inbox_mate"}:
+        return None
+    module_name = "core.inbox_mate_mail_client" if source == "inbox_mate" else "core.generic_api_mail_client"
+    snapshot = __import__(module_name, fromlist=["snapshot_current_otp"]).snapshot_current_otp
+    return snapshot(email)
+
+
 def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None) -> dict:
     """Re-authenticate once in the current visible Roxy window after confirmed logout."""
     if callable(should_stop):
         should_stop()
     logger.warning("%s 检测到登录态失效，切回当前 Roxy 窗口执行一次邮箱 OTP 恢复", _log_prefix(driver))
+    excluded_codes: set[str] = set()
+    try:
+        historical_otp = _snapshot_current_email_otp(email)
+        if historical_otp:
+            excluded_codes.add(str(historical_otp))
+            logger.info("%s 可见窗口恢复前已排除历史验证码：%s", _log_prefix(driver), mask_otp(historical_otp))
+    except Exception as exc:
+        logger.debug("%s 可见窗口恢复前历史验证码快照失败：%s", _log_prefix(driver), redact_otp_text(exc))
     otp_after_ts = time.time()
     state = _resume_chatgpt_login_callback(driver, email=email)
     if state == "otp":
@@ -3085,6 +3134,7 @@ def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None)
             max_wait=_ROXY_OTP_MAX_WAIT,
             poll_interval=_ROXY_OTP_POLL_INTERVAL,
             settle_seconds=_ROXY_OTP_SETTLE_SECONDS,
+            exclude_codes=excluded_codes,
             should_stop=should_stop,
         )
         _type_otp(driver, code)
@@ -3241,6 +3291,19 @@ def _release_roxy_registration_email_failure(
     return "mailbox_failure" if mailbox_failure else "available"
 
 
+def _select_registration_exit_geo(browser_geo: dict | None, preflight_geo: dict | None, *, has_proxy: bool) -> dict:
+    """优先使用窗口实测；探测站临时无响应时保留同一代理的创建前预检结果。"""
+    selected = dict(browser_geo or {})
+    if selected.get("ip"):
+        selected["verification_source"] = "browser_context"
+        return selected
+    fallback = dict(preflight_geo or {})
+    if has_proxy and fallback.get("ip"):
+        fallback["verification_source"] = "same_proxy_preflight_fallback"
+        return fallback
+    return {}
+
+
 def run_roxy_registration(
     email: str,
     name: str,
@@ -3286,8 +3349,19 @@ def run_roxy_registration(
             retry_delay=float(getattr(_cfg, "ROXY_BROWSER_EXIT_IP_RETRY_DELAY", 2) or 2),
             stop_check=_check_manual_stop,
         )
+        registration_exit_geo = _select_registration_exit_geo(
+            registration_exit_geo,
+            getattr(opened, "preflight_exit_geo", None),
+            has_proxy=bool(getattr(client, "profile_proxy", None)),
+        )
+        if registration_exit_geo.get("verification_source") == "same_proxy_preflight_fallback":
+            logger.warning(
+                "[Roxy注册] 窗口内出口探测服务本轮无响应；复用创建环境前同一粘性代理的已验证出口：ip=%s country=%s",
+                registration_exit_geo.get("ip"),
+                registration_exit_geo.get("country") or "?",
+            )
         if not registration_exit_geo.get("ip"):
-            raise RuntimeError("Roxy 窗口已启动但未能复核实际出口 IP，已终止注册，未继续提交账号")
+            raise RuntimeError("Roxy 窗口已启动但未能复核实际出口 IP，且没有同一代理的预检结果，已终止注册")
         logger.info("[Roxy注册] 开始：%s，profile=%s", email, opened.profile_id)
         traffic_optimizer = _start_traffic_optimizer(driver)
 
@@ -3295,13 +3369,7 @@ def run_roxy_registration(
         resolved_email_source = resolve_email_source(email)
         if otp_code is None and resolved_email_source in {"generic_api", "inbox_mate"}:
             try:
-                snapshot_current_otp = (
-                    __import__("core.inbox_mate_mail_client", fromlist=["snapshot_current_otp"]).snapshot_current_otp
-                    if resolved_email_source == "inbox_mate"
-                    else __import__("core.generic_api_mail_client", fromlist=["snapshot_current_otp"]).snapshot_current_otp
-                )
-
-                historical_otp = snapshot_current_otp(email)
+                historical_otp = _snapshot_current_email_otp(email)
                 if historical_otp:
                     rejected_otps.add(str(historical_otp))
                     logger.info(
@@ -3393,6 +3461,8 @@ def run_roxy_registration(
                                 if otp_attempt >= max_otp_attempts:
                                     raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
                                 otp_after_ts = time.time()
+                                if current_otp:
+                                    rejected_otps.add(str(current_otp))
                                 current_otp = None
                                 continue
                         break
@@ -3442,6 +3512,8 @@ def run_roxy_registration(
                                 if otp_attempt >= max_otp_attempts:
                                     raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
                                 otp_after_ts = time.time()
+                                if current_otp:
+                                    rejected_otps.add(str(current_otp))
                                 current_otp = None
                                 continue
                         break
@@ -3457,6 +3529,8 @@ def run_roxy_registration(
                     if otp_attempt >= max_otp_attempts:
                         raise RuntimeError("Email verified callback still requires OTP after maximum retries")
                     otp_after_ts = time.time()
+                    if current_otp:
+                        rejected_otps.add(str(current_otp))
                     current_otp = None
                     continue
                 break
@@ -3536,6 +3610,8 @@ def run_roxy_registration(
                     if otp_attempt >= max_otp_attempts:
                         raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
                     otp_after_ts = time.time()
+                    if current_otp:
+                        rejected_otps.add(str(current_otp))
                     current_otp = None
                     continue
                 break
@@ -3564,6 +3640,8 @@ def run_roxy_registration(
                         if otp_attempt >= max_otp_attempts:
                             raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
                         otp_after_ts = time.time()
+                        if current_otp:
+                            rejected_otps.add(str(current_otp))
                         current_otp = None
                         continue
                 break
