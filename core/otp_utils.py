@@ -33,6 +33,37 @@ _OTP_CONTEXT_KEYWORDS = (
 )
 
 _OTP_REGEX = re.compile(r"\b(\d{6})\b")
+# 日志中的验证码可能紧邻中文/JSON 字符，\b 在 Unicode 文字边界上并不可靠；
+# 只以数字边界判断，避免把带字母/中文前缀的六位码原样留在日志里。
+_OTP_REDACTION_REGEX = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+
+
+def mask_otp(value: object) -> str:
+    """Return a length-preserving redaction for an OTP or other code value.
+
+    OTPs must never be written to logs.  Keeping the replacement the same
+    length makes troubleshooting output readable (for example, a six-digit
+    value is rendered as ``******``) without exposing any part of the code.
+    ``None``/empty values remain empty so optional fields can be logged safely.
+    """
+    text = str(value or "")
+    if not text:
+        return ""
+    return "*" * len(text)
+
+
+def redact_otp_text(value: object) -> str:
+    """Redact standalone six-digit OTPs embedded in arbitrary text.
+
+    This is intended for exception messages and short response previews where
+    the source may contain ``OTP=123456`` or a JSON ``"code": "123456"``.
+    Non-digit text is preserved for useful diagnostics; every standalone
+    six-digit sequence is replaced, including when the value is not a string.
+    """
+    text = str(value or "")
+    if not text:
+        return ""
+    return _OTP_REDACTION_REGEX.sub(lambda match: mask_otp(match.group(1)), text)
 
 
 def _get_field(item: dict, *names: str) -> str:

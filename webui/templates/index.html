@@ -6756,7 +6756,10 @@ function configGroups() {
 }
 
 function emailConfigSectionForKey(key) {
-  if (['USE_EMAIL_SERVICE','REGISTER_EMAIL','REGISTER_NAME','OTP_MAX_WAIT','OTP_POLL_INTERVAL','EMAIL_SOURCE'].includes(key)) {
+  if (['USE_EMAIL_SERVICE','REGISTER_EMAIL','REGISTER_NAME','OTP_MAX_WAIT','OTP_POLL_INTERVAL','EMAIL_SOURCE',
+    'TWOFA_OTP_MAX_WAIT','TWOFA_OTP_POLL_INTERVAL','TWOFA_OTP_SETTLE_SECONDS',
+    'TWOFA_GENERIC_API_REQUEST_TIMEOUT','TWOFA_GENERIC_API_RETRY_TIMEOUT',
+    'TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS'].includes(key)) {
     return ['通用邮箱 / OTP', '邮箱来源选择、OTP 等待参数、手动邮箱等通用设置'];
   }
   if (key.startsWith('GPTMAIL_')) return ['GPTMail', 'GPTMail 临时邮箱 API 配置'];

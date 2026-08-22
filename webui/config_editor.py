@@ -431,6 +431,30 @@ EDITABLE_FIELDS = [
         "label": "启用 2FA(TOTP)", "help": "注册完成后自动设置动态口令（会多收一封 OTP 邮件）",
     },
     {
+        "key": "TWOFA_OTP_MAX_WAIT", "file": "twofa.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "2FA OTP 最大等待(秒)", "help": "仅用于 2FA 重认证取码，不改变普通注册 OTP；默认 120",
+    },
+    {
+        "key": "TWOFA_OTP_POLL_INTERVAL", "file": "twofa.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "2FA OTP 轮询间隔(秒)", "help": "仅用于 2FA 重认证取码；默认 2",
+    },
+    {
+        "key": "TWOFA_OTP_SETTLE_SECONDS", "file": "twofa.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "2FA OTP 稳定等待(秒)", "help": "确认新验证码稳定后再提交；默认 1",
+    },
+    {
+        "key": "TWOFA_GENERIC_API_REQUEST_TIMEOUT", "file": "twofa.py", "type": "float", "group": "邮箱 / OTP",
+        "label": "2FA 通用取码请求超时", "help": "仅用于 2FA 重认证取码主请求；默认 12 秒",
+    },
+    {
+        "key": "TWOFA_GENERIC_API_RETRY_TIMEOUT", "file": "twofa.py", "type": "float", "group": "邮箱 / OTP",
+        "label": "2FA 通用取码重试超时", "help": "仅用于 2FA 重认证取码短重试；默认 8 秒",
+    },
+    {
+        "key": "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", "file": "twofa.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "2FA 取码连续错误上限", "help": "仅用于 2FA 重认证取码；默认 2",
+    },
+    {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
         "label": "启用 Flow 触发", "help": "注册成功后自动调用内部 Flow 接口（不影响注册结果）",
     },

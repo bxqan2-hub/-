@@ -157,6 +157,18 @@ class BrowserSession:
         transport.timeout = REQUEST_TIMEOUT
         return transport
 
+    def close(self) -> None:
+        """释放底层 curl 连接池，供短生命周期的辅助会话显式调用。"""
+        if getattr(self, "_closed", False):
+            return
+        try:
+            self.session.close()
+        except Exception:
+            # 关闭是幂等的；清理失败不应覆盖注册结果。
+            pass
+        finally:
+            self._closed = True
+
     def _sync_device_id_from_cookie(self) -> None:
         """Adopt the server-issued ChatGPT oai-did after the first valid page response."""
         try:

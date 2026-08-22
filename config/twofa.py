@@ -10,7 +10,24 @@
 """
 from config.env_loader import apply_env_overrides
 
-ENABLE_2FA = False
+ENABLE_2FA = True
+
+# 2FA 只在注册完成后的重认证阶段使用这些专用参数；不改变普通注册 OTP
+# 的等待预算。通用 API 邮箱偶发 5~9 秒才返回，本阶段保留一次短重试。
+TWOFA_OTP_MAX_WAIT = 120
+TWOFA_OTP_POLL_INTERVAL = 2
+TWOFA_OTP_SETTLE_SECONDS = 1
+TWOFA_GENERIC_API_REQUEST_TIMEOUT = 12
+TWOFA_GENERIC_API_RETRY_TIMEOUT = 8
+TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS = 2
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_2FA': 'bool'})
+apply_env_overrides(globals(), {
+    'ENABLE_2FA': 'bool',
+    'TWOFA_OTP_MAX_WAIT': 'int',
+    'TWOFA_OTP_POLL_INTERVAL': 'int',
+    'TWOFA_OTP_SETTLE_SECONDS': 'int',
+    'TWOFA_GENERIC_API_REQUEST_TIMEOUT': 'float',
+    'TWOFA_GENERIC_API_RETRY_TIMEOUT': 'float',
+    'TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS': 'int',
+})

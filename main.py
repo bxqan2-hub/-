@@ -7,6 +7,7 @@ import sys
 import argparse
 import logging
 import time
+import traceback
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from config import REGISTER_EMAIL, REGISTER_NAME  # 这两个一般不在 WebUI 改
@@ -32,12 +33,12 @@ from core.openai_auth import (
 from core.account_export import (
     follow_oauth_callback,
     fetch_session,
-    setup_2fa,
     save_account_data,
     create_batch_archive_dir,
 )
 from core.email_provider import acquire_email, wait_for_otp
 from core.humanize import delay as human_delay
+from core.otp_utils import mask_otp, redact_otp_text
 from core.name_samples import random_display_name
 from core.profile_utils import generate_random_birthday
 
@@ -343,7 +344,10 @@ def run_registration(
             except EmailOtpInvalidError as exc:
                 if otp_attempt >= max_otp_attempts:
                     raise
-                logger.warning(f"[OTP] 验证码错误/过期：{str(exc)[:180]}，准备重新发送并重新获取验证码")
+                logger.warning(
+                    "[OTP] 验证码错误/过期：%s，准备重新发送并重新获取验证码",
+                    redact_otp_text(str(exc)[:180]),
+                )
                 otp_after_ts = time.time()
                 send_email_otp(session)
                 human_delay("api")
@@ -454,13 +458,36 @@ def run_registration(
 
         # ==================== 阶段7: 设置 2FA（受 config.ENABLE_2FA 控制）====================
         totp_secret = None
+        twofa_result = None
+        twofa_error = None
         if _twofa_cfg.ENABLE_2FA:
             # 步骤14-20: 重认证（要再收一次邮箱 OTP）→ enroll TOTP → activate
             try:
-                totp_secret = setup_2fa(session, email)
+                from core.account_export import setup_2fa_result
+                twofa_result = setup_2fa_result(session, email)
+                totp_secret = twofa_result.secret
+                # 重认证会产生带新鲜 pwd_auth_time 的 Token；优先保存它。
+                access_token = twofa_result.access_token
+                logger.info(
+                    "[2FA] 已完成，Token 校验=%s",
+                    bool(getattr(twofa_result, "validation_ok", True)),
+                )
+                if not bool(getattr(twofa_result, "validation_ok", True)):
+                    twofa_error = {
+                        "stage": "totp_validate",
+                        "code": getattr(twofa_result, "validation_code", "totp_token_validation_failed"),
+                        "http_status": getattr(twofa_result, "validation_status", None),
+                        "message": redact_otp_text(getattr(twofa_result, "validation_message", "") or ""),
+                    }
             except Exception as exc:
-                logger.error(f"2FA 设置失败: {exc}")
-                logger.debug("2FA 错误详情:", exc_info=True)
+                logger.error("2FA 设置失败: %s", redact_otp_text(exc))
+                logger.debug("2FA 错误详情:\n%s", redact_otp_text(traceback.format_exc()))
+                twofa_error = {
+                    "stage": getattr(exc, "stage", "totp_setup"),
+                    "code": getattr(exc, "code", "totp_setup_failed"),
+                    "http_status": getattr(exc, "http_status", None),
+                    "message": redact_otp_text(str(exc)[:240]),
+                }
                 logger.warning("将继续保存账号信息（不含 TOTP secret），可后续手动设置")
         else:
             logger.debug("已跳过 2FA 设置 (config.ENABLE_2FA=False)")
@@ -511,10 +538,23 @@ def run_registration(
             extra={
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
-                "expires": session_info.get("expires"),
+                "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
                 "device_id": session.device_id,
                 "sentinel_sid": getattr(session, "sentinel_sid", None),
                 "browser_profile": getattr(session, "browser_profile", None),
+                "twofa": {
+                    "status": (
+                        "success" if twofa_result and getattr(twofa_result, "validation_ok", True)
+                        else "partial_success" if twofa_result
+                        else "failed" if _twofa_cfg.ENABLE_2FA else "skipped"
+                    ),
+                    "activated": bool(twofa_result),
+                    "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
+                    "validation_status": getattr(twofa_result, "validation_status", None) if twofa_result else None,
+                    "activated_at": twofa_result.activated_at if twofa_result else None,
+                    "validation": twofa_result.validation if twofa_result else None,
+                    "error": twofa_error,
+                },
                 "codex": codex_result,
             },
         )
@@ -544,7 +584,10 @@ def run_registration(
                 f"原因={flow_result.get('message')}"
             )
 
-        logger.debug(f"[完成] TOTP Secret: {totp_secret or '(未设置)'}")
+        logger.debug(
+            "[完成] TOTP Secret: %s",
+            mask_otp(totp_secret) if totp_secret else "(未设置)",
+        )
 
         # 注册任务的成功判定：账号本身(注册+token)+Codex 授权都成功才算 success。
         # Codex 失败时账号仍保存（token 拿到了、有补跑机会），但任务状态标失败，

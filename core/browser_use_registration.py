@@ -26,6 +26,8 @@ from core.browser_exit_geo import probe_playwright_context_exit_geo
 from core.browser_use_client import BrowserUseClient
 from core.email_provider import resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
+from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
+from core.otp_utils import mask_otp, redact_otp_text
 
 logger = logging.getLogger(__name__)
 
@@ -848,10 +850,14 @@ def _click_resend_otp(page) -> bool:
             }
             """
         )
-        logger.info("[BrowserUse][OTP] 非文本重发按钮探测结果：%s", result)
+        logger.info("[BrowserUse][OTP] 非文本重发按钮探测结果：%s", redact_otp_text(result))
         return bool(isinstance(result, dict) and result.get("ok"))
     except Exception as exc:
-        logger.info("[BrowserUse][OTP] 非文本重发按钮探测失败：%s: %s", type(exc).__name__, str(exc)[:160])
+        logger.info(
+            "[BrowserUse][OTP] 非文本重发按钮探测失败：%s: %s",
+            type(exc).__name__,
+            redact_otp_text(str(exc)[:160]),
+        )
         return False
 
 
@@ -1473,7 +1479,11 @@ def _wait_for_otp_with_browser_heartbeat(page, context, email: str, after_ts: fl
                 raise
             if time.time() >= deadline:
                 break
-            logger.info("[BrowserUse][OTP] 本轮未取到验证码，保持云端页面活跃后继续：%s: %s", type(exc).__name__, str(exc)[:220])
+            logger.info(
+                "[BrowserUse][OTP] 本轮未取到验证码，保持云端页面活跃后继续：%s: %s",
+                type(exc).__name__,
+                redact_otp_text(str(exc)[:220]),
+            )
             page = _browser_use_heartbeat(page, context=context, label=f"otp-after-{attempt}")
             time.sleep(0.5 if _fast_mode() else 1.0)
 
@@ -1768,12 +1778,19 @@ def run_browser_use_registration(
                     except Exception as pwd_exc:
                         if _is_manual_stop_exception(pwd_exc):
                             raise
-                        logger.info("[BrowserUse][OTP] 重启 OTP 流后密码页处理跳过/失败，继续等待验证码页：%s", str(pwd_exc)[:140])
+                        logger.info(
+                            "[BrowserUse][OTP] 重启 OTP 流后密码页处理跳过/失败，继续等待验证码页：%s",
+                            redact_otp_text(str(pwd_exc)[:140]),
+                        )
                     _bu_delay("api")
                 except Exception as restart_exc:
                     if _is_manual_stop_exception(restart_exc):
                         raise
-                    logger.warning("[BrowserUse][OTP] 重新触发邮箱 OTP 失败，继续按当前页面处理：%s: %s", type(restart_exc).__name__, str(restart_exc)[:180])
+                    logger.warning(
+                        "[BrowserUse][OTP] 重新触发邮箱 OTP 失败，继续按当前页面处理：%s: %s",
+                        type(restart_exc).__name__,
+                        redact_otp_text(str(restart_exc)[:180]),
+                    )
 
             current_otp = otp_code
             max_otp_attempts = 3
@@ -1805,7 +1822,9 @@ def run_browser_use_registration(
                         page = _pick_live_page(context, page) or page
                         _t_otp_wait.done()
                     except Exception as exc:
-                        _t_otp_wait.done(f"failed={type(exc).__name__}: {str(exc)[:160]}")
+                        _t_otp_wait.done(
+                            f"failed={type(exc).__name__}: {redact_otp_text(str(exc)[:160])}"
+                        )
                         if _is_manual_stop_exception(exc):
                             raise
                         if otp_attempt >= max_otp_attempts:
@@ -1815,12 +1834,12 @@ def run_browser_use_registration(
                             otp_attempt + 1,
                             max_otp_attempts,
                             type(exc).__name__,
-                            str(exc)[:180],
+                            redact_otp_text(str(exc)[:180]),
                         )
                         _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500/chrome-error")
                         current_otp = None
                         continue
-                logger.info("[BrowserUse][OTP] 收到验证码：%s", current_otp)
+                logger.info("[BrowserUse][OTP] 收到验证码：%s", mask_otp(current_otp))
                 _t_otp_submit = _StepTimer("提交邮箱 OTP")
                 _clear_otp_inputs(page)
                 _type_otp(page, current_otp)
@@ -1828,7 +1847,10 @@ def run_browser_use_registration(
                 try:
                     _click_continue(page)
                 except Exception as exc:
-                    logger.info("[BrowserUse][OTP] 提交按钮未找到，继续观察页面：%s", str(exc)[:120])
+                    logger.info(
+                        "[BrowserUse][OTP] 提交按钮未找到，继续观察页面：%s",
+                        redact_otp_text(str(exc)[:120]),
+                    )
                 _check_manual_stop()
 
                 outcome = _wait_after_otp(page, timeout=6 if _fast_mode() else 12)
@@ -1857,9 +1879,54 @@ def run_browser_use_registration(
             create_acknowledged = True
             logger.info("[BrowserUse] 已拿到 accessToken：%s", email)
 
-            if _twofa_cfg.ENABLE_2FA:
-                logger.warning("[BrowserUse] 当前路径暂不自动设置 2FA，已跳过")
             totp_secret = None
+            twofa_result = None
+            twofa_session = None
+            twofa_status = "skipped"
+            twofa_error = None
+            twofa_validation = None
+            twofa_proxy_continuity = False
+            twofa_proxy_source = None
+            if _twofa_cfg.ENABLE_2FA:
+                twofa_status = "failed"
+                logger.info("[BrowserUse][2FA] ENABLE_2FA=True，复用当前浏览器会话设置 2FA")
+                try:
+                    from core.account_export import maybe_setup_2fa_result
+                    # Browser Use/Skyvern expose a country selector, not the
+                    # concrete egress URL.  Only an explicit URL (or one
+                    # returned in the session payload) is safe to reuse; do
+                    # not let BrowserSession(None) choose a local pool entry.
+                    twofa_proxy = resolve_twofa_proxy(
+                        proxy,
+                        getattr(session_info_open, "raw", None),
+                        source=provider_prefix,
+                    )
+                    twofa_session = build_twofa_session(twofa_proxy, source=provider_prefix)
+                    twofa_proxy_continuity = True
+                    twofa_proxy_source = "registration_argument" if proxy else "provider_session"
+                    twofa_result = maybe_setup_2fa_result(twofa_session, email, driver=page)
+                    twofa_error = getattr(twofa_session, "_twofa_last_error", None)
+                    if twofa_result:
+                        totp_secret = twofa_result.secret
+                        access_token = twofa_result.access_token
+                        twofa_validation = getattr(twofa_result, "validation", None)
+                        twofa_status = "success" if bool(getattr(twofa_result, "validation_ok", True)) else "partial_success"
+                        logger.info("[BrowserUse][2FA] 已完成，Token 校验=%s", twofa_status == "success")
+                    else:
+                        if not twofa_error:
+                            twofa_error = {
+                                "stage": "totp_setup",
+                                "code": "totp_setup_failed",
+                                "http_status": None,
+                                "message": "2FA 未完成",
+                            }
+                        logger.warning("[BrowserUse][2FA] 未完成，账号仍保存")
+                except Exception as exc:
+                    twofa_error = twofa_failure_payload(exc, default_stage="totp_proxy")
+                    logger.warning("[BrowserUse][2FA] 执行失败，账号仍保存：%s", type(exc).__name__)
+                finally:
+                    if twofa_session is not None:
+                        twofa_session.close()
 
             codex_result = {
                 "status": "skipped",
@@ -1913,7 +1980,7 @@ def run_browser_use_registration(
                 extra={
                     "user": session_info.get("user"),
                     "account": session_info.get("account"),
-                    "expires": session_info.get("expires"),
+                    "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
                     provider_prefix: {
                         "proxy_country_code": session_info_open.proxy_country_code,
                         "profile_id": session_info_open.profile_id,
@@ -1921,6 +1988,16 @@ def run_browser_use_registration(
                         "connect": session_info_open.raw,
                     },
                     "registration_password": openai_password,
+                    "twofa": {
+                        "status": twofa_status,
+                        "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
+                        "validation_status": getattr(twofa_result, "validation_status", None) if twofa_result else None,
+                        "validation": twofa_validation,
+                        "activated_at": getattr(twofa_result, "activated_at", None) if twofa_result else None,
+                        "proxy_continuity": twofa_proxy_continuity,
+                        "proxy_source": twofa_proxy_source,
+                        "error": twofa_error,
+                    },
                     "codex": codex_result,
                 },
             )

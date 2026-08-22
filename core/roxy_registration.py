@@ -20,7 +20,9 @@ from core.browser_traffic import RoxyTrafficOptimizer
 from core.email_provider import wait_for_otp, resolve_email_source
 from core.generic_api_mail_client import GenericApiMailError, GenericApiTransportError
 from core.humanize import delay as human_delay
+from core.otp_utils import mask_otp, redact_otp_text
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
+from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
 
 logger = logging.getLogger(__name__)
 
@@ -1426,10 +1428,18 @@ def _type_otp(driver, code: str) -> None:
                     if not has_live_otp:
                         logger.info("%s[OTP] 真实按键输入后页面已自动提交", _log_prefix(driver))
                         return
-                    logger.debug("%s[OTP] 真实按键输入失败，回退原子写入：%s", _log_prefix(driver), exc)
+                    logger.debug(
+                        "%s[OTP] 真实按键输入失败，回退原子写入：%s",
+                        _log_prefix(driver),
+                        redact_otp_text(exc),
+                    )
                     break
     except Exception as exc:
-        logger.debug("%s[OTP] 初始化真实按键输入失败，回退原子写入：%s", _log_prefix(driver), exc)
+        logger.debug(
+            "%s[OTP] 初始化真实按键输入失败，回退原子写入：%s",
+            _log_prefix(driver),
+            redact_otp_text(exc),
+        )
 
     for _ in range(3):
         try:
@@ -1895,7 +1905,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
             logger.error(
                 "%s[OTP] OpenAI 返回不可恢复账号错误：%s；停止验证码重试",
                 _log_prefix(driver),
-                terminal_error,
+                redact_otp_text(terminal_error),
             )
             return terminal_error
         if _email_otp_verified_success(last):
@@ -1907,7 +1917,11 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
         last = _email_otp_page_state(driver)
         if _email_otp_verified_success(last):
             return 'email_verified'
-        logger.info("%s[OTP] 提交后仍在验证码页且没有明确错误，保持 pending 状态 snapshot=%s", _log_prefix(driver), last)
+        logger.info(
+            "%s[OTP] 提交后仍在验证码页且没有明确错误，保持 pending 状态 snapshot=%s",
+            _log_prefix(driver),
+            redact_otp_text(last),
+        )
         return 'pending'
     if _is_email_login_page_still_present(driver):
         return 'email_login'
@@ -3185,9 +3199,15 @@ def run_roxy_registration(
                 historical_otp = snapshot_current_otp(email)
                 if historical_otp:
                     rejected_otps.add(str(historical_otp))
-                    logger.info("[Roxy注册][OTP] 已记录并排除取码接口历史验证码：%s", historical_otp)
+                    logger.info(
+                        "[Roxy注册][OTP] 已记录并排除取码接口历史验证码：%s",
+                        mask_otp(historical_otp),
+                    )
             except Exception as exc:
-                logger.debug("[Roxy注册][OTP] 历史验证码快照失败，继续注册：%s", exc)
+                logger.debug(
+                    "[Roxy注册][OTP] 历史验证码快照失败，继续注册：%s",
+                    redact_otp_text(exc),
+                )
 
         otp_after_ts = time.time()
         logger.info("[Roxy注册] 打开登录页：https://chatgpt.com/auth/login")
@@ -3256,7 +3276,7 @@ def run_roxy_registration(
                     if isinstance(exc, GenericApiTransportError):
                         logger.warning(
                             "[Roxy注册][OTP] 取码端点经短重试仍不可达，停止重发 OTP：%s",
-                            str(exc)[:240],
+                            redact_otp_text(str(exc)[:240]),
                         )
                         raise
                     if (
@@ -3265,7 +3285,7 @@ def run_roxy_registration(
                     ):
                         logger.warning(
                             "[Roxy注册][OTP] 单轮取码已结束，快速模式不再盲目重发 OTP：%s",
-                            str(exc)[:240],
+                            redact_otp_text(str(exc)[:240]),
                         )
                         raise
                     if advanced_state == "email_login":
@@ -3280,7 +3300,7 @@ def run_roxy_registration(
                             otp_attempt + 1,
                             max_otp_attempts,
                             type(exc).__name__,
-                            str(exc)[:180],
+                            redact_otp_text(str(exc)[:180]),
                         )
                     otp_after_ts = time.time()
                     if current_otp:
@@ -3299,7 +3319,7 @@ def run_roxy_registration(
                     human_delay("api")
                     current_otp = None
                     continue
-            logger.info("[Roxy注册][OTP] 收到验证码：%s", current_otp)
+            logger.info("[Roxy注册][OTP] 收到验证码：%s", mask_otp(current_otp))
             otp_ready = _wait_for_otp_input(driver, timeout=30)
             if otp_ready == "email_verified":
                 logger.info("[Roxy][OTP] Email verified page appeared before OTP input; resuming ChatGPT callback")
@@ -3331,7 +3351,10 @@ def run_roxy_registration(
                         _click_continue(driver)
                         logger.info("[Roxy注册][OTP] 已点击 OTP 表单提交按钮，等待资料页或登录态")
                     except Exception as exc:
-                        logger.info("[Roxy注册][OTP] OTP 可能已自动提交，不再跨页面寻找按钮：%s", str(exc)[:120])
+                        logger.info(
+                            "[Roxy注册][OTP] OTP 可能已自动提交，不再跨页面寻找按钮：%s",
+                            redact_otp_text(str(exc)[:120]),
+                        )
                 else:
                     logger.info("[Roxy注册][OTP] 输入后 OTP 控件已消失，判定页面已自动提交")
             else:
@@ -3446,9 +3469,50 @@ def run_roxy_registration(
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
 
-        if _twofa_cfg.ENABLE_2FA:
-            logger.warning("[Roxy注册] 当前 Roxy 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
+        twofa_result = None
+        twofa_session = None
+        twofa_status = "skipped"
+        twofa_error = None
+        twofa_validation = None
+        twofa_proxy_continuity = False
+        twofa_proxy_source = None
+        if _twofa_cfg.ENABLE_2FA:
+            twofa_status = "failed"
+            logger.info("[Roxy注册][2FA] ENABLE_2FA=True，复用当前浏览器会话设置 2FA")
+            try:
+                from core.account_export import maybe_setup_2fa_result
+                twofa_proxy = resolve_twofa_proxy(
+                    getattr(client, "profile_proxy", None),
+                    proxy,
+                    source="RoxyBrowser",
+                )
+                twofa_session = build_twofa_session(twofa_proxy, source="RoxyBrowser")
+                twofa_proxy_continuity = True
+                twofa_proxy_source = "registration_profile"
+                twofa_result = maybe_setup_2fa_result(twofa_session, email, driver=driver)
+                twofa_error = getattr(twofa_session, "_twofa_last_error", None)
+                if twofa_result:
+                    totp_secret = twofa_result.secret
+                    access_token = twofa_result.access_token
+                    twofa_validation = getattr(twofa_result, "validation", None)
+                    twofa_status = "success" if bool(getattr(twofa_result, "validation_ok", True)) else "partial_success"
+                    logger.info("[Roxy注册][2FA] 已完成，Token 校验=%s", twofa_status == "success")
+                else:
+                    if not twofa_error:
+                        twofa_error = {
+                            "stage": "totp_setup",
+                            "code": "totp_setup_failed",
+                            "http_status": None,
+                            "message": "2FA 未完成",
+                        }
+                    logger.warning("[Roxy注册][2FA] 未完成，账号仍保存")
+            except Exception as exc:
+                twofa_error = twofa_failure_payload(exc, default_stage="totp_proxy")
+                logger.warning("[Roxy注册][2FA] 执行失败，账号仍保存：%s", type(exc).__name__)
+            finally:
+                if twofa_session is not None:
+                    twofa_session.close()
 
         codex_result = {
             "status": "skipped",
@@ -3493,11 +3557,21 @@ def run_roxy_registration(
             extra={
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
-                "expires": session_info.get("expires"),
+                "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
                 "roxybrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
                 "registration_password": openai_password,
                 "codex": codex_result,
                 "registration_traffic": traffic_summary,
+                "twofa": {
+                    "status": twofa_status,
+                    "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
+                    "validation_status": getattr(twofa_result, "validation_status", None) if twofa_result else None,
+                    "validation": twofa_validation,
+                    "activated_at": getattr(twofa_result, "activated_at", None) if twofa_result else None,
+                    "proxy_continuity": twofa_proxy_continuity,
+                    "proxy_source": twofa_proxy_source,
+                    "error": twofa_error,
+                },
             },
         )
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"

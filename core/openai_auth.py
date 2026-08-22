@@ -14,6 +14,7 @@ from core.sentinel import (
     build_sentinel_request_body,
 )
 from core.sentinel_runner import generate_sentinel_token
+from core.otp_utils import mask_otp, redact_otp_text
 
 logger = logging.getLogger(__name__)
 
@@ -461,7 +462,11 @@ def send_email_otp(session: BrowserSession, referer: str = "https://auth.openai.
     logger.info("[OTP] 请求重新发送邮箱验证码...")
     resp = session.get(url, headers=headers, allow_redirects=True)
     if resp.status_code >= 400:
-        logger.warning("[OTP] 重新发送验证码失败 status=%s: %s", resp.status_code, (resp.text or '')[:300])
+        logger.warning(
+            "[OTP] 重新发送验证码失败 status=%s: %s",
+            resp.status_code,
+            redact_otp_text((resp.text or '')[:300]),
+        )
         resp.raise_for_status()
     logger.info("[OTP] 重新发送验证码请求完成，status=%s", resp.status_code)
 
@@ -495,12 +500,12 @@ def validate_email_otp(session: BrowserSession, code: str, sentinel_header: str 
 
     body = json.dumps({"code": code})
 
-    logger.info(f"[步骤10] 提交邮箱验证码: {code}")
+    logger.info("[步骤10] 提交邮箱验证码: %s", mask_otp(code))
     resp = session.post(url, headers=headers, data=body)
 
     if resp.status_code != 200:
         logger.error(f"[步骤10] 请求失败, 状态码: {resp.status_code}")
-        logger.error(f"[步骤10] 响应内容: {resp.text}")
+        logger.error("[步骤10] 响应内容: %s", redact_otp_text(resp.text))
         # 先看是不是"账号已废"——这类邮箱再试也没用，单独抛出让上层标 failed
         err_code = _extract_error_code(resp)
         if err_code in _ACCOUNT_DEAD_CODES:
@@ -512,13 +517,19 @@ def validate_email_otp(session: BrowserSession, code: str, sentinel_header: str 
             'invalid', 'incorrect', 'expired', 'code', 'otp', 'verification',
             '验证码', '認証コード', '確認コード', 'コード'
         )):
-            raise EmailOtpInvalidError(f"邮箱验证码无效或已过期: status={resp.status_code}, body={(resp.text or '')[:240]}")
+            raise EmailOtpInvalidError(
+                "邮箱验证码无效或已过期: "
+                f"status={resp.status_code}, body={redact_otp_text((resp.text or '')[:240])}"
+            )
         resp.raise_for_status()
 
     data = resp.json()
     page_type = data.get('page', {}).get('type')
     logger.info(f"[步骤10] 验证码验证成功: {page_type}")
-    logger.info(f"[步骤10] 验证响应摘要: {json.dumps(data, ensure_ascii=False)[:1000]}")
+    logger.info(
+        "[步骤10] 验证响应摘要: %s",
+        redact_otp_text(json.dumps(data, ensure_ascii=False)[:1000]),
+    )
     return data
 
 
@@ -555,7 +566,7 @@ def create_account(session: BrowserSession, name: str, birthday: str, sentinel_h
 
     if resp.status_code != 200:
         logger.error(f"[步骤12] 请求失败, 状态码: {resp.status_code}")
-        logger.error(f"[步骤12] 响应内容: {resp.text}")
+        logger.error("[步骤12] 响应内容: %s", redact_otp_text(resp.text))
         resp.raise_for_status()
 
     data = resp.json()

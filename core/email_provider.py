@@ -137,6 +137,9 @@ def wait_for_otp(
     max_wait: int | None = None,
     poll_interval: int | None = None,
     settle_seconds: int | None = None,
+    request_timeout: float | None = None,
+    retry_timeout: float | None = None,
+    max_consecutive_errors: int | None = None,
     exclude_codes: set[str] | list[str] | tuple[str, ...] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> str:
@@ -170,17 +173,31 @@ def wait_for_otp(
         extra_kwargs["poll_interval"] = poll_interval
     if settle_seconds is not None:
         extra_kwargs["settle_seconds"] = settle_seconds
+    if request_timeout is not None:
+        extra_kwargs["request_timeout"] = request_timeout
+    if retry_timeout is not None:
+        extra_kwargs["retry_timeout"] = retry_timeout
+    if max_consecutive_errors is not None:
+        extra_kwargs["max_consecutive_errors"] = max_consecutive_errors
+
+    # 传输层超时/连续错误参数只属于 generic_api；其它 Provider 的
+    # fetch_latest_otp 签名保持兼容，不能收到这些专用参数。
+    common_kwargs = {
+        key: value
+        for key, value in extra_kwargs.items()
+        if key not in {"request_timeout", "retry_timeout", "max_consecutive_errors"}
+    }
 
     source = resolve_email_source(email)
     if source == "gptmail":
         from core.gptmail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return fetch_latest_otp(email, after_ts=after_ts, **common_kwargs)
     if source == "cloudflare":
         from core.cf_temp_mail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return fetch_latest_otp(email, after_ts=after_ts, **common_kwargs)
     if source == "cloudflare_domain":
         from core.qqmail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return fetch_latest_otp(email, after_ts=after_ts, **common_kwargs)
     if source == "generic_api":
         from core.generic_api_mail_client import fetch_latest_otp
         return fetch_latest_otp(
@@ -197,7 +214,7 @@ def wait_for_otp(
             after_ts=after_ts,
             exclude_codes=exclude_codes,
             should_stop=should_stop,
-            **extra_kwargs,
+            **common_kwargs,
         )
     if source == "inbox_mate":
         from core.inbox_mate_mail_client import fetch_latest_otp
@@ -206,16 +223,16 @@ def wait_for_otp(
             after_ts=after_ts,
             exclude_codes=exclude_codes,
             should_stop=should_stop,
-            **extra_kwargs,
+            **common_kwargs,
         )
     if source == "mailnest":
         from core.mailnest_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return fetch_latest_otp(email, after_ts=after_ts, **common_kwargs)
     if source == "cloudmail":
         from core.cloudmail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return fetch_latest_otp(email, after_ts=after_ts, **common_kwargs)
     from core.outlook_client import fetch_latest_otp
-    return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+    return fetch_latest_otp(email, after_ts=after_ts, **common_kwargs)
 
 
 def release_email(email: str, status: str = "available", note: str | None = None) -> str:

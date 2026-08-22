@@ -168,15 +168,24 @@ def _code_from_payload(value: object) -> str | None:
 
 
 def snapshot_current_otp(email: str, timeout: float = 8.0) -> str | None:
+    """读取当前缓存 OTP 的一次性快照，不等待完整注册 OTP 预算。"""
     try:
         return _run_job(
             email,
-            max_wait=max(8, int(timeout)),
+            # 历史快照只用于排除旧码；没有必要阻塞主流程 8~180 秒。
+            # 保留至少 1 秒让 Inbox Mate 返回一次 job/event 响应。
+            max_wait=max(1, int(timeout or 2)),
+            request_timeout=max(1.0, min(2.0, float(timeout or 2))),
             settle_seconds=0,
             rescan_completed=False,
         )
     except Exception as exc:
-        logger.debug("[InboxMate] 历史 OTP 快照失败：%s: %s", type(exc).__name__, exc)
+        try:
+            from core.otp_utils import redact_otp_text
+            detail = redact_otp_text(exc)
+        except Exception:
+            detail = type(exc).__name__
+        logger.debug("[InboxMate] 历史 OTP 快照失败：%s: %s", type(exc).__name__, detail)
         return None
 
 
@@ -185,6 +194,7 @@ def _run_job(
     *,
     after_ts: float | None = None,
     max_wait: int | None = None,
+    request_timeout: float | None = None,
     settle_seconds: int = 0,
     exclude_codes: set[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -194,6 +204,12 @@ def _run_job(
     base = _base_url(row.get("api_base"))
     provider = str(row.get("mail_provider") or provider_for_email(email)).strip() or "custom"
     deadline = time.time() + int(max_wait or getattr(_email_cfg, "OTP_MAX_WAIT", 180) or 180)
+    # 普通取码保持原来的 20s 网络预算；历史快照显式传入 1~2s，
+    # 避免 max_wait 很短但底层 requests 仍被 20s connect/read timeout 拖住。
+    transport_timeout = max(
+        1.0,
+        min(20.0, float(request_timeout if request_timeout is not None else 20.0)),
+    )
     lookback = 1440
     if after_ts:
         lookback = max(15, min(10080, int((time.time() - float(after_ts)) / 60) + 15))
@@ -224,7 +240,13 @@ def _run_job(
             if should_stop and should_stop():
                 raise InboxMateMailError("验证码页面已进入下一步，停止等待新验证码")
             try:
-                csrf_resp = session.get(f"{base}/api/v1/session", timeout=20)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                csrf_resp = session.get(
+                    f"{base}/api/v1/session",
+                    timeout=min(transport_timeout, max(0.1, remaining)),
+                )
                 csrf_resp.raise_for_status()
                 csrf = str((csrf_resp.json() or {}).get("csrfToken") or "").strip()
                 if not csrf:
@@ -233,11 +255,14 @@ def _run_job(
                 account_payload["clientAccountId"] = (
                     f"codex-{email}-{int(time.time() * 1000)}-{scan_attempt}"
                 )
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
                 response = session.post(
                     f"{base}/api/v1/jobs",
                     headers={"X-Inbox-Mate-CSRF": csrf, "Content-Type": "application/json"},
                     json=body,
-                    timeout=20,
+                    timeout=min(transport_timeout, max(0.1, remaining)),
                 )
                 response.raise_for_status()
                 job_id = str((response.json() or {}).get("jobId") or "").strip()
@@ -255,11 +280,17 @@ def _run_job(
             completed = False
             while time.time() < deadline and not completed:
                 try:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break
                     with session.get(
                         f"{base}/api/v1/jobs/{job_id}/events",
                         headers={"Accept": "text/event-stream"},
                         stream=True,
-                        timeout=(20, max(10, min(20, int(deadline - time.time())))),
+                        timeout=(
+                            min(transport_timeout, max(0.1, remaining)),
+                            min(transport_timeout, max(0.1, remaining)),
+                        ),
                     ) as stream:
                         for raw in stream.iter_lines(decode_unicode=True):
                             if time.time() >= deadline:
@@ -313,6 +344,7 @@ def fetch_latest_otp(email: str, **kwargs) -> str:
         email,
         after_ts=kwargs.get("after_ts"),
         max_wait=kwargs.get("max_wait"),
+        request_timeout=kwargs.get("request_timeout"),
         settle_seconds=int(kwargs.get("settle_seconds") or 0),
         exclude_codes={str(code) for code in (kwargs.get("exclude_codes") or [])},
         should_stop=kwargs.get("should_stop"),

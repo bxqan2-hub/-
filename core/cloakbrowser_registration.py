@@ -13,6 +13,8 @@ from core.browser_exit_geo import probe_playwright_context_exit_geo
 from core.cloakbrowser_driver import build_cloak_driver
 from core.email_provider import wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
+from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
+from core.otp_utils import mask_otp, redact_otp_text
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
 from core.roxy_registration import (  # noqa: F401
@@ -67,21 +69,24 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                         otp_attempt + 1,
                         max_otp_attempts,
                         type(exc).__name__,
-                        str(exc)[:180],
+                        redact_otp_text(str(exc)[:180]),
                     )
                     otp_after_ts = time.time()
                     _click_resend_email_otp(driver, timeout=25)
                     human_delay("api")
                     current_otp = None
                     continue
-            logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
+            logger.info("[Cloak注册][OTP] 收到验证码：%s", mask_otp(current_otp))
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
             human_delay("otp_input")
             try:
                 _click_continue(driver)
             except Exception as exc:
-                logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
+                logger.info(
+                    "[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s",
+                    redact_otp_text(str(exc)[:120]),
+                )
 
             outcome = _wait_after_email_otp_submit(driver, timeout=10)
             if outcome == "accepted":
@@ -102,9 +107,49 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
         access_token = session_info["accessToken"]
         logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
 
-        if _twofa_cfg.ENABLE_2FA:
-            logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
+        twofa_result = None
+        twofa_session = None
+        twofa_status = "skipped"
+        twofa_error = None
+        twofa_validation = None
+        twofa_proxy_continuity = False
+        twofa_proxy_source = None
+        if _twofa_cfg.ENABLE_2FA:
+            twofa_status = "failed"
+            logger.info("[Cloak注册][2FA] ENABLE_2FA=True，复用当前浏览器会话设置 2FA")
+            try:
+                from core.account_export import maybe_setup_2fa_result
+                # Prefer the original input so a Cloak socks5h route is not
+                # downgraded to local-DNS socks5 by the browser adapter.
+                used_proxy = proxy or ((opened.raw or {}).get("proxy") if opened else None)
+                used_proxy = resolve_twofa_proxy(used_proxy, source="CloakBrowser")
+                twofa_session = build_twofa_session(used_proxy, source="CloakBrowser")
+                twofa_proxy_continuity = True
+                twofa_proxy_source = "registration_argument" if proxy else "cloak_profile"
+                twofa_result = maybe_setup_2fa_result(twofa_session, email, driver=driver)
+                twofa_error = getattr(twofa_session, "_twofa_last_error", None)
+                if twofa_result:
+                    totp_secret = twofa_result.secret
+                    access_token = twofa_result.access_token
+                    twofa_validation = getattr(twofa_result, "validation", None)
+                    twofa_status = "success" if bool(getattr(twofa_result, "validation_ok", True)) else "partial_success"
+                    logger.info("[Cloak注册][2FA] 已完成，Token 校验=%s", twofa_status == "success")
+                else:
+                    if not twofa_error:
+                        twofa_error = {
+                            "stage": "totp_setup",
+                            "code": "totp_setup_failed",
+                            "http_status": None,
+                            "message": "2FA 未完成",
+                        }
+                    logger.warning("[Cloak注册][2FA] 未完成，账号仍保存")
+            except Exception as exc:
+                twofa_error = twofa_failure_payload(exc, default_stage="totp_proxy")
+                logger.warning("[Cloak注册][2FA] 执行失败，账号仍保存：%s", type(exc).__name__)
+            finally:
+                if twofa_session is not None:
+                    twofa_session.close()
 
         codex_result = {
             "status": "skipped",
@@ -137,9 +182,19 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             extra={
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
-                "expires": session_info.get("expires"),
+                "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
                 "cloakbrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
                 "registration_password": openai_password,
+                "twofa": {
+                    "status": twofa_status,
+                    "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
+                    "validation_status": getattr(twofa_result, "validation_status", None) if twofa_result else None,
+                    "validation": twofa_validation,
+                    "activated_at": getattr(twofa_result, "activated_at", None) if twofa_result else None,
+                    "proxy_continuity": twofa_proxy_continuity,
+                    "proxy_source": twofa_proxy_source,
+                    "error": twofa_error,
+                },
                 "codex": codex_result,
             },
         )
