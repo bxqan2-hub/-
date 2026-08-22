@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -35,6 +36,9 @@ PROXY_RETRYABLE_HINTS = (
     "unusual activity", "502", "5xx",
 )
 MAX_PROXY_RETRIES: int | None = None
+# 单个账号整个探测的硬性总耗时上限（秒）。超过即中止并释放线程，
+# 防止 100 条短命代理（-t-15）配合无上限重试把 worker 线程全部占死。
+PROBE_TOTAL_TIMEOUT = 90.0
 
 
 def _should_retry_with_next_proxy(result: dict) -> bool:
@@ -124,6 +128,7 @@ def _run_with_proxy_retry(
     access_token: str,
     proxies: list[str],
     max_retries: int | None = None,
+    total_timeout: float | None = PROBE_TOTAL_TIMEOUT,
 ) -> dict:
     """Try candidate proxies until GCash detection reaches a definitive answer.
 
@@ -132,6 +137,10 @@ def _run_with_proxy_retry(
     connection / risk-control class failures advance to the next proxy; a
     definitive result (eligible / confirmed no-eligible) or an account-level
     failure (e.g. bad access token) stops immediately.
+
+    A hard total-time watchdog (``total_timeout`` seconds) aborts the loop so a
+    long-lived proxy pool of short-lived sessions (e.g. ``-t-15``) cannot pin
+    worker threads forever.
     """
     attempts: list[str] = []
     pool = [p for p in (proxies or []) if p]
@@ -145,8 +154,13 @@ def _run_with_proxy_retry(
             total = len(pool)
     if total <= 0:
         total = 1
+    deadline = time.monotonic() + total_timeout if total_timeout and total_timeout > 0 else None
     last_result: dict = {"ok": False, "gcash": False}
+    timed_out = False
     for idx in range(total):
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            break
         proxy = pool[idx] if pool else None
         try:
             result = check_gcash(access_token, proxy=proxy)
@@ -166,14 +180,18 @@ def _run_with_proxy_retry(
                 result["retried_proxies"] = attempts
                 result["attempt_count"] = idx + 1
             return db.update_account_gcash(account_id, result) and result
-    # 整个池子都试完仍有代理/风控类失败：记录尝试过的代理，方便用户看。
+    # 整个池子都试完 / 总时长超时仍失败：记录尝试过的代理，方便用户看。
     result = dict(last_result)
     result.setdefault("ok", False)
     result["gcash"] = False
     result["retried_proxies"] = attempts
-    result["attempt_count"] = total
-    result["error"] = (f"已尝试 {total} 个代理仍失败；最后一个错误："
-                       + str(result.get("error") or "未知"))
+    result["attempt_count"] = len(attempts)
+    if timed_out:
+        result["error"] = (f"检测总耗时超过 {int(total_timeout or 0)} 秒中止（已换 {len(attempts)} 个代理）；"
+                           + str(result.get("error") or "未知"))
+    else:
+        result["error"] = (f"已尝试 {len(attempts)} 个代理仍失败；最后一个错误："
+                           + str(result.get("error") or "未知"))
     db.update_account_gcash(account_id, result)
     return result
 

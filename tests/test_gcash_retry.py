@@ -95,6 +95,30 @@ class GcashProxyRetryTests(unittest.TestCase):
         self.assertEqual(result["attempt_count"], 100)
         self.assertEqual(len(result["retried_proxies"]), 100)
 
+    def test_total_timeout_watchdog_aborts_retry_loop(self):
+        calls = []
+
+        def fake_check(token, proxy=None):
+            calls.append(proxy)
+            return {"ok": False, "gcash": False,
+                    "error": "SSLError: Failed to perform"}
+
+        with patch.object(gcash_service, "check_gcash", side_effect=fake_check), \
+             patch.object(gcash_service.db, "update_account_gcash", return_value=True), \
+             patch.object(gcash_service.time, "monotonic", side_effect=[0.0] * 4 + [999.0]):
+            # deadline = 0 + 2 = 2；前 3 次调用都 < 2，第 4 次触发超时中止。
+            result = gcash_service._run_with_proxy_retry(
+                account_id=5, access_token="tok",
+                proxies=["p1", "p2", "p3", "p4", "p5", "p6"],
+                max_retries=None,
+                total_timeout=2.0,
+            )
+
+        self.assertEqual(len(calls), 3)
+        self.assertIn("总耗时超过", result["error"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["attempt_count"], 3)
+
     def test_no_eligible_does_not_retry_even_with_proxy_pool(self):
         calls = []
 
