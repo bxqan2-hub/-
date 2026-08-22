@@ -2659,6 +2659,44 @@ def purge_emails_everywhere(emails: list[str], *, protect_active_jobs: bool = Tr
 # outlook_pool
 # ============================================================
 
+def _email_pool_int(row: dict, key: str) -> int:
+    try:
+        return int(row.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def email_pool_is_deprioritized(row: dict) -> bool:
+    """注册失败或回收过的邮箱在邮箱池和自动领取队列中统一后置。"""
+    status = str(row.get("status") or "available").strip().lower()
+    note = str(row.get("note") or "").strip().lower()
+    return (
+        status in {"failed", "disabled"}
+        or _email_pool_int(row, "registration_failure_count") > 0
+        or _email_pool_int(row, "retry_count") > 0
+        or row.get("retry_queue_seq") is not None
+        or "移至队尾" in note
+        or "moved to back" in note
+    )
+
+
+def _sort_email_pool_rows(rows: list[dict]) -> list[dict]:
+    """先按新旧排序，再稳定地把失败/重试记录放到全部正常记录之后。"""
+    ordered = sorted(rows, key=lambda item: _email_pool_int(item, "id"), reverse=True)
+    return sorted(ordered, key=email_pool_is_deprioritized)
+
+
+def _email_pool_claim_queue_key(item: dict) -> tuple[int, int, int]:
+    """正常新邮箱优先；只有正常邮箱耗尽后，才按队列顺序重试失败邮箱。"""
+    retry_seq = item.get("retry_queue_seq")
+    has_retry_history = (
+        email_pool_is_deprioritized(item)
+        or bool(str(item.get("note") or "").strip())
+    )
+    if not has_retry_history:
+        return (0, 0, -_email_pool_int(item, "id"))
+    return (1, _email_pool_int(item, "retry_queue_seq"), _email_pool_int(item, "id"))
+
 def import_outlook_accounts(records: list[dict]) -> tuple[int, int]:
     """
     批量导入 Outlook 账号。
@@ -2848,18 +2886,20 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
 
 
 def claim_next_outlook() -> dict | None:
-    """原子领取一个可用 Outlook 账号并标记为 used。"""
+    """原子领取 Outlook：正常新邮箱优先，失败回收邮箱统一后置。"""
     with _LOCK:
-        rows = sorted(_load_outlook(), key=lambda x: int(x.get("id") or 0))
+        rows = _load_outlook()
         registered_emails = {
             str(account.get("email") or "").strip().lower()
             for account in _load_accounts()
         }
-        row = next((
+        candidates = [
             r for r in rows
             if r.get("status") == "available"
             and str(r.get("email") or "").strip().lower() not in registered_emails
-        ), None)
+        ]
+        candidates.sort(key=_email_pool_claim_queue_key)
+        row = candidates[0] if candidates else None
         if row is None:
             return None
         row["status"] = "used"
@@ -2981,7 +3021,7 @@ def list_outlook_pool(status: str | None = None, limit: int = 500) -> list[dict]
         rows = [_decorate_outlook(r, account_by_email) for r in _load_outlook()]
         if status:
             rows = [r for r in rows if r.get("status") == status]
-        rows = sorted(rows, key=lambda x: int(x.get("id") or 0), reverse=True)
+        rows = _sort_email_pool_rows(rows)
         return rows[:limit]
 
 
@@ -3132,18 +3172,7 @@ def claim_next_generic_api_email(provider: str | None = None) -> dict | None:
             if provider_filter not in ("", "generic_api") and row_provider != provider_filter:
                 continue
             candidates.append(row)
-        def queue_key(item: dict) -> tuple[int, int, int]:
-            retry_seq = item.get("retry_queue_seq")
-            has_retry_history = (
-                retry_seq is not None
-                or int(item.get("retry_count") or 0) > 0
-                or bool(str(item.get("note") or "").strip())
-            )
-            if not has_retry_history:
-                return (0, 0, -int(item.get("id") or 0))
-            return (1, int(retry_seq or 0), int(item.get("id") or 0))
-
-        candidates.sort(key=queue_key)
+        candidates.sort(key=_email_pool_claim_queue_key)
         row = candidates[0] if candidates else None
         if row is None:
             return None
@@ -3238,7 +3267,7 @@ def list_generic_api_email_pool(status: str | None = None, limit: int = 500) -> 
         rows = [_decorate_generic_api_email(r, account_by_email) for r in _load_generic_api_emails()]
         if status:
             rows = [r for r in rows if r.get("status") == status]
-        rows = sorted(rows, key=lambda x: int(x.get("id") or 0), reverse=True)
+        rows = _sort_email_pool_rows(rows)
         return rows[:limit]
 
 
@@ -4186,7 +4215,7 @@ def list_domain_email_pool(status: str | None = None, limit: int = 500) -> list[
             for a in _load_accounts()
         }
         rows = [_decorate_domain_email(r, account_by_email) for r in _load_domain_pool()]
-        rows = sorted(rows, key=lambda x: int(x.get("id") or 0), reverse=True)
+        rows = _sort_email_pool_rows(rows)
         if status:
             rows = [r for r in rows if r.get("status") == status]
         return rows[:limit]

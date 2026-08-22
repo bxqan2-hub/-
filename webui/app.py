@@ -138,11 +138,14 @@ def _list_pool_rows(*, source: str, status: str | None, fetch_limit: int) -> lis
         rows += _with_pool_source([row for row in generic_rows if _is_domain_api_pool_row(row)], "domain_api")
         rows += _with_pool_source([row for row in generic_rows if _is_inbox_mate_pool_row(row)], "inbox_mate")
         rows += _with_pool_source(db.list_domain_email_pool(status=status, limit=fetch_limit), "cloudflare_domain")
-        return sorted(
+        # 不同邮箱池合并后仍要保持“正常邮箱在前、失败/重试邮箱在后”；
+        # 第二次稳定排序只改变失败优先级，不破坏各组内部的新旧顺序。
+        rows = sorted(
             rows,
             key=lambda x: str(x.get("created_at") or x.get("imported_at") or x.get("used_at") or ""),
             reverse=True,
         )
+        return sorted(rows, key=db.email_pool_is_deprioritized)
     if source == "generic_api":
         rows = db.list_generic_api_email_pool(status=status, limit=fetch_limit)
         return _with_pool_source([row for row in rows if not _is_domain_api_pool_row(row) and not _is_inbox_mate_pool_row(row)], "generic_api")
