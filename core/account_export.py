@@ -91,8 +91,8 @@ class TwoFASetupResult:
 
     @property
     def security_ok(self) -> bool:
-        """TOTP 健康检查与密码设置是否都通过。"""
-        return bool(self.secret and self.validation_ok and self.password_configured)
+        """服务端已确认 TOTP 激活且密码完成；只读健康检查失败不回滚已生效 MFA。"""
+        return bool(self.secret and self.activated_at and self.password_configured)
 
     @property
     def checkpoint(self) -> dict[str, bool]:
@@ -1568,13 +1568,31 @@ def _validate_2fa_token(session: BrowserSession, access_token: str) -> int:
     """激活后用一个只读 ChatGPT API 验证新 token 仍可用。"""
     headers = session.get_chatgpt_headers(referer="https://chatgpt.com/")
     headers["authorization"] = f"Bearer {access_token}"
-    try:
-        resp = session.get("https://chatgpt.com/backend-api/models", headers=headers)
-    except Exception as exc:
-        raise TwoFASetupError("totp_validate", "totp_token_validation_failed", "2FA 激活后 Token 校验请求失败") from exc
-    if resp.status_code != 200:
-        raise TwoFASetupError("totp_validate", "totp_token_validation_failed", "2FA 激活后 Token 校验失败", http_status=resp.status_code)
-    return int(resp.status_code)
+    last_exc: Exception | None = None
+    last_status: int | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = session.get("https://chatgpt.com/backend-api/models", headers=headers)
+            last_status = int(resp.status_code)
+            if last_status == 200:
+                return last_status
+            # 401/403 是确定性鉴权结果；限流和服务端错误才值得短重试。
+            if last_status not in {408, 425, 429, 500, 502, 503, 504}:
+                break
+        except Exception as exc:
+            last_exc = exc
+        if attempt < 3:
+            logger.warning("[2FA] Token 只读校验暂时失败，短暂等待后重试（%s/3）", attempt)
+            time.sleep(float(attempt))
+    if last_status is not None:
+        raise TwoFASetupError(
+            "totp_validate",
+            "totp_token_validation_failed",
+            "2FA 激活后 Token 校验失败",
+            http_status=last_status,
+        )
+    logger.debug("[2FA] Token 只读校验请求异常", exc_info=last_exc)
+    raise TwoFASetupError("totp_validate", "totp_token_validation_failed", "2FA 激活后 Token 校验请求失败") from last_exc
 
 
 def _snapshot_otp_history(email: str, *, timeout: float = 2.0) -> set[str]:

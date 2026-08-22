@@ -246,6 +246,18 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(selected["ip"], "203.0.113.9")
         self.assertEqual(selected["verification_source"], "same_proxy_preflight_fallback")
 
+    def test_existing_otp_only_account_continues_when_signup_password_link_is_absent(self):
+        driver = MagicMock()
+        with patch.object(roxy_registration, "_click_signup_password_link_if_present", return_value=False):
+            state = roxy_registration._switch_to_signup_password_branch(driver, "otp")
+        self.assertEqual(state, "otp")
+
+    def test_new_account_switches_to_signup_password_when_link_is_present(self):
+        driver = MagicMock()
+        with patch.object(roxy_registration, "_click_signup_password_link_if_present", return_value=True):
+            state = roxy_registration._switch_to_signup_password_branch(driver, "otp")
+        self.assertEqual(state, "password")
+
     def test_resend_atomic_snapshot_happens_before_click(self):
         driver = MagicMock()
         driver.execute_script.return_value = {"ok": True, "text": "もう一度試す", "kind": "retry"}

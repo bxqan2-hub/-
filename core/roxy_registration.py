@@ -2979,6 +2979,19 @@ def _switch_to_chatgpt_window_if_any(driver) -> bool:
     return False
 
 
+def _switch_to_signup_password_branch(driver, next_state: str) -> str:
+    """新账号优先创建密码；已存在的 OTP-only 账号留在 OTP，登录后再补设密码。"""
+    if next_state != "otp":
+        return next_state
+    if _click_signup_password_link_if_present(driver):
+        logger.info("[Roxy注册] 已从邮箱验证码页切换到创建密码分支")
+        return "password"
+    logger.warning(
+        "[Roxy注册] 邮箱验证码页没有创建密码入口，按已有 OTP-only 账号继续；登录后在启用 2FA 前补设密码"
+    )
+    return "otp"
+
+
 def _fetch_chatgpt_session_once(
     driver,
     timeout: int = 90,
@@ -3418,12 +3431,7 @@ def run_roxy_registration(
         if registration_password_required():
             password_state["desired"] = _registration_password()
             if next_state == "otp":
-                if not _click_signup_password_link_if_present(driver):
-                    raise RuntimeError(
-                        "registration_password_not_offered: 邮箱验证码页未提供创建密码入口"
-                    )
-                next_state = "password"
-                logger.info("[Roxy注册] 已从邮箱验证码页切换到创建密码分支")
+                next_state = _switch_to_signup_password_branch(driver, next_state)
         openai_password = _fill_password_page_if_present(
             driver,
             email,

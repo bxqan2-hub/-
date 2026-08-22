@@ -181,6 +181,7 @@ def test_setup_2fa_keeps_secret_when_models_validation_fails(monkeypatch) -> Non
     assert result.validation_code == "totp_token_validation_failed"
     assert result.validation["status"] == "failed"
     assert result.validation_state == result.validation
+    assert result.security_ok is False  # 本用例未提供密码，激活成功也仍缺安全链的密码部分
 
 
 def test_setup_2fa_does_not_treat_false_activation_as_success(monkeypatch) -> None:
