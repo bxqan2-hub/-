@@ -28,6 +28,37 @@ class RegistrationLocalProxyModeTests(unittest.TestCase):
             skip_proxy_preflight=True,
         )
 
+    @patch("main.BrowserSession")
+    def test_password_mfa_blocks_protocol_before_remote_registration(self, session_cls):
+        with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "protocol"), \
+             patch.object(main._twofa_cfg, "ENABLE_2FA", True), \
+             patch.object(main._email_cfg, "USE_EMAIL_SERVICE", True):
+            result = main.run_registration(
+                email="blocked@example.com",
+                name="Blocked User",
+                birthday="1991-02-03",
+            )
+
+        self.assertFalse(result["success"])
+        self.assertFalse(result["security_ok"])
+        self.assertIn("protocol", result["error"])
+        session_cls.assert_not_called()
+
+    @patch("core.roxy_registration.run_roxy_registration")
+    def test_password_mfa_blocks_manual_email_before_browser_registration(self, run_roxy_registration):
+        with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "roxy"), \
+             patch.object(main._twofa_cfg, "ENABLE_2FA", True), \
+             patch.object(main._email_cfg, "USE_EMAIL_SERVICE", False):
+            result = main.run_registration(
+                email="manual@example.com",
+                name="Manual User",
+                birthday="1991-02-03",
+            )
+
+        self.assertFalse(result["success"])
+        self.assertIn("第二次重认证验证码", result["error"])
+        run_roxy_registration.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

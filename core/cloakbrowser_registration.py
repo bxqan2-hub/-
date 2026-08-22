@@ -15,12 +15,14 @@ from core.email_provider import wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
 from core.otp_utils import mask_otp, redact_otp_text
+from core.registration_password import registration_password_required
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
 from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    _registration_password,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
     opened = None
     create_acknowledged = False
     openai_password: str | None = None
+    desired_password: str | None = None
     registration_exit_geo: dict = {}
     try:
         driver, opened = build_cloak_driver(proxy=proxy)
@@ -51,7 +54,15 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
         next_state = _submit_email_and_wait_next(driver, email, attempts=3)
         _check_manual_stop()
 
-        openai_password = None if next_state == "otp" else _fill_password_page_if_present(driver, email, timeout=25)
+        if registration_password_required():
+            desired_password = _registration_password()
+        openai_password = _fill_password_page_if_present(
+            driver,
+            email,
+            timeout=25,
+            allow_passwordless=(not registration_password_required()),
+            password=desired_password,
+        )
         _check_manual_stop()
 
         current_otp = otp_code
@@ -127,13 +138,31 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                 twofa_session = build_twofa_session(used_proxy, source="CloakBrowser")
                 twofa_proxy_continuity = True
                 twofa_proxy_source = "registration_argument" if proxy else "cloak_profile"
-                twofa_result = maybe_setup_2fa_result(twofa_session, email, driver=driver)
+                twofa_result = maybe_setup_2fa_result(
+                    twofa_session,
+                    email,
+                    driver=driver,
+                    existing_password=openai_password,
+                    desired_password=desired_password,
+                )
                 twofa_error = getattr(twofa_session, "_twofa_last_error", None)
                 if twofa_result:
                     totp_secret = twofa_result.secret
                     access_token = twofa_result.access_token
                     twofa_validation = getattr(twofa_result, "validation", None)
-                    twofa_status = "success" if bool(getattr(twofa_result, "validation_ok", True)) else "partial_success"
+                    password_ready = bool(getattr(twofa_result, "password_configured", False))
+                    twofa_status = (
+                        "success"
+                        if bool(getattr(twofa_result, "security_ok", False))
+                        else "partial_success"
+                    )
+                    if not password_ready and not twofa_error:
+                        twofa_error = {
+                            "stage": "password_setup",
+                            "code": "password_setup_required",
+                            "http_status": None,
+                            "message": "TOTP 已设置，但 OpenAI 密码未完成",
+                        }
                     logger.info("[Cloak注册][2FA] 已完成，Token 校验=%s", twofa_status == "success")
                 else:
                     if not twofa_error:
@@ -184,7 +213,9 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                 "account": session_info.get("account"),
                 "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
                 "cloakbrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
-                "registration_password": openai_password,
+                "registration_password": (
+                    twofa_result.password if twofa_result and twofa_result.password else openai_password
+                ),
                 "twofa": {
                     "status": twofa_status,
                     "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
@@ -194,12 +225,35 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                     "proxy_continuity": twofa_proxy_continuity,
                     "proxy_source": twofa_proxy_source,
                     "error": twofa_error,
+                    "password_setup": (getattr(twofa_result, "password_setup", None) if twofa_result else None),
                 },
                 "codex": codex_result,
             },
         )
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
-        return {"success": bool(codex_ok), "email": email, "account_id": account_id, "access_token": access_token, "totp_secret": totp_secret, "codex": codex_result, "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}"}
+        security_ok = (
+            (not bool(getattr(_twofa_cfg, "ENABLE_2FA", False)))
+            or bool(twofa_result and getattr(twofa_result, "security_ok", False))
+        )
+        result_error = None
+        if not security_ok:
+            result_error = (
+                (twofa_error or {}).get("message")
+                if isinstance(twofa_error, dict)
+                else "账号密码或 2FA 未完成"
+            ) or "账号密码或 2FA 未完成"
+        elif not codex_ok:
+            result_error = f"Codex 未完成: {codex_result.get('message')}"
+        return {
+            "success": bool(codex_ok and security_ok),
+            "email": email,
+            "account_id": account_id,
+            "access_token": access_token,
+            "totp_secret": totp_secret,
+            "codex": codex_result,
+            "security_ok": bool(security_ok),
+            "error": result_error,
+        }
     except Exception as exc:
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)

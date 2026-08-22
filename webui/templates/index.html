@@ -4297,10 +4297,14 @@ function _codexAction(r) {
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
 function _twoFaCellV2(r) {
-  if (!r.totp_enabled) return '<div class="acc-v2-sub acc-v2-twofa-status">2FA: 未启用</div>';
+  const passwordHtml = r.password_configured
+    ? `<div class="acc-v2-sub acc-v2-password-status">密码: 已设置 <button type="button" class="acc-v2-twofa-btn" data-account-copy-secret="registration_password" data-account-id="${esc(r.id)}" title="按需复制 OpenAI 注册密码">复制密码</button></div>`
+    : '<div class="acc-v2-sub acc-v2-password-status">密码: 未设置</div>';
+  if (!r.totp_enabled) return `<div class="acc-v2-sub acc-v2-twofa-status">2FA: 未启用</div>${passwordHtml}`;
   const id = esc(r.id);
   return `<div class="acc-v2-twofa" data-account-twofa="${id}">
     <div class="acc-v2-sub acc-v2-twofa-status" data-account-twofa-value="${id}">2FA: 已启用</div>
+    ${passwordHtml}
     <div class="acc-v2-twofa-actions">
       <button type="button" class="acc-v2-twofa-btn" data-account-reveal-secret="totp_secret" data-account-id="${id}" title="按需显示 TOTP Secret">显示</button>
       <button type="button" class="acc-v2-twofa-btn" data-account-copy-secret="totp_secret" data-account-id="${id}" title="复制完整 TOTP Secret">复制</button>
@@ -4834,7 +4838,7 @@ async function onAccountsBodyClick(e) {
       const value = await fetchOneAccountSecret(id, field);
       if (!value) { showToast('可复制内容为空'); return; }
       copyText(value);
-      showToast(field === 'access_token' ? 'Token 已复制' : field === 'codex_agent_token' ? 'Agent Token 已复制' : field === 'totp_secret' ? '2FA Secret 已复制' : field === 'oaics_link' ? 'BA 链接已复制' : '账号整行已复制');
+      showToast(field === 'access_token' ? 'Token 已复制' : field === 'codex_agent_token' ? 'Agent Token 已复制' : field === 'totp_secret' ? '2FA Secret 已复制' : field === 'registration_password' ? 'OpenAI 密码已复制' : field === 'oaics_link' ? 'BA 链接已复制' : '账号整行已复制');
     } catch(err) {
       showToast('复制失败: ' + err.message);
     } finally {

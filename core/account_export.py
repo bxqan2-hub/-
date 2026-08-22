@@ -11,12 +11,13 @@
 import base64
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pyotp
 
@@ -55,6 +56,10 @@ class TwoFASetupResult:
     validation_code: str | None = None
     validation_message: str | None = None
     expires: str | None = None
+    # ENABLE_2FA=True 时补设的 OpenAI 账号密码；补密码流程在 TOTP 激活后执行。
+    password: str | None = None
+    # 补密码结果状态（供 WebUI/日志读取）
+    password_setup: dict | None = None
 
     @property
     def validation(self) -> dict[str, object]:
@@ -71,6 +76,21 @@ class TwoFASetupResult:
     def validation_state(self) -> dict[str, object]:
         """``validation`` 的兼容别名，便于 WebUI/旧脚本读取。"""
         return self.validation
+
+    @property
+    def password_configured(self) -> bool:
+        """注册密码是否已确认提交或在初始注册页完成。"""
+        return bool(
+            self.password
+            and str(self.password).strip()
+            and self.password_setup
+            and self.password_setup.get("ok")
+        )
+
+    @property
+    def security_ok(self) -> bool:
+        """TOTP 健康检查与密码设置是否都通过。"""
+        return bool(self.secret and self.validation_ok and self.password_configured)
 
 
 def normalize_totp_secret(value: str) -> str:
@@ -518,6 +538,581 @@ def _wait_for_totp_window(min_remaining: float = 4.0) -> None:
         time.sleep(remaining + 0.25)
 
 
+_PASSWORD_CODE_SELECTOR = (
+    'input[autocomplete="one-time-code"], input[name="code"], '
+    'input[name="otp"], input[inputmode="numeric"]'
+)
+_PASSWORD_INPUT_SELECTOR = 'input[type="password"], input[autocomplete="new-password"]'
+_PASSWORD_AUTHENTICATOR_RE = re.compile(
+    r"authenticator|verification app|two[- ]factor|2fa|动态口令|身份验证器|认证器|認証アプリ|인증 앱",
+    re.IGNORECASE,
+)
+_PASSWORD_EMAIL_RE = re.compile(
+    r"email[- ]verification|email code|verification code sent|邮箱|郵箱|メール|이메일",
+    re.IGNORECASE,
+)
+_PASSWORD_REJECTION_RE = re.compile(
+    r"incorrect|invalid|rejected|failed|error|try again|could not|unable|错误|无效|不匹配|失败|拒绝|重试",
+    re.IGNORECASE,
+)
+_PASSWORD_SUCCESS_RE = re.compile(
+    r"password\s+(?:updated|changed|added|created)|密码(?:已更新|已更改|已添加|设置成功)|"
+    r"パスワード.*更新|비밀번호.*업데이트",
+    re.IGNORECASE,
+)
+
+_PASSWORD_REAUTH_JS = r"""
+async () => {
+  const sessionResponse = await fetch('/api/auth/session', {
+    credentials: 'include', headers: {'accept': 'application/json'},
+  });
+  const session = await sessionResponse.json().catch(() => ({}));
+  const email = String(session?.user?.email || '');
+  if (!sessionResponse.ok || !session?.accessToken || !email)
+    return {ok:false, stage:'session', status:sessionResponse.status};
+  const csrfResponse = await fetch('/api/auth/csrf', {
+    credentials: 'include', headers: {'accept': 'application/json'},
+  });
+  const csrf = await csrfResponse.json().catch(() => ({}));
+  const csrfToken = String(csrf.csrfToken || '');
+  if (!csrfResponse.ok || !csrfToken)
+    return {ok:false, stage:'csrf', status:csrfResponse.status};
+  const deviceCookie = document.cookie.split(';').map(v => v.trim())
+    .find(v => v.startsWith('oai-did='));
+  const deviceId = deviceCookie
+    ? decodeURIComponent(deviceCookie.slice('oai-did='.length)) : crypto.randomUUID();
+  const query = new URLSearchParams({
+    post_login_add_password: 'true', prompt: 'login', max_age: '0',
+    login_hint: email, 'ext-oai-did': deviceId,
+  });
+  const body = new URLSearchParams({
+    csrfToken, callbackUrl: 'https://chatgpt.com/?tm_action=password&tm_stage=password_done',
+    json: 'true',
+  });
+  const signinResponse = await fetch(`/api/auth/signin/openai?${query.toString()}`, {
+    method: 'POST', credentials: 'include',
+    headers: {'accept':'application/json', 'content-type':'application/x-www-form-urlencoded'},
+    body: body.toString(),
+  });
+  const signin = await signinResponse.json().catch(() => ({}));
+  return {ok: signinResponse.ok && !!signin.url, stage:'signin',
+    status: signinResponse.status, url: String(signin.url || '')};
+}
+"""
+
+_PASSWORD_REAUTH_SELENIUM_JS = r"""
+const done = arguments[arguments.length - 1];
+(async () => {
+  try {
+    const result = await (async () => {
+      const sessionResponse = await fetch('/api/auth/session', {
+        credentials: 'include', headers: {'accept': 'application/json'},
+      });
+      const session = await sessionResponse.json().catch(() => ({}));
+      const email = String(session?.user?.email || '');
+      if (!sessionResponse.ok || !session?.accessToken || !email)
+        return {ok:false, stage:'session', status:sessionResponse.status};
+      const csrfResponse = await fetch('/api/auth/csrf', {
+        credentials: 'include', headers: {'accept': 'application/json'},
+      });
+      const csrf = await csrfResponse.json().catch(() => ({}));
+      const csrfToken = String(csrf.csrfToken || '');
+      if (!csrfResponse.ok || !csrfToken)
+        return {ok:false, stage:'csrf', status:csrfResponse.status};
+      const deviceCookie = document.cookie.split(';').map(v => v.trim())
+        .find(v => v.startsWith('oai-did='));
+      const deviceId = deviceCookie
+        ? decodeURIComponent(deviceCookie.slice('oai-did='.length)) : crypto.randomUUID();
+      const query = new URLSearchParams({post_login_add_password:'true', prompt:'login',
+        max_age:'0', login_hint:email, 'ext-oai-did':deviceId});
+      const body = new URLSearchParams({csrfToken,
+        callbackUrl:'https://chatgpt.com/?tm_action=password&tm_stage=password_done', json:'true'});
+      const signinResponse = await fetch(`/api/auth/signin/openai?${query.toString()}`, {
+        method:'POST', credentials:'include',
+        headers:{'accept':'application/json','content-type':'application/x-www-form-urlencoded'},
+        body:body.toString(),
+      });
+      const signin = await signinResponse.json().catch(() => ({}));
+      return {ok:signinResponse.ok && !!signin.url, stage:'signin', status:signinResponse.status,
+        url:String(signin.url || '')};
+    })();
+    done(result);
+  } catch (error) {
+    done({ok:false, stage:'exception', status:null, error:String(error || '')});
+  }
+})();
+"""
+
+_PASSWORD_RESEND_JS = r"""
+() => {
+  const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+    && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+  const target = [...document.querySelectorAll('button,a,[role="button"],[role="link"]')]
+    .filter(el => visible(el) && enabled(el)).find(el =>
+      /resend|send again|send a new|new code|重新发送|再次发送|重发|重發|再送信|もう一度送信|다시\s*보내|재전송/i
+        .test([el.innerText, el.textContent, el.getAttribute('aria-label'), el.getAttribute('title')]
+          .filter(Boolean).join(' ')));
+  if (!target) return false;
+  target.scrollIntoView({block:'center'}); target.click(); return true;
+}
+"""
+
+
+def _is_playwright_page(driver) -> bool:
+    return callable(getattr(driver, "evaluate", None)) and callable(getattr(driver, "locator", None))
+
+
+def _password_log_prefix(driver) -> str:
+    try:
+        from core.roxy_registration import _log_prefix
+        return _log_prefix(driver)
+    except Exception:
+        return "[2FA]"
+
+
+def _password_page_url(driver) -> str:
+    try:
+        value = getattr(driver, "url", None)
+        if callable(value):
+            value = value()
+        if value:
+            return str(value)
+        return str(getattr(driver, "current_url", "") or "")
+    except Exception:
+        return ""
+
+
+def _password_done_callback(url: str) -> bool:
+    """确认已回到预先指定的可信密码完成回调。"""
+    try:
+        parsed = urlparse(str(url or ""))
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        query = parse_qs(parsed.query)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        parsed.scheme.lower() == "https"
+        and (host == "chatgpt.com" or host.endswith(".chatgpt.com"))
+        and str((query.get("tm_action") or [""])[0]).lower() == "password"
+        and str((query.get("tm_stage") or [""])[0]).lower() == "password_done"
+    )
+
+
+def _password_body_text(driver) -> str:
+    if _is_playwright_page(driver):
+        try:
+            return str(driver.locator("body").inner_text(timeout=1000) or "")
+        except Exception:
+            try:
+                return str(driver.evaluate("() => document.body?.innerText || ''") or "")
+            except Exception:
+                return ""
+    try:
+        return str(driver.execute_script("return document.body ? document.body.innerText : ''; ") or "")
+    except Exception:
+        return ""
+
+
+def _password_visible_playwright(driver, selector: str) -> list:
+    try:
+        locator = driver.locator(selector)
+        count = min(int(locator.count()), 20)
+    except Exception:
+        return []
+    result = []
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible(timeout=500):
+                result.append(candidate)
+        except Exception:
+            continue
+    return result
+
+
+def _password_visible_selenium(driver, selector: str) -> list:
+    try:
+        from selenium.webdriver.common.by import By
+        elements = driver.find_elements(By.CSS_SELECTOR, selector)
+    except Exception:
+        try:
+            elements = driver.find_elements("css selector", selector)
+        except Exception:
+            try:
+                elements = driver.find_elements_by_css_selector(selector)
+            except Exception:
+                elements = []
+    visible = []
+    for candidate in elements[:20]:
+        try:
+            if candidate.is_displayed() and candidate.is_enabled():
+                visible.append(candidate)
+        except Exception:
+            continue
+    return visible
+
+
+def _password_visible_inputs(driver, selector: str) -> list:
+    return _password_visible_playwright(driver, selector) if _is_playwright_page(driver) else _password_visible_selenium(driver, selector)
+
+
+def _password_click_playwright(driver, field, selectors: str) -> bool:
+    try:
+        scope = field.locator("xpath=ancestor::form[1]")
+        button = scope.locator(selectors)
+        if button.count() and button.first.is_visible(timeout=500):
+            button.first.click(timeout=5000)
+            return True
+    except Exception:
+        pass
+    try:
+        button = driver.locator(selectors)
+        if button.count() and button.first.is_visible(timeout=500):
+            button.first.click(timeout=5000)
+            return True
+    except Exception:
+        pass
+    try:
+        driver.keyboard.press("Enter")
+        return True
+    except Exception:
+        return False
+
+
+def _password_find_submit_selenium(field):
+    try:
+        scope = field.find_element("xpath", "ancestor::form[1]")
+        submit = scope.find_element(
+            "css selector",
+            'button[type="submit"], input[type="submit"], button[name="intent"]',
+        )
+        if submit.is_displayed() and submit.is_enabled():
+            return submit
+    except Exception:
+        pass
+    return None
+
+
+def _password_click_selenium(driver, field) -> bool:
+    submit = _password_find_submit_selenium(field)
+    if submit is not None:
+        try:
+            submit.click()
+            return True
+        except Exception:
+            pass
+    try:
+        clicked = bool(driver.execute_script(
+            """
+            const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+              && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+            const target = [...document.querySelectorAll('button[type="submit"]:not([disabled]), input[type="submit"]:not([disabled]), button[name="intent"]:not([disabled])')]
+              .find(visible); if (!target) return false; target.click(); return true;
+            """
+        ))
+        if clicked:
+            return True
+    except Exception:
+        pass
+    try:
+        from selenium.webdriver.common.keys import Keys
+
+        field.send_keys(Keys.ENTER)
+        return True
+    except Exception:
+        return False
+
+
+def _password_submit_code(driver, code: str) -> bool:
+    code = str(code or "").strip()
+    if not re.fullmatch(r"\d{6}", code):
+        return False
+    fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+    if not fields:
+        return False
+    initial_url = _password_page_url(driver)
+
+    def _submitted_or_advanced(clicked: bool) -> bool:
+        if clicked:
+            return True
+        time.sleep(0.35)
+        return bool(
+            _password_page_url(driver) != initial_url
+            or not _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+        )
+
+    try:
+        if _is_playwright_page(driver):
+            if len(fields) >= 6:
+                for field, char in zip(fields[-6:], code):
+                    field.fill(char, timeout=3000)
+                return _submitted_or_advanced(_password_click_playwright(driver, fields[-6], 'button[type="submit"], input[type="submit"], button[name="intent"]'))
+            fields[0].fill(code, timeout=5000)
+            return _submitted_or_advanced(_password_click_playwright(driver, fields[0], 'button[type="submit"], input[type="submit"], button[name="intent"]'))
+        if len(fields) >= 6:
+            for field, char in zip(fields[-6:], code):
+                field.clear(); field.send_keys(char)
+            return _submitted_or_advanced(_password_click_selenium(driver, fields[-6]))
+        fields[0].clear(); fields[0].send_keys(code)
+        return _submitted_or_advanced(_password_click_selenium(driver, fields[0]))
+    except Exception as exc:
+        logger.debug("[2FA][密码] 验证码输入异常：%s", type(exc).__name__)
+        return False
+
+
+def _password_submit_new_password(driver, fields: list, password: str) -> bool:
+    try:
+        if _is_playwright_page(driver):
+            for field in fields:
+                field.fill(password, timeout=5000)
+            return _password_click_playwright(
+                driver,
+                fields[0],
+                'button[type="submit"], input[type="submit"], button[name="intent"], '
+                'button:has-text("Save"), button:has-text("Continue"), button:has-text("Update"), '
+                'button:has-text("保存"), button:has-text("继续"), button:has-text("更新")',
+            )
+        for field in fields:
+            field.clear(); field.send_keys(password)
+        return _password_click_selenium(driver, fields[0])
+    except Exception as exc:
+        logger.debug("[2FA][密码] 密码提交异常：%s", type(exc).__name__)
+        return False
+
+
+def _password_click_resend(driver) -> bool:
+    try:
+        if _is_playwright_page(driver):
+            return bool(driver.evaluate(_PASSWORD_RESEND_JS))
+        return bool(driver.execute_script("return (" + _PASSWORD_RESEND_JS + ")();"))
+    except Exception:
+        return False
+
+
+def _password_screenshot(driver) -> None:
+    path = str(_PROJECT_ROOT / "run" / "password_setup_failed.png")
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        if _is_playwright_page(driver):
+            driver.screenshot(path=path)
+        else:
+            driver.save_screenshot(path)
+        logger.info("[2FA][密码] 失败截图已保存 %s", path)
+    except Exception:
+        pass
+
+
+def _setup_password_with_driver(
+    *,
+    driver,
+    session: BrowserSession,
+    email: str,
+    password: str,
+    totp_secret: str | None = None,
+    timeout_seconds: float = 120.0,
+) -> dict:
+    """在 Selenium/Cloak 或同步 Playwright 页面中完成注册后密码设置。
+
+    该流程对齐 maile456 项目的 ``add_password_in_settings``：先走
+    ``post_login_add_password`` 重认证，再按页面实际挑战选择邮箱 OTP 或 TOTP，
+    最后填写密码。Selenium 必须用 ``execute_async_script``，Cloak 适配器会把
+    最后一个参数映射到其异步完成回调；Playwright 则直接 ``evaluate`` 异步函数。
+    """
+    from core.registration_password import validate_registration_password
+    from core.email_provider import wait_for_otp
+
+    valid, reason = validate_registration_password(password)
+    if not valid:
+        return {
+            "ok": False, "status": "failed", "stage": "password_validation",
+            "code": "generated_password_invalid", "message": reason or "密码强度不符合要求",
+            "http_status": None,
+        }
+    prefix = _password_log_prefix(driver)
+    requested_at = time.time()
+    try:
+        otp_history = _snapshot_otp_history(email, timeout=2.0)
+    except Exception:
+        otp_history = set()
+    try:
+        if _is_playwright_page(driver):
+            reauth = driver.evaluate(_PASSWORD_REAUTH_JS)
+        else:
+            if not callable(getattr(driver, "execute_async_script", None)):
+                raise RuntimeError("driver_missing_execute_async_script")
+            reauth = driver.execute_async_script(_PASSWORD_REAUTH_SELENIUM_JS)
+    except Exception as exc:
+        logger.warning("%s[2FA][密码] 重认证请求失败：%s", prefix, type(exc).__name__)
+        return {
+            "ok": False, "status": "failed", "stage": "password_reauth",
+            "code": "password_reauth_request_failed", "message": f"{type(exc).__name__}: {str(exc)[:160]}",
+            "http_status": None,
+        }
+    if not isinstance(reauth, dict) or not reauth.get("ok"):
+        status = reauth.get("status") if isinstance(reauth, dict) else None
+        return {
+            "ok": False, "status": "failed", "stage": "password_reauth",
+            "code": "password_reauth_start_failed",
+            "message": f"重认证启动失败 stage={reauth.get('stage') if isinstance(reauth, dict) else '?'} status={status}",
+            "http_status": int(status) if status else None,
+        }
+    try:
+        auth_url = _validate_trusted_openai_url(
+            str(reauth.get("url") or ""), stage="password_setup",
+            code="password_reauth_url_untrusted", message="补设密码重认证返回了非可信地址",
+        )
+        if _is_playwright_page(driver):
+            driver.goto(auth_url, wait_until="domcontentloaded", timeout=30_000)
+        else:
+            driver.get(auth_url)
+    except TwoFASetupError:
+        raise
+    except Exception as exc:
+        return {
+            "ok": False, "status": "failed", "stage": "password_reauth",
+            "code": "password_reauth_navigation_failed", "message": f"{type(exc).__name__}: {str(exc)[:160]}",
+            "http_status": None,
+        }
+
+    deadline = time.monotonic() + max(30.0, float(timeout_seconds))
+    totp_used = False
+    email_used = False
+    totp_submitted_at = None
+    email_submitted_at = None
+    resend_attempted = False
+    password_submitted = False
+    last_url = ""
+    while time.monotonic() < deadline:
+        body = _password_body_text(driver)
+        last_url = _password_page_url(driver)
+        password_fields = _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR)
+        code_fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+        if code_fields and not password_fields:
+            path = last_url.lower()
+            is_email_challenge = "email-verification" in path or bool(_PASSWORD_EMAIL_RE.search(body))
+            is_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(body))
+            if is_authenticator and not is_email_challenge:
+                if totp_used:
+                    if _PASSWORD_REJECTION_RE.search(body):
+                        return {
+                            "ok": False, "status": "failed", "stage": "password_totp",
+                            "code": "password_totp_reauth_rejected", "message": "TOTP 重认证验证码被拒绝",
+                            "http_status": None,
+                        }
+                    if totp_submitted_at and time.monotonic() - totp_submitted_at >= 8:
+                        return {
+                            "ok": False, "status": "failed", "stage": "password_totp",
+                            "code": "password_totp_reauth_not_advanced",
+                            "message": "TOTP 重认证提交后页面未继续",
+                            "http_status": None,
+                        }
+                    time.sleep(0.5)
+                    continue
+                if not totp_secret:
+                    return {
+                        "ok": False, "status": "failed", "stage": "password_totp",
+                        "code": "password_totp_secret_missing",
+                        "message": "重认证要求认证器动态码，但没有可用 TOTP Secret",
+                        "http_status": None,
+                    }
+                if totp_secret:
+                    _wait_for_totp_window(min_remaining=5.0)
+                    code = pyotp.TOTP(normalize_totp_secret(totp_secret)).now()
+                    if not _password_submit_code(driver, code):
+                        return {
+                            "ok": False, "status": "failed", "stage": "password_totp",
+                            "code": "password_totp_reauth_submit_failed", "message": "TOTP 重认证验证码提交失败",
+                            "http_status": None,
+                        }
+                    totp_used = True
+                    totp_submitted_at = time.monotonic()
+                    time.sleep(1.5)
+                    continue
+            if is_email_challenge or not is_authenticator:
+                if email_used:
+                    if _PASSWORD_REJECTION_RE.search(body):
+                        return {
+                            "ok": False, "status": "failed", "stage": "password_email",
+                            "code": "password_email_reauth_rejected", "message": "邮箱重认证验证码被拒绝",
+                            "http_status": None,
+                        }
+                    if email_submitted_at and time.monotonic() - email_submitted_at >= 8:
+                        return {
+                            "ok": False, "status": "failed", "stage": "password_email",
+                            "code": "password_email_reauth_not_advanced",
+                            "message": "邮箱重认证验证码提交后页面未继续",
+                            "http_status": None,
+                        }
+                    time.sleep(0.5)
+                    continue
+                code_after = requested_at
+                if not resend_attempted:
+                    resend_attempted = True
+                    if _password_click_resend(driver):
+                        code_after = time.time()
+                try:
+                    from config import twofa as twofa_cfg
+                    code = wait_for_otp(
+                        email,
+                        after_ts=code_after,
+                        max_wait=max(10, int(getattr(twofa_cfg, "TWOFA_OTP_MAX_WAIT", 120) or 120)),
+                        poll_interval=max(1, int(getattr(twofa_cfg, "TWOFA_OTP_POLL_INTERVAL", 2) or 2)),
+                        settle_seconds=max(0, int(getattr(twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", 1) or 0)),
+                        exclude_codes=otp_history,
+                    )
+                except Exception as exc:
+                    return {
+                        "ok": False, "status": "failed", "stage": "password_email",
+                        "code": "password_email_code_wait_failed", "message": f"{type(exc).__name__}: {str(exc)[:160]}",
+                        "http_status": None,
+                    }
+                if not _password_submit_code(driver, code):
+                    return {
+                        "ok": False, "status": "failed", "stage": "password_email",
+                        "code": "password_email_reauth_submit_failed", "message": "邮箱重认证验证码提交失败",
+                        "http_status": None,
+                    }
+                email_used = True
+                email_submitted_at = time.monotonic()
+                time.sleep(1.5)
+                continue
+
+        if password_fields and not password_submitted:
+            if not _password_submit_new_password(driver, password_fields, password):
+                return {
+                    "ok": False, "status": "failed", "stage": "password_setup",
+                    "code": "password_settings_submit_failed", "message": "新密码填写或提交失败",
+                    "http_status": None,
+                }
+            password_submitted = True
+            time.sleep(1.5)
+            continue
+
+        if password_submitted:
+            if _PASSWORD_REJECTION_RE.search(body) and not _PASSWORD_SUCCESS_RE.search(body):
+                return {
+                    "ok": False, "status": "failed", "stage": "password_setup",
+                    "code": "password_settings_rejected", "message": "新密码被服务端拒绝",
+                    "http_status": None,
+                }
+            if _PASSWORD_SUCCESS_RE.search(body) or _password_done_callback(last_url):
+                return {
+                    "ok": True, "status": "success", "stage": "password_done",
+                    "code": "password_setup_success", "message": "密码已补设", "http_status": None,
+                    "password": password, "email_reauth_used": email_used,
+                    "totp_reauth_used": totp_used,
+                }
+        time.sleep(0.5)
+
+    _password_screenshot(driver)
+    return {
+        "ok": False, "status": "failed", "stage": "password_setup",
+        "code": "password_settings_timeout", "message": f"补设密码流程超时 url={last_url}",
+        "http_status": None,
+    }
+
+
 def _validate_2fa_token(session: BrowserSession, access_token: str) -> int:
     """激活后用一个只读 ChatGPT API 验证新 token 仍可用。"""
     headers = session.get_chatgpt_headers(referer="https://chatgpt.com/")
@@ -581,7 +1176,14 @@ def _snapshot_otp_history(email: str, *, timeout: float = 2.0) -> set[str]:
     return set()
 
 
-def _setup_2fa_result(session: BrowserSession, email: str, otp_code: str | None = None) -> TwoFASetupResult:
+def _setup_2fa_result(
+    session: BrowserSession,
+    email: str,
+    otp_code: str | None = None,
+    driver=None,
+    existing_password: str | None = None,
+    desired_password: str | None = None,
+) -> TwoFASetupResult:
     """
     完整的 2FA 设置流程。
     会触发再发一份邮箱验证码：
@@ -592,6 +1194,9 @@ def _setup_2fa_result(session: BrowserSession, email: str, otp_code: str | None 
         session: 已完成注册的会话
         email: 账号邮箱（用作 login_hint）
         otp_code: 邮箱验证码（None 则按上述策略获取）
+        driver: 可选的已登录浏览器页面/驱动。
+        existing_password: 注册初始密码；已有密码时不会重复调用补设接口。
+        desired_password: 本注册任务预先生成的目标密码；补设时复用，避免重试改成另一密码。
 
     Returns:
         TOTP secret（Base32 字符串），可直接用于 pyotp.TOTP() 生成 6 位动态码
@@ -678,6 +1283,90 @@ def _setup_2fa_result(session: BrowserSession, email: str, otp_code: str | None 
         validation_code = "totp_token_validation_failed"
         validation_message = redact_otp_text(str(exc)[:240])
         logger.warning("[2FA] TOTP 已激活，但 Token 校验异常；保留 Secret：%s", type(exc).__name__)
+
+    # 阶段三：要求密码时，只有注册初始阶段没有密码才调用
+    # post_login_add_password；这避免对已完成 create-account/password 的账号重复改密。
+    password_setup = None
+    configured_password = str(existing_password or "").strip() or None
+    try:
+        from core.registration_password import registration_password_required
+        require_password = registration_password_required()
+    except Exception:
+        require_password = True
+    if not require_password:
+        password_setup = {
+            "ok": True,
+            "status": "skipped",
+            "stage": "password_setup",
+            "code": "password_setup_disabled",
+            "message": "注册密码要求已关闭",
+            "http_status": None,
+        }
+    elif configured_password:
+        password_setup = {
+            "ok": True,
+            "status": "already_configured",
+            "stage": "password_setup",
+            "code": "password_already_configured",
+            "message": "注册密码页已完成，无需重复设置",
+            "http_status": None,
+        }
+    elif driver is None:
+        password_setup = {
+            "ok": False,
+            "status": "failed",
+            "stage": "password_setup",
+            "code": "password_driver_required",
+            "message": "当前注册驱动没有可用浏览器页面，无法补设密码",
+            "http_status": None,
+        }
+    else:
+        try:
+            # 保留 Roxy 旧调用点的可替换性；Roxy/Cloak/Playwright 的实现
+            # 最终都委托到 core.registration_password。
+            try:
+                from core.roxy_registration import _registration_password
+            except Exception:
+                from core.registration_password import registration_password as _registration_password
+            configured_password = str(desired_password or "").strip() or _registration_password()
+            logger.info("[2FA] TOTP 已激活，开始补设账号密码（post_login_add_password）...")
+            password_setup = _setup_password_with_driver(
+                driver=driver,
+                session=session,
+                email=email,
+                password=configured_password,
+                totp_secret=secret,
+            )
+            if bool(password_setup.get("ok")):
+                logger.info("[2FA] 账号密码已补设成功")
+        except TwoFASetupError as exc:
+            password_setup = {
+                "ok": False,
+                "status": "failed",
+                "stage": exc.stage,
+                "code": exc.code,
+                "message": str(exc)[:180],
+                "http_status": exc.http_status,
+            }
+            configured_password = None
+        except Exception as exc:
+            password_setup = {
+                "ok": False,
+                "status": "failed",
+                "stage": "password_setup",
+                "code": "password_setup_failed",
+                "message": f"{type(exc).__name__}: {str(exc)[:180]}",
+                "http_status": None,
+            }
+            configured_password = None
+            logger.warning("[2FA] 补设密码异常（保留账号）：%s", type(exc).__name__)
+    if password_setup and not bool(password_setup.get("ok")):
+        configured_password = None
+        logger.warning(
+            "[2FA] 补设密码未完成（保留账号与 TOTP Secret）：code=%s",
+            password_setup.get("code") or "password_setup_failed",
+        )
+
     return TwoFASetupResult(
         secret=secret,
         access_token=new_token,
@@ -687,15 +1376,47 @@ def _setup_2fa_result(session: BrowserSession, email: str, otp_code: str | None 
         validation_code=validation_code,
         validation_message=validation_message,
         expires=getattr(session, "_twofa_session_expires", None),
+        password=configured_password,
+        password_setup=password_setup,
     )
 
 
-def setup_2fa_result(session: BrowserSession, email: str, otp_code: str | None = None) -> TwoFASetupResult:
+def setup_2fa_result(
+    session: BrowserSession,
+    email: str,
+    otp_code: str | None = None,
+    driver=None,
+    existing_password: str | None = None,
+    desired_password: str | None = None,
+) -> TwoFASetupResult:
     """执行完整 2FA 流程并返回可落库的 Secret 与刷新后 Token。"""
     try:
-        result = _setup_2fa_result(session, email, otp_code=otp_code)
+        result = _setup_2fa_result(
+            session,
+            email,
+            otp_code=otp_code,
+            driver=driver,
+            existing_password=existing_password,
+            desired_password=desired_password,
+        )
         try:
-            setattr(session, "_twofa_last_error", None)
+            setup_status = result.password_setup or {}
+            if setup_status and not bool(setup_status.get("ok")):
+                setattr(session, "_twofa_last_error", {
+                    "stage": setup_status.get("stage") or "password_setup",
+                    "code": setup_status.get("code") or "password_setup_failed",
+                    "http_status": setup_status.get("http_status"),
+                    "message": str(setup_status.get("message") or "密码设置未完成")[:240],
+                })
+            elif not bool(result.validation_ok):
+                setattr(session, "_twofa_last_error", {
+                    "stage": "totp_validate",
+                    "code": result.validation_code or "totp_token_validation_failed",
+                    "http_status": result.validation_status,
+                    "message": str(result.validation_message or "TOTP Token 校验未通过")[:240],
+                })
+            else:
+                setattr(session, "_twofa_last_error", None)
         except Exception:
             pass
         return result
@@ -710,9 +1431,23 @@ def setup_2fa_result(session: BrowserSession, email: str, otp_code: str | None =
         raise wrapped from exc
 
 
-def setup_2fa(session: BrowserSession, email: str, otp_code: str | None = None) -> str:
+def setup_2fa(
+    session: BrowserSession,
+    email: str,
+    otp_code: str | None = None,
+    driver=None,
+    existing_password: str | None = None,
+    desired_password: str | None = None,
+) -> str:
     """兼容旧调用方：执行完整流程并只返回规范化 Secret。"""
-    return setup_2fa_result(session, email, otp_code=otp_code).secret
+    return setup_2fa_result(
+        session,
+        email,
+        otp_code=otp_code,
+        driver=driver,
+        existing_password=existing_password,
+        desired_password=desired_password,
+    ).secret
 
 
 _AUTH_COOKIE_NAME_MARKERS = (
@@ -820,7 +1555,13 @@ def import_browser_cookies(session: BrowserSession, driver, *, require_auth: boo
     return imported
 
 
-def maybe_setup_2fa_result(session: BrowserSession, email: str, driver=None) -> TwoFASetupResult | None:
+def maybe_setup_2fa_result(
+    session: BrowserSession,
+    email: str,
+    driver=None,
+    existing_password: str | None = None,
+    desired_password: str | None = None,
+) -> TwoFASetupResult | None:
     """按开关执行 2FA；失败只降级为 None，保留已注册账号。"""
     try:
         try:
@@ -836,7 +1577,13 @@ def maybe_setup_2fa_result(session: BrowserSession, email: str, driver=None) -> 
             logger.warning("[2FA] USE_EMAIL_SERVICE=False，无法自动收取重认证 OTP，跳过")
             return None
         import_browser_cookies(session, driver, require_auth=True)
-        return setup_2fa_result(session, email)
+        return setup_2fa_result(
+            session,
+            email,
+            driver=driver,
+            existing_password=existing_password,
+            desired_password=desired_password,
+        )
     except TwoFASetupError as exc:
         _set_twofa_error(session, exc)
         logger.warning("[2FA] 设置失败 stage=%s code=%s http=%s（账号保留）", exc.stage, exc.code, exc.http_status or "-")
@@ -847,9 +1594,21 @@ def maybe_setup_2fa_result(session: BrowserSession, email: str, driver=None) -> 
         return None
 
 
-def maybe_setup_2fa(session: BrowserSession, email: str, driver=None) -> str | None:
+def maybe_setup_2fa(
+    session: BrowserSession,
+    email: str,
+    driver=None,
+    existing_password: str | None = None,
+    desired_password: str | None = None,
+) -> str | None:
     """兼容旧调用方：返回 Secret 或 None。"""
-    result = maybe_setup_2fa_result(session, email, driver=driver)
+    result = maybe_setup_2fa_result(
+        session,
+        email,
+        driver=driver,
+        existing_password=existing_password,
+        desired_password=desired_password,
+    )
     return result.secret if result else None
 
 

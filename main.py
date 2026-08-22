@@ -166,7 +166,7 @@ def run_registration(
     proxy_mode: str | None = None,
 ):
     """
-    执行完整的 ChatGPT 注册流程（OTP-only，无密码）。
+    执行完整的 ChatGPT 注册流程。
 
     OpenAI 当前默认流程：signin 时携带 login_hint+screen_hint=login_or_signup
     → follow_authorize 重定向链自动落到 /email-verification 并触发 OTP 发送
@@ -180,12 +180,40 @@ def run_registration(
         otp_code: 邮箱验证码（如果为None，会等待手动输入）
     """
     # 可选注册驱动：
-    #   protocol     = 原有纯协议（curl_cffi）
+    #   protocol     = 原有纯协议（curl_cffi；密码 + 2FA 开启时不支持）
     #   roxy         = RoxyBrowser 指纹浏览器 + Selenium
     #   cloak        = CloakBrowser + Playwright/Selenium 适配层
     #   browser_use  = Browser Use Cloud stealth Chromium + Playwright
     #   skyvern      = Skyvern Browser Sessions + Playwright
     driver_mode = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
+    if bool(getattr(_twofa_cfg, "ENABLE_2FA", False)) and not bool(
+        getattr(_email_cfg, "USE_EMAIL_SERVICE", False)
+    ):
+        message = "密码 + 2FA 已开启，但手动邮箱模式无法自动收取第二次重认证验证码"
+        logger.error("[注册] %s", message)
+        return {
+            "success": False,
+            "email": email,
+            "account_id": None,
+            "access_token": None,
+            "totp_secret": None,
+            "security_ok": False,
+            "error": message,
+        }
+    if bool(getattr(_twofa_cfg, "ENABLE_2FA", False)) and driver_mode in (
+        "protocol", "api", "http"
+    ):
+        message = "密码 + 2FA 需要浏览器注册驱动；protocol 不会先激活 MFA 再留下无密码账号"
+        logger.error("[注册] %s", message)
+        return {
+            "success": False,
+            "email": email,
+            "account_id": None,
+            "access_token": None,
+            "totp_secret": None,
+            "security_ok": False,
+            "error": message,
+        }
     if driver_mode in ("roxy", "roxybrowser", "fingerprint", "browser"):
         from core.roxy_registration import run_roxy_registration
         return run_roxy_registration(
@@ -460,12 +488,14 @@ def run_registration(
         totp_secret = None
         twofa_result = None
         twofa_error = None
+        password_setup = None
         if _twofa_cfg.ENABLE_2FA:
             # 步骤14-20: 重认证（要再收一次邮箱 OTP）→ enroll TOTP → activate
             try:
                 from core.account_export import setup_2fa_result
                 twofa_result = setup_2fa_result(session, email)
                 totp_secret = twofa_result.secret
+                password_setup = getattr(twofa_result, "password_setup", None)
                 # 重认证会产生带新鲜 pwd_auth_time 的 Token；优先保存它。
                 access_token = twofa_result.access_token
                 logger.info(
@@ -488,6 +518,15 @@ def run_registration(
                     "http_status": getattr(exc, "http_status", None),
                     "message": redact_otp_text(str(exc)[:240]),
                 }
+                if _twofa_cfg.ENABLE_2FA:
+                    password_setup = {
+                        "ok": False,
+                        "status": "failed",
+                        "stage": "totp_setup",
+                        "code": twofa_error["code"],
+                        "http_status": twofa_error["http_status"],
+                        "message": twofa_error["message"],
+                    }
                 logger.warning("将继续保存账号信息（不含 TOTP secret），可后续手动设置")
         else:
             logger.debug("已跳过 2FA 设置 (config.ENABLE_2FA=False)")
@@ -545,8 +584,9 @@ def run_registration(
                 "twofa": {
                     "status": (
                         "success" if twofa_result and getattr(twofa_result, "validation_ok", True)
+                        and not (password_setup and not password_setup.get("ok"))
                         else "partial_success" if twofa_result
-                        else "failed" if _twofa_cfg.ENABLE_2FA else "skipped"
+                        else "failed" if (_twofa_cfg.ENABLE_2FA or password_setup) else "skipped"
                     ),
                     "activated": bool(twofa_result),
                     "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
@@ -554,7 +594,9 @@ def run_registration(
                     "activated_at": twofa_result.activated_at if twofa_result else None,
                     "validation": twofa_result.validation if twofa_result else None,
                     "error": twofa_error,
+                    "password_setup": password_setup,
                 },
+                "registration_password": (twofa_result.password if twofa_result else None),
                 "codex": codex_result,
             },
         )
@@ -593,10 +635,22 @@ def run_registration(
         # Codex 失败时账号仍保存（token 拿到了、有补跑机会），但任务状态标失败，
         # 让 WebUI 任务表能清楚区分"完整成功"和"差 Codex"两种结果。
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
-        task_success = codex_ok
+        security_ok = (
+            not bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
+            or bool(twofa_result and getattr(twofa_result, "security_ok", False))
+        )
+        task_success = codex_ok and security_ok
         task_error = None
         if not task_success:
-            task_error = f"Codex 未完成: {codex_result.get('message', '未知')}"
+            if not security_ok:
+                detail = (
+                    (twofa_error or {}).get("message")
+                    if isinstance(twofa_error, dict)
+                    else None
+                ) or (password_setup or {}).get("message") or "密码或 MFA 未完成"
+                task_error = f"账号安全设置未完成: {detail}"
+            else:
+                task_error = f"Codex 未完成: {codex_result.get('message', '未知')}"
             logger.warning(f"[任务结果] {email} 账号已保存但任务标失败，原因: {task_error}")
 
         return {"success": task_success, "email": email, "account_id": account_id,

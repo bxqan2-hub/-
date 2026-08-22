@@ -7,7 +7,6 @@ import logging
 import os
 import random
 import re
-import string
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +22,11 @@ from core.humanize import delay as human_delay
 from core.otp_utils import mask_otp, redact_otp_text
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
+from core.registration_password import (
+    generate_registration_password,
+    registration_password as _shared_registration_password,
+    registration_password_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1321,7 +1325,12 @@ def _is_browser_navigation_error(driver) -> bool:
         return False
 
 
-def _restart_email_otp_from_login(driver, email: str) -> str:
+def _restart_email_otp_from_login(
+    driver,
+    email: str,
+    *,
+    password_state: dict | None = None,
+) -> str:
     """Recover an OTP retry after Chromium replaces the page with an error URL."""
     logger.warning("%s[OTP] 浏览器进入导航错误页，重新打开登录入口并申请新验证码", _log_prefix(driver))
     _safe_get(
@@ -1344,7 +1353,15 @@ def _restart_email_otp_from_login(driver, email: str) -> str:
 
     if _is_signup_password_page(driver):
         logger.warning("%s[OTP] 页面退回创建密码步骤，重新提交密码后恢复验证码页", _log_prefix(driver))
-        _fill_password_page_if_present(driver, email, timeout=25)
+        confirmed_password = _fill_password_page_if_present(
+            driver,
+            email,
+            timeout=25,
+            allow_passwordless=(not registration_password_required()),
+            password=(password_state or {}).get("desired"),
+        )
+        if confirmed_password and password_state is not None:
+            password_state["configured"] = confirmed_password
         wait_state = _wait_for_otp_input(driver, timeout=30)
         return wait_state if wait_state in {"email_verified", "profile", "logged_in"} else "otp"
     raise RuntimeError(
@@ -1785,14 +1802,19 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
     raise RuntimeError(f"找不到可点击的重新发送验证码按钮: last={last}, state={_email_otp_page_state(driver)}")
 
 
-def _prepare_next_email_otp_attempt(driver, email: str) -> str:
+def _prepare_next_email_otp_attempt(
+    driver,
+    email: str,
+    *,
+    password_state: dict | None = None,
+) -> str:
     """为下一轮 OTP 恢复正确页面，返回 otp/profile/logged_in。
 
     OpenAI 拒绝验证码后可能直接把页面送回 ``/log-in`` 的空邮箱表单。
     这种情况下不能继续寻找 OTP 页的“重新发送”按钮，必须重新提交邮箱。
     """
     if _is_browser_navigation_error(driver):
-        return _restart_email_otp_from_login(driver, email)
+        return _restart_email_otp_from_login(driver, email, password_state=password_state)
 
     terminal_error = _email_otp_terminal_error(_email_otp_page_state(driver))
     if terminal_error:
@@ -1806,7 +1828,15 @@ def _prepare_next_email_otp_attempt(driver, email: str) -> str:
 
     if _is_signup_password_page(driver):
         logger.warning("%s[OTP] 页面退回创建密码步骤，重新提交密码后恢复验证码页", _log_prefix(driver))
-        _fill_password_page_if_present(driver, email, timeout=25)
+        confirmed_password = _fill_password_page_if_present(
+            driver,
+            email,
+            timeout=25,
+            allow_passwordless=(not registration_password_required()),
+            password=(password_state or {}).get("desired"),
+        )
+        if confirmed_password and password_state is not None:
+            password_state["configured"] = confirmed_password
         wait_state = _wait_for_otp_input(driver, timeout=30)
         return wait_state if wait_state in {"email_verified", "profile", "logged_in"} else "otp"
 
@@ -1882,7 +1912,7 @@ def _prepare_next_email_otp_attempt(driver, email: str) -> str:
                 or "chrome-error://" in str(exc).lower()
                 or "等待 otp 输入框超时" in str(exc).lower()
             ):
-                return _restart_email_otp_from_login(driver, email)
+                return _restart_email_otp_from_login(driver, email, password_state=password_state)
             raise
         return "otp"
 
@@ -2303,29 +2333,12 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
 
 
 def _generate_roxy_password() -> str:
-    """参考 FlowPilot 密码策略：8~64 位，含大小写、数字、符号。"""
-    upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
-    lower = 'abcdefghjkmnpqrstuvwxyz'
-    digits = '23456789'
-    symbols = '!@#$%^&*?_-+=' 
-    groups = [upper, lower, digits, symbols]
-    all_chars = ''.join(groups)
-    chars = [random.choice(g) for g in groups]
-    while len(chars) < 14:
-        chars.append(random.choice(all_chars))
-    random.shuffle(chars)
-    return ''.join(chars)
+    """兼容旧调用方的密码生成别名。"""
+    return generate_registration_password()
 
 
 def _registration_password() -> str:
-    try:
-        from config import register as _register_cfg
-        configured = str(getattr(_register_cfg, 'REGISTER_PASSWORD', '') or '').strip()
-        if configured:
-            return configured
-    except Exception:
-        pass
-    return _generate_roxy_password()
+    return _shared_registration_password()
 
 
 def _password_page_state(driver) -> dict:
@@ -2485,8 +2498,20 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str | None:
-    """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。"""
+def _fill_password_page_if_present(
+    driver,
+    email: str,
+    timeout: int = 25,
+    *,
+    allow_passwordless: bool = True,
+    password: str | None = None,
+) -> str | None:
+    """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。
+
+    allow_passwordless=True（默认）时，若页面提供“使用一次性验证码”入口可跳过设密码
+    （适用于默认 OTP-only 注册和忘密码的既有账号登录）。开启 ENABLE_2FA 后调用方传
+    allow_passwordless=False，强制在密码页填写并提交密码。
+    """
     end = time.time() + timeout
     last = {}
     while time.time() < end:
@@ -2500,27 +2525,37 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         if not (is_signup_password or is_login_password):
             time.sleep(0.5)
             continue
-        passwordless = _click_passwordless_signup_if_present(driver)
-        if passwordless.get('ok'):
-            logger.info("%s 检测到 password 页，已点击一次性验证码入口：email=%s detail=%s", _log_prefix(driver), email, passwordless)
-            wait_end = time.time() + 20
-            while time.time() < wait_end:
-                if _is_email_verification_page(driver):
-                    logger.info("%s 一次性验证码入口已进入邮箱验证码页", _log_prefix(driver))
-                    return None
-                if _has_access_token(driver):
-                    logger.info("%s 一次性验证码入口后已检测到登录态", _log_prefix(driver))
-                    return None
-                last = _password_page_state(driver)
-                errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
-                if errors:
-                    raise RuntimeError(f"一次性验证码入口提交被拒绝: errors={errors} state={last}")
-                time.sleep(0.5)
-            raise RuntimeError(f"一次性验证码入口提交后仍停留在密码页: state={last}")
-        if is_login_password:
-            raise RuntimeError(f"当前是登录密码页且无一次性验证码入口，邮箱按已注册/不可用处理: state={last}")
-        password = _registration_password()
-        logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
+        if is_login_password and not allow_passwordless:
+            raise RuntimeError(
+                f"registration_password_not_offered: 当前邮箱进入登录密码页，按已注册/不可用邮箱处理: state={last}"
+            )
+        if allow_passwordless:
+            passwordless = _click_passwordless_signup_if_present(driver)
+            if passwordless.get('ok'):
+                logger.info("%s 检测到 password 页，已点击一次性验证码入口：email=%s detail=%s", _log_prefix(driver), email, passwordless)
+                wait_end = time.time() + 20
+                while time.time() < wait_end:
+                    if _is_email_verification_page(driver):
+                        logger.info("%s 一次性验证码入口已进入邮箱验证码页", _log_prefix(driver))
+                        return None
+                    if _has_access_token(driver):
+                        logger.info("%s 一次性验证码入口后已检测到登录态", _log_prefix(driver))
+                        return None
+                    last = _password_page_state(driver)
+                    errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
+                    if errors:
+                        raise RuntimeError(f"一次性验证码入口提交被拒绝: errors={errors} state={last}")
+                    time.sleep(0.5)
+                raise RuntimeError(f"一次性验证码入口提交后仍停留在密码页: state={last}")
+            if is_login_password:
+                raise RuntimeError(
+                    f"passwordless_login_not_available: 登录密码页未提供一次性验证码入口: state={last}"
+                )
+            raise RuntimeError(
+                "password_setup_disabled: 当前未开启密码 + 2FA，且注册页未提供一次性验证码入口"
+            )
+        selected_password = str(password or "").strip() or _registration_password()
+        logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(selected_password), email)
         result = _password_page_targets(driver)
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
@@ -2533,7 +2568,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                 if not result.get('ok'):
                     raise RuntimeError(f"密码页重试处理失败：{result} state={last}")
                 logger.warning("%s 密码提交无响应，重新定位同一表单并进行第 %s/%s 次提交", _log_prefix(driver), submit_attempt, submit_attempts)
-            _human_type_text(driver, result.get("input"), password, clear=True)
+            _human_type_text(driver, result.get("input"), selected_password, clear=True)
             human_delay("form", minimum=0.2, maximum=0.8)
             _human_click(driver, result.get("button"), label=f"password_submit_{submit_attempt}")
             logger.info("%s 已填写并提交密码页（%s/%s）", _log_prefix(driver), submit_attempt, submit_attempts)
@@ -2541,12 +2576,22 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             while time.time() < wait_end:
                 if _is_email_verification_page(driver):
                     logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
-                    return password
+                    return selected_password
                 if _has_access_token(driver):
                     logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
-                    return password
+                    return selected_password
                 if not _is_signup_password_page(driver):
-                    return password
+                    if _is_login_password_page(driver):
+                        raise RuntimeError("创建账号密码提交后跳转到登录密码页，未确认密码设置成功")
+                    advanced = _otp_flow_advanced_state(driver)
+                    if advanced in ("profile", "logged_in", "email_verified"):
+                        return selected_password
+                    last = _password_page_state(driver)
+                    errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
+                    if errors:
+                        raise RuntimeError(f"创建账号密码提交被拒绝: errors={errors} state={last}")
+                    time.sleep(0.35)
+                    continue
                 last = _password_page_state(driver)
                 errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
                 if errors:
@@ -3162,6 +3207,7 @@ def run_roxy_registration(
     traffic_summary: dict | None = None
     create_acknowledged = False
     openai_password: str | None = None
+    password_state: dict[str, str | None] = {"desired": None, "configured": None}
     registration_exit_geo: dict = {}
     try:
         driver = _build_driver(opened)
@@ -3240,7 +3286,19 @@ def run_roxy_registration(
 
         # 新版注册流可能先进入 /create-account/password；参考 FlowPilot 的 fill-password 步骤，
         # 先设置密码并提交，然后再等待邮箱验证码页。
-        openai_password = None if next_state == "otp" else _fill_password_page_if_present(driver, email, timeout=25)
+        # ENABLE_2FA=False 时保留 OTP-only；开启后禁止跳过密码页。若服务端直接
+        # 把注册流送到 OTP，2FA 阶段会用同一浏览器走 post_login_add_password 补设。
+        if registration_password_required():
+            password_state["desired"] = _registration_password()
+        openai_password = _fill_password_page_if_present(
+            driver,
+            email,
+            timeout=25,
+            allow_passwordless=(not registration_password_required()),
+            password=password_state["desired"],
+        )
+        if openai_password:
+            password_state["configured"] = openai_password
         _check_manual_stop()
 
         current_otp = otp_code
@@ -3305,7 +3363,11 @@ def run_roxy_registration(
                     otp_after_ts = time.time()
                     if current_otp:
                         rejected_otps.add(str(current_otp))
-                    retry_state = _prepare_next_email_otp_attempt(driver, email)
+                    retry_state = _prepare_next_email_otp_attempt(
+                        driver,
+                        email,
+                        password_state=password_state,
+                    )
                     if retry_state in ("profile", "logged_in", "email_verified"):
                         if retry_state == "email_verified":
                             callback_state = _resume_chatgpt_login_callback(driver, email=email)
@@ -3423,7 +3485,11 @@ def run_roxy_registration(
             otp_after_ts = time.time()
             if current_otp:
                 rejected_otps.add(str(current_otp))
-            retry_state = _prepare_next_email_otp_attempt(driver, email)
+            retry_state = _prepare_next_email_otp_attempt(
+                driver,
+                email,
+                password_state=password_state,
+            )
             if retry_state in ("profile", "logged_in", "email_verified"):
                 if retry_state == "email_verified":
                     callback_state = _resume_chatgpt_login_callback(driver, email=email)
@@ -3477,6 +3543,7 @@ def run_roxy_registration(
         twofa_validation = None
         twofa_proxy_continuity = False
         twofa_proxy_source = None
+        openai_password = str(password_state.get("configured") or openai_password or "").strip() or None
         if _twofa_cfg.ENABLE_2FA:
             twofa_status = "failed"
             logger.info("[Roxy注册][2FA] ENABLE_2FA=True，复用当前浏览器会话设置 2FA")
@@ -3490,13 +3557,31 @@ def run_roxy_registration(
                 twofa_session = build_twofa_session(twofa_proxy, source="RoxyBrowser")
                 twofa_proxy_continuity = True
                 twofa_proxy_source = "registration_profile"
-                twofa_result = maybe_setup_2fa_result(twofa_session, email, driver=driver)
+                twofa_result = maybe_setup_2fa_result(
+                    twofa_session,
+                    email,
+                    driver=driver,
+                    existing_password=openai_password,
+                    desired_password=password_state.get("desired"),
+                )
                 twofa_error = getattr(twofa_session, "_twofa_last_error", None)
                 if twofa_result:
                     totp_secret = twofa_result.secret
                     access_token = twofa_result.access_token
                     twofa_validation = getattr(twofa_result, "validation", None)
-                    twofa_status = "success" if bool(getattr(twofa_result, "validation_ok", True)) else "partial_success"
+                    password_ready = bool(getattr(twofa_result, "password_configured", False))
+                    twofa_status = (
+                        "success"
+                        if bool(getattr(twofa_result, "security_ok", False))
+                        else "partial_success"
+                    )
+                    if not password_ready and not twofa_error:
+                        twofa_error = {
+                            "stage": "password_setup",
+                            "code": "password_setup_required",
+                            "http_status": None,
+                            "message": "TOTP 已设置，但 OpenAI 密码未完成",
+                        }
                     logger.info("[Roxy注册][2FA] 已完成，Token 校验=%s", twofa_status == "success")
                 else:
                     if not twofa_error:
@@ -3559,7 +3644,7 @@ def run_roxy_registration(
                 "account": session_info.get("account"),
                 "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
                 "roxybrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
-                "registration_password": openai_password,
+                "registration_password": (twofa_result.password if twofa_result and twofa_result.password else openai_password),
                 "codex": codex_result,
                 "registration_traffic": traffic_summary,
                 "twofa": {
@@ -3571,19 +3656,34 @@ def run_roxy_registration(
                     "proxy_continuity": twofa_proxy_continuity,
                     "proxy_source": twofa_proxy_source,
                     "error": twofa_error,
+                    "password_setup": (getattr(twofa_result, "password_setup", None) if twofa_result else None),
                 },
             },
         )
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
+        security_ok = (
+            (not bool(getattr(_twofa_cfg, "ENABLE_2FA", False)))
+            or bool(twofa_result and getattr(twofa_result, "security_ok", False))
+        )
+        result_error = None
+        if not security_ok:
+            result_error = (
+                (twofa_error or {}).get("message")
+                if isinstance(twofa_error, dict)
+                else "账号密码或 2FA 未完成"
+            ) or "账号密码或 2FA 未完成"
+        elif not codex_ok:
+            result_error = f"Codex 未完成: {codex_result.get('message')}"
         return {
-            "success": bool(codex_ok),
+            "success": bool(codex_ok and security_ok),
             "email": email,
             "account_id": account_id,
             "access_token": access_token,
             "totp_secret": totp_secret,
             "codex": codex_result,
             "traffic": traffic_summary,
-            "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
+            "security_ok": bool(security_ok),
+            "error": result_error,
         }
     except Exception as exc:
         logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)

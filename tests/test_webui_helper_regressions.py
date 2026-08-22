@@ -44,6 +44,15 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(current["registration_traffic"]["network_bytes"], 500)
         self.assertEqual(current["registration_traffic"]["cache_saved_bytes"], 1_000)
         self.assertNotIn("extra_json", current)
+        self.assertFalse(current["password_configured"])
+
+        secured = _compact_account_for_list({
+            "id": 3,
+            "email": "secured@test.com",
+            "extra_json": json.dumps({"registration_password": "secret"}),
+        })
+        self.assertTrue(secured["password_configured"])
+        self.assertNotIn("registration_password", secured)
 
     @patch("webui.app.db.get_account")
     def test_account_secret_single_and_bulk_routes_return_allowlisted_values(self, get_account):
@@ -54,6 +63,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
             "copy_line": f"line-{account_id}",
             "codex_agent_token": f"agent-{account_id}",
             "totp_secret": f"totp-{account_id}",
+            "extra_json": json.dumps({"registration_password": f"OpenAI-pass-{account_id}!"}),
         }
 
         single = self.client.get("/api/accounts/7/secret?field=access_token")
@@ -80,6 +90,17 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         )
         self.assertEqual(totp_bulk.status_code, 200)
         self.assertEqual(totp_bulk.get_json()["values"][0]["value"], "totp-7")
+
+        password = self.client.get("/api/accounts/7/secret?field=registration_password")
+        self.assertEqual(password.status_code, 200)
+        self.assertEqual(password.get_json()["value"], "OpenAI-pass-7!")
+
+        password_bulk = self.client.post(
+            "/api/accounts/secret-bulk",
+            json={"account_ids": [7], "field": "registration_password"},
+        )
+        self.assertEqual(password_bulk.status_code, 200)
+        self.assertEqual(password_bulk.get_json()["values"][0]["value"], "OpenAI-pass-7!")
 
         rejected = self.client.get("/api/accounts/7/secret?field=password")
         self.assertEqual(rejected.status_code, 400)
@@ -134,6 +155,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("/api/accounts/extract-oaics-bulk", html)
         self.assertIn('data-account-copy-secret="totp_secret"', html)
         self.assertIn('data-account-reveal-secret="totp_secret"', html)
+        self.assertIn('data-account-copy-secret="registration_password"', html)
         self.assertIn('id="btnRenameAccountGroupV2"', html)
         self.assertIn("const PAGER_DRAFT_SIZES = Object.create(null)", html)
         self.assertIn("oninput=\"pagerDraftSize('${id}',this.value)\"", html)

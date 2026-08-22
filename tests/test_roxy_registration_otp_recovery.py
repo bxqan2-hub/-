@@ -390,7 +390,12 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
              patch("core.roxy_registration._human_click"), \
              patch("core.roxy_registration.human_delay"):
             with self.assertRaisesRegex(RuntimeError, "Failed to create account"):
-                roxy_registration._fill_password_page_if_present(driver, "mail@example.test", timeout=1)
+                roxy_registration._fill_password_page_if_present(
+                    driver,
+                    "mail@example.test",
+                    timeout=1,
+                    allow_passwordless=False,
+                )
         password_target_script = driver.execute_script.call_args.args[0]
         self.assertIn("isSubmit ? 1000", password_target_script)
         self.assertIn("b.score - a.score", password_target_script)
@@ -421,6 +426,7 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
                 driver,
                 "mail@example.test",
                 timeout=10,
+                allow_passwordless=False,
             )
 
         self.assertEqual(password, "Password1!")
@@ -605,7 +611,7 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
              patch("core.roxy_registration._restart_email_otp_from_login", return_value="otp") as restart:
             state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
         self.assertEqual(state, "otp")
-        restart.assert_called_once_with(driver, "mail@example.test")
+        restart.assert_called_once_with(driver, "mail@example.test", password_state=None)
 
     def test_next_otp_attempt_recovers_empty_otp_shell_after_resend(self):
         driver = MagicMock()
@@ -625,21 +631,69 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
              patch("core.roxy_registration._restart_email_otp_from_login", return_value="otp") as restart:
             state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
         self.assertEqual(state, "otp")
-        restart.assert_called_once_with(driver, "mail@example.test")
+        restart.assert_called_once_with(driver, "mail@example.test", password_state=None)
 
     def test_next_otp_attempt_resubmits_signup_password_page(self):
         driver = MagicMock()
         with patch("core.roxy_registration._is_browser_navigation_error", return_value=False), \
              patch("core.roxy_registration._otp_flow_advanced_state", return_value=None), \
              patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration.registration_password_required", return_value=False), \
              patch("core.roxy_registration._fill_password_page_if_present") as fill_password, \
              patch("core.roxy_registration._wait_for_otp_input") as wait_input, \
              patch("core.roxy_registration._click_resend_email_otp") as resend:
             state = roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
         self.assertEqual(state, "otp")
-        fill_password.assert_called_once_with(driver, "mail@example.test", timeout=25)
+        fill_password.assert_called_once_with(
+            driver,
+            "mail@example.test",
+            timeout=25,
+            allow_passwordless=True,
+            password=None,
+        )
         wait_input.assert_called_once_with(driver, timeout=30)
         resend.assert_not_called()
+
+    def test_disabled_twofa_never_falls_through_to_password_generation(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_email_verification_page", return_value=False), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._password_page_state", return_value={"errors": []}), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration._is_login_password_page", return_value=False), \
+             patch("core.roxy_registration._click_passwordless_signup_if_present", return_value={"ok": False}), \
+             patch("core.roxy_registration._registration_password", side_effect=AssertionError("must not generate")):
+            with self.assertRaisesRegex(RuntimeError, "password_setup_disabled"):
+                roxy_registration._fill_password_page_if_present(
+                    driver,
+                    "mail@example.test",
+                    timeout=1,
+                    allow_passwordless=True,
+                )
+
+    def test_otp_recovery_reuses_and_records_task_password(self):
+        driver = MagicMock()
+        state = {"desired": "Stable-pass-1!", "configured": None}
+        with patch("core.roxy_registration._is_browser_navigation_error", return_value=False), \
+             patch("core.roxy_registration._otp_flow_advanced_state", return_value=None), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration.registration_password_required", return_value=True), \
+             patch("core.roxy_registration._fill_password_page_if_present", return_value="Stable-pass-1!") as fill_password, \
+             patch("core.roxy_registration._wait_for_otp_input", return_value="otp"):
+            result = roxy_registration._prepare_next_email_otp_attempt(
+                driver,
+                "mail@example.test",
+                password_state=state,
+            )
+        self.assertEqual(result, "otp")
+        self.assertEqual(state["configured"], "Stable-pass-1!")
+        fill_password.assert_called_once_with(
+            driver,
+            "mail@example.test",
+            timeout=25,
+            allow_passwordless=False,
+            password="Stable-pass-1!",
+        )
 
     def test_try_again_redirect_resubmits_email_instead_of_waiting_on_login_page(self):
         driver = MagicMock()

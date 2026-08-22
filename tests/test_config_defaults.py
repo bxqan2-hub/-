@@ -30,7 +30,23 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
             "GENERIC_API_REQUEST_TIMEOUT",
             "GENERIC_API_MAX_CONSECUTIVE_ERRORS",
             "GENERIC_API_REGISTRATION_FAILURE_LIMIT",
+            "REGISTER_PASSWORD",
         }.issubset(keys))
+
+    def test_password_and_mfa_share_one_disabled_by_default_switch(self):
+        from config import twofa
+        from core.registration_password import registration_password_required
+
+        source = Path(twofa.__file__).read_text(encoding="utf-8")
+        self.assertFalse(config_editor._parse_value_from_source(source, "ENABLE_2FA", "bool"))
+        with patch.object(twofa, "ENABLE_2FA", False):
+            self.assertFalse(registration_password_required())
+        keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
+        self.assertNotIn("REQUIRE_REGISTRATION_PASSWORD", keys)
+        self.assertIn("REGISTER_PASSWORD", keys)
+        enable_2fa = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ENABLE_2FA")
+        self.assertIn("密码", enable_2fa["help"])
+        self.assertIn("MFA", enable_2fa["help"])
 
     def test_roxy_fixed_os_is_exposed_as_windows_macos_choice(self):
         field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ROXY_DEFAULT_OS")

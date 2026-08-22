@@ -11,9 +11,8 @@ Browser Use Cloud + Playwright 注册驱动。
 from __future__ import annotations
 
 import logging
-import random
+import re
 import threading
-import string
 import time
 from datetime import date
 from pathlib import Path
@@ -28,6 +27,11 @@ from core.email_provider import resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
 from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
 from core.otp_utils import mask_otp, redact_otp_text
+from core.registration_password import (
+    generate_registration_password,
+    registration_password as _shared_registration_password,
+    registration_password_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,31 +124,11 @@ def _is_manual_stop_exception(exc: Exception) -> bool:
 
 
 def _generate_password(length: int = 14) -> str:
-    upper = string.ascii_uppercase
-    lower = string.ascii_lowercase
-    digits = string.digits
-    symbols = "!@#$%^&*"
-    chars = [
-        random.choice(upper),
-        random.choice(lower),
-        random.choice(digits),
-        random.choice(symbols),
-    ]
-    pool = upper + lower + digits + symbols
-    chars.extend(random.choice(pool) for _ in range(max(0, length - len(chars))))
-    random.shuffle(chars)
-    return "".join(chars)
+    return generate_registration_password(length)
 
 
 def _registration_password() -> str:
-    try:
-        from config import register as _register_cfg
-        configured = str(getattr(_register_cfg, "REGISTER_PASSWORD", "") or "").strip()
-        if configured:
-            return configured
-    except Exception:
-        pass
-    return _generate_password()
+    return _shared_registration_password()
 
 
 def _timeout_ms(seconds: int | None = None) -> int:
@@ -581,7 +565,18 @@ def _click_passwordless_signup_if_present(page) -> bool:
         return False
 
 
-def _fill_password_if_present(page, email: str, timeout: int = 25, context=None) -> str | None:
+def _fill_password_if_present(
+    page,
+    email: str,
+    timeout: int = 25,
+    context=None,
+    *,
+    allow_passwordless: bool | None = None,
+    password: str | None = None,
+) -> str | None:
+    """处理注册密码页；是否允许 passwordless 由 ENABLE_2FA 联动决定。"""
+    if allow_passwordless is None:
+        allow_passwordless = not registration_password_required()
     started = time.time()
     end = time.time() + timeout
     last_heartbeat = 0.0
@@ -617,7 +612,7 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
                 return None
             time.sleep(0.15 if _fast_mode() else 0.4)
             continue
-        if _click_passwordless_signup_if_present(page):
+        if allow_passwordless and _click_passwordless_signup_if_present(page):
             logger.info("[BrowserUse] 检测到密码页，已点击一次性验证码入口：state=%s email=%s", state, email)
             wait_end = time.time() + 20
             while time.time() < wait_end:
@@ -634,10 +629,13 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             logger.info("[BrowserUse] 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
             return None
         if state == "login_password":
-            logger.info("[BrowserUse] 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：url=%s", state_info.get("url") or "-")
-            return None
-        password = _registration_password()
-        logger.info("[BrowserUse] 检测到密码页，设置密码（%s 位）：%s", len(password), email)
+            if not allow_passwordless:
+                raise RuntimeError("registration_password_not_offered: 邮箱进入登录密码页，疑似已注册账号")
+            raise RuntimeError("passwordless_login_not_available: 登录密码页未提供一次性验证码入口")
+        if allow_passwordless:
+            raise RuntimeError("password_setup_disabled: 当前未开启密码 + 2FA，且注册页未提供一次性验证码入口")
+        selected_password = str(password or "").strip() or _registration_password()
+        logger.info("[BrowserUse] 检测到密码页，设置密码（%s 位）：%s", len(selected_password), email)
         ok = _fill_first(
             page,
             [
@@ -646,7 +644,7 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
                 "input[autocomplete='new-password']",
                 "input[autocomplete='current-password']",
             ],
-            password,
+            selected_password,
             timeout_ms=8000,
         )
         if not ok:
@@ -665,8 +663,38 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
         ):
             page.keyboard.press("Enter")
         _bu_delay("form")
-        return password
+        _wait_after_password_submit(page, context=context, timeout=20)
+        return selected_password
     return None
+
+
+_PASSWORD_SUBMIT_ERROR_RE = re.compile(
+    r"incorrect|invalid|rejected|failed|error|too short|weak|try again|"
+    r"错误|无效|失败|太短|不符合|重试|エラー|無効|失敗|오류|유효하지",
+    re.IGNORECASE,
+)
+
+
+def _wait_after_password_submit(page, *, context=None, timeout: int = 20) -> str:
+    """确认注册密码被接受后才把它作为已配置密码返回。"""
+    end = time.time() + max(3, int(timeout or 20))
+    last = {"state": "other", "url": _page_url(page)}
+    while time.time() < end:
+        _check_manual_stop()
+        page = _browser_use_heartbeat(page, context=context, label="password-submit")
+        last = _quick_auth_state(page)
+        state = str(last.get("state") or "other")
+        if state in ("email_verification", "profile", "chatgpt"):
+            return state
+        if state == "login_password":
+            raise RuntimeError("registration_password_submit_redirected_to_login: 密码提交后进入登录密码页")
+        preview = str(last.get("textPreview") or "")
+        if state == "password" and _PASSWORD_SUBMIT_ERROR_RE.search(preview):
+            raise RuntimeError(f"registration_password_rejected: {preview[:160]}")
+        time.sleep(0.2 if _fast_mode() else 0.5)
+    raise RuntimeError(
+        f"registration_password_submit_timeout: 密码提交后未进入验证码/资料页，state={last.get('state')} url={last.get('url')}"
+    )
 
 
 def _type_otp(page, code: str) -> None:
@@ -1673,6 +1701,7 @@ def run_browser_use_registration(
     session_info_open = client.open_session()
     create_acknowledged = False
     openai_password: str | None = None
+    desired_password: str | None = None
     browser = None
     context = None
     page = None
@@ -1737,7 +1766,16 @@ def run_browser_use_registration(
 
             _t_pwd = _StepTimer("检测/处理密码页")
             try:
-                openai_password = _fill_password_if_present(page, email, timeout=8 if _fast_mode() else 15, context=context)
+                if registration_password_required():
+                    desired_password = _registration_password()
+                openai_password = _fill_password_if_present(
+                    page,
+                    email,
+                    timeout=8 if _fast_mode() else 15,
+                    context=context,
+                    allow_passwordless=(not registration_password_required()),
+                    password=desired_password,
+                )
                 _t_pwd.done("password_set=yes" if openai_password else "password_set=no")
             except Exception as exc:
                 _t_pwd.done(f"failed={type(exc).__name__}: {str(exc)[:160]}")
@@ -1771,7 +1809,14 @@ def run_browser_use_registration(
                     logger.info("[BrowserUse][OTP] 已重新提交邮箱：%s", email)
                     _assert_not_external_idp(page, "重新提交邮箱后")
                     try:
-                        pwd = _fill_password_if_present(page, email, timeout=6 if _fast_mode() else 10, context=context)
+                        pwd = _fill_password_if_present(
+                            page,
+                            email,
+                            timeout=6 if _fast_mode() else 10,
+                            context=context,
+                            allow_passwordless=(not registration_password_required()),
+                            password=desired_password,
+                        )
                         _check_manual_stop()
                         if pwd:
                             openai_password = pwd
@@ -1904,13 +1949,31 @@ def run_browser_use_registration(
                     twofa_session = build_twofa_session(twofa_proxy, source=provider_prefix)
                     twofa_proxy_continuity = True
                     twofa_proxy_source = "registration_argument" if proxy else "provider_session"
-                    twofa_result = maybe_setup_2fa_result(twofa_session, email, driver=page)
+                    twofa_result = maybe_setup_2fa_result(
+                        twofa_session,
+                        email,
+                        driver=page,
+                        existing_password=openai_password,
+                        desired_password=desired_password,
+                    )
                     twofa_error = getattr(twofa_session, "_twofa_last_error", None)
                     if twofa_result:
                         totp_secret = twofa_result.secret
                         access_token = twofa_result.access_token
                         twofa_validation = getattr(twofa_result, "validation", None)
-                        twofa_status = "success" if bool(getattr(twofa_result, "validation_ok", True)) else "partial_success"
+                        password_ready = bool(getattr(twofa_result, "password_configured", False))
+                        twofa_status = (
+                            "success"
+                            if bool(getattr(twofa_result, "security_ok", False))
+                            else "partial_success"
+                        )
+                        if not password_ready and not twofa_error:
+                            twofa_error = {
+                                "stage": "password_setup",
+                                "code": "password_setup_required",
+                                "http_status": None,
+                                "message": "TOTP 已设置，但 OpenAI 密码未完成",
+                            }
                         logger.info("[BrowserUse][2FA] 已完成，Token 校验=%s", twofa_status == "success")
                     else:
                         if not twofa_error:
@@ -1987,7 +2050,9 @@ def run_browser_use_registration(
                         "session_id": getattr(session_info_open, "session_id", ""),
                         "connect": session_info_open.raw,
                     },
-                    "registration_password": openai_password,
+                    "registration_password": (
+                        twofa_result.password if twofa_result and twofa_result.password else openai_password
+                    ),
                     "twofa": {
                         "status": twofa_status,
                         "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
@@ -1997,19 +2062,34 @@ def run_browser_use_registration(
                         "proxy_continuity": twofa_proxy_continuity,
                         "proxy_source": twofa_proxy_source,
                         "error": twofa_error,
+                        "password_setup": (getattr(twofa_result, "password_setup", None) if twofa_result else None),
                     },
                     "codex": codex_result,
                 },
             )
             _t_all.done("success")
+            security_ok = (
+                (not bool(getattr(_twofa_cfg, "ENABLE_2FA", False)))
+                or bool(twofa_result and getattr(twofa_result, "security_ok", False))
+            )
+            result_error = None
+            if not security_ok:
+                result_error = (
+                    (twofa_error or {}).get("message")
+                    if isinstance(twofa_error, dict)
+                    else "账号密码或 2FA 未完成"
+                ) or "账号密码或 2FA 未完成"
+            elif not (codex_result.get("ok") or codex_result.get("status") == "skipped"):
+                result_error = f"Codex 未完成: {codex_result.get('message')}"
             return {
-                "success": True,
+                "success": bool(security_ok and (codex_result.get("ok") or codex_result.get("status") == "skipped")),
                 "email": email,
                 "account_id": account_id,
                 "access_token": access_token,
                 "totp_secret": totp_secret,
                 "codex": codex_result,
-                "error": None,
+                "security_ok": bool(security_ok),
+                "error": result_error,
             }
     except Exception as exc:
         logger.error("[BrowserUse] 注册失败：%s: %s", type(exc).__name__, exc)

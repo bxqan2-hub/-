@@ -660,6 +660,14 @@ def _extract_inline_messages_html_otp(
     if not cards:
         cards = re.findall(r"<details\b[^>]*>(.*?)</details>", html, flags=re.DOTALL | re.IGNORECASE)
     if not cards:
+        # wordck.top 等取码页把「<a class=\"mail\" href>/m/...」邮件卡片的
+        # 时间、主题、验证码一起渲染在链接里，开合结构是 <a ...></a>。
+        cards = re.findall(
+            r"<a\b[^>]*class=[\"'][^\"']*\bmail\b[^\"']*[\"'][^>]*>(.*?)</a>",
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+    if not cards:
         card_starts = list(re.finditer(
             r"<div\b[^>]*class=[\"'][^\"']*\bcard\b[^\"']*[\"'][^>]*>",
             html,
@@ -677,10 +685,24 @@ def _extract_inline_messages_html_otp(
             flags=re.DOTALL | re.IGNORECASE,
         )
         date_m = re.search(
-            r"<(?:span|div)\b[^>]*class=[\"'][^\"']*(?:date|\bdt\b)[^\"']*[\"'][^>]*>(.*?)</(?:span|div)>",
+            r"<(?:span|div)\b[^>]*class=[\"'][^\"']*(?:date|\bdt\b|mailtop)[^\"']*[\"'][^>]*>(.*?)</(?:span|div)>",
             card,
             flags=re.DOTALL | re.IGNORECASE,
         )
+        if not date_m:
+            # wordck.top 的 <div class="mailtop"><strong>ChatGPT</strong><span>DATE</span></div>
+            # 日期在 mailtop 里的 <span>，不在带 class 的 div 上。
+            date_tail_m = re.search(
+                r"<div\b[^>]*class=[\"'][^\"']*mailtop[^\"']*[\"'][^>]*>(.*?)</div>",
+                card,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if date_tail_m:
+                date_m = re.search(
+                    r"<span\b[^>]*>(\d{4}/\d{1,2}/\d{1,2}[^<]*)</span>",
+                    date_tail_m.group(1),
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
         from_m = re.search(
             r"<div\b[^>]*class=[\"'][^\"']*(?:meta|\bfr\b)[^\"']*[\"'][^>]*>(.*?)</div>",
             card,
@@ -1113,7 +1135,7 @@ def fetch_latest_otp(
                 no_code_reason = ""
                 structured = _extract_structured_api_code(text, after_ts=after_ts)
                 inline_html = bool(re.search(
-                    r"<(?:article|div)\b[^>]*class=[\"'][^\"']*\b(?:mail-card|card)\b",
+                    r"<(?:article|div|a)\b[^>]*class=[\"'][^\"']*\b(?:mail-card|card|mail)\b",
                     text,
                     flags=re.IGNORECASE,
                 ))

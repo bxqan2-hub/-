@@ -429,7 +429,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ENABLE_2FA", "file": "twofa.py", "type": "bool", "group": "功能开关",
-        "label": "启用 2FA(TOTP)", "help": "注册完成后自动设置动态口令（会多收一封 OTP 邮件）",
+        "label": "启用密码 + 2FA(TOTP)", "help": "默认关闭；开启后新账号才设置 OpenAI 密码并启用 MFA，需浏览器驱动和自动邮箱（会多收一封 OTP 邮件）",
     },
     {
         "key": "TWOFA_OTP_MAX_WAIT", "file": "twofa.py", "type": "int", "group": "邮箱 / OTP",
@@ -479,6 +479,11 @@ EDITABLE_FIELDS = [
     {
         "key": "REGISTER_EMAIL", "file": "register.py", "type": "str", "group": "邮箱 / OTP",
         "label": "手动注册邮箱", "help": "USE_EMAIL_SERVICE=False 时必填。例如你的 outlook.com 地址；OTP 去网页邮箱看，再回任务页提交",
+    },
+    {
+        "key": "REGISTER_PASSWORD", "file": "register.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "OpenAI 注册密码", "help": "仅在开启密码 + 2FA 时使用；留空则每号随机生成并保存到账号凭据",
+        "secret": True,
     },
     {
         "key": "REGISTER_NAME", "file": "register.py", "type": "str", "group": "邮箱 / OTP",

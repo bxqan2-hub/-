@@ -329,12 +329,184 @@ def test_maybe_setup_2fa_keeps_failures_non_fatal(monkeypatch) -> None:
     assert result is None
 
 
-def test_twofa_defaults_are_enabled_and_isolated_from_registration_timeout() -> None:
+def test_maybe_setup_2fa_disabled_skips_mfa_and_password(monkeypatch) -> None:
     from config import twofa
 
-    assert twofa.ENABLE_2FA is True
+    monkeypatch.setattr(twofa, "ENABLE_2FA", False)
+    monkeypatch.setattr(
+        account_export,
+        "import_browser_cookies",
+        lambda *args, **kwargs: pytest.fail("disabled switch must not import cookies"),
+    )
+    monkeypatch.setattr(
+        account_export,
+        "setup_2fa_result",
+        lambda *args, **kwargs: pytest.fail("disabled switch must not enroll MFA or set password"),
+    )
+
+    session = SimpleNamespace()
+    assert account_export.maybe_setup_2fa_result(session, "user@example.com", driver=object()) is None
+    assert session._twofa_last_error is None
+
+
+def test_twofa_defaults_are_disabled_and_isolated_from_registration_timeout() -> None:
+    from config import twofa
+    from pathlib import Path
+    from webui import config_editor
+
+    source = Path(twofa.__file__).read_text(encoding="utf-8")
+    assert config_editor._parse_value_from_source(source, "ENABLE_2FA", "bool") is False
     assert twofa.TWOFA_GENERIC_API_REQUEST_TIMEOUT >= 10
     assert twofa.TWOFA_GENERIC_API_RETRY_TIMEOUT >= 5
+
+
+def test_password_requirement_follows_enable_2fa_only(monkeypatch) -> None:
+    from config import twofa
+    from core.registration_password import registration_password_required
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", False)
+    assert registration_password_required() is False
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    assert registration_password_required() is True
+
+
+def test_twofa_security_requires_a_confirmed_nonempty_password() -> None:
+    skipped = account_export.TwoFASetupResult(
+        secret="JBSWY3DPEHPK3PXP",
+        access_token="token",
+        activated_at="2026-08-22T00:00:00+00:00",
+        validation_status=200,
+        password=None,
+        password_setup={"ok": True, "status": "skipped"},
+    )
+    assert skipped.password_configured is False
+    assert skipped.security_ok is False
+
+    confirmed = account_export.TwoFASetupResult(
+        secret="JBSWY3DPEHPK3PXP",
+        access_token="token",
+        activated_at="2026-08-22T00:00:00+00:00",
+        validation_status=200,
+        password="Strong-pass-1!",
+        password_setup={"ok": True, "status": "already_configured"},
+    )
+    assert confirmed.password_configured is True
+    assert confirmed.security_ok is True
+
+
+def test_setup_wrapper_preserves_totp_validation_failure(monkeypatch) -> None:
+    result = account_export.TwoFASetupResult(
+        secret="JBSWY3DPEHPK3PXP",
+        access_token="token",
+        activated_at="2026-08-22T00:00:00+00:00",
+        validation_status=429,
+        validation_ok=False,
+        validation_code="totp_token_validation_failed",
+        validation_message="models HTTP 429",
+        password="Strong-pass-1!",
+        password_setup={"ok": True, "status": "success"},
+    )
+    monkeypatch.setattr(account_export, "_setup_2fa_result", lambda *args, **kwargs: result)
+    session = SimpleNamespace()
+
+    assert account_export.setup_2fa_result(session, "user@example.com") is result
+    assert session._twofa_last_error == {
+        "stage": "totp_validate",
+        "code": "totp_token_validation_failed",
+        "http_status": 429,
+        "message": "models HTTP 429",
+    }
+
+
+def test_password_done_callback_requires_trusted_explicit_stage() -> None:
+    assert account_export._password_done_callback(
+        "https://chatgpt.com/?tm_action=password&tm_stage=password_done"
+    ) is True
+    assert account_export._password_done_callback("https://chatgpt.com/") is False
+    assert account_export._password_done_callback(
+        "https://example.invalid/?tm_action=password&tm_stage=password_done"
+    ) is False
+
+
+def test_browser_use_password_is_returned_only_after_confirmed_transition(monkeypatch) -> None:
+    from core import browser_use_registration as browser_use
+
+    class Keyboard:
+        def press(self, _key):
+            return None
+
+    page = SimpleNamespace(keyboard=Keyboard())
+    states = iter([
+        {"state": "password", "url": "https://auth.openai.com/create-account/password"},
+        {"state": "email_verification", "url": "https://auth.openai.com/email-verification"},
+    ])
+    monkeypatch.setattr(browser_use, "_browser_use_heartbeat", lambda page, **kwargs: page)
+    monkeypatch.setattr(browser_use, "_quick_auth_state", lambda page: next(states))
+    monkeypatch.setattr(browser_use, "_fill_first", lambda *args, **kwargs: True)
+    monkeypatch.setattr(browser_use, "_click_first", lambda *args, **kwargs: True)
+    monkeypatch.setattr(browser_use, "_bu_delay", lambda *args, **kwargs: None)
+
+    assert browser_use._fill_password_if_present(
+        page,
+        "user@example.com",
+        timeout=5,
+        allow_passwordless=False,
+        password="Stable-pass-1!",
+    ) == "Stable-pass-1!"
+
+
+def test_browser_use_password_rejection_is_not_persisted(monkeypatch) -> None:
+    from core import browser_use_registration as browser_use
+
+    page = SimpleNamespace(keyboard=SimpleNamespace(press=lambda _key: None))
+    states = iter([
+        {"state": "password", "url": "https://auth.openai.com/create-account/password"},
+        {
+            "state": "password",
+            "url": "https://auth.openai.com/create-account/password",
+            "textPreview": "password is invalid, try again",
+        },
+    ])
+    monkeypatch.setattr(browser_use, "_browser_use_heartbeat", lambda page, **kwargs: page)
+    monkeypatch.setattr(browser_use, "_quick_auth_state", lambda page: next(states))
+    monkeypatch.setattr(browser_use, "_fill_first", lambda *args, **kwargs: True)
+    monkeypatch.setattr(browser_use, "_click_first", lambda *args, **kwargs: True)
+    monkeypatch.setattr(browser_use, "_bu_delay", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="registration_password_rejected"):
+        browser_use._fill_password_if_present(
+            page,
+            "user@example.com",
+            timeout=5,
+            allow_passwordless=False,
+            password="Stable-pass-1!",
+        )
+
+
+def test_browser_use_disabled_twofa_does_not_generate_password(monkeypatch) -> None:
+    from core import browser_use_registration as browser_use
+
+    page = SimpleNamespace()
+    monkeypatch.setattr(browser_use, "_browser_use_heartbeat", lambda page, **kwargs: page)
+    monkeypatch.setattr(
+        browser_use,
+        "_quick_auth_state",
+        lambda page: {"state": "password", "url": "https://auth.openai.com/create-account/password"},
+    )
+    monkeypatch.setattr(browser_use, "_click_passwordless_signup_if_present", lambda page: False)
+    monkeypatch.setattr(
+        browser_use,
+        "_registration_password",
+        lambda: pytest.fail("disabled switch must not generate a password"),
+    )
+
+    with pytest.raises(RuntimeError, match="password_setup_disabled"):
+        browser_use._fill_password_if_present(
+            page,
+            "user@example.com",
+            timeout=5,
+            allow_passwordless=True,
+        )
 
 
 def test_twofa_transport_overrides_stay_on_generic_api_provider(monkeypatch) -> None:
@@ -425,3 +597,396 @@ def test_twofa_failure_payload_does_not_copy_arbitrary_exception_text() -> None:
         "http_status": None,
         "message": "RuntimeError",
     }
+
+
+def test_setup_2fa_result_adds_password_when_enable_2fa_with_driver(monkeypatch) -> None:
+    """ENABLE_2FA=True + driver 时，TOTP 激活后会补设账号密码并透传结果。"""
+    from config import email as email_cfg
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
+    monkeypatch.setattr(account_export, "human_delay", lambda *args, **kwargs: None)
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: "https://auth.openai.com/authorize/x")
+    monkeypatch.setattr(account_export, "_follow_reauth", lambda *args: "https://auth.openai.com/email-verification")
+    monkeypatch.setattr(account_export, "_validate_reauth_otp", lambda *args: "https://auth.openai.com/continue/x")
+    monkeypatch.setattr(account_export, "_exchange_new_token", lambda *args: "fresh-token")
+    monkeypatch.setattr(account_export, "_enroll_totp", lambda *args: ("JBSWY3DPEHPK3PXP", "sid"))
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
+    monkeypatch.setattr(account_export, "_activate_totp", lambda *args: True)
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: 200)
+    import core.email_provider
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
+
+    password_setup_calls: list[dict] = []
+
+    def fake_setup_password(*, driver, session, email, password, totp_secret, timeout_seconds=120.0):
+        password_setup_calls.append({"driver": driver, "password": password, "totp_secret": totp_secret})
+        return {"ok": True, "status": "success", "stage": "password_done", "code": "password_setup_success", "message": "密码已补设", "password": password}
+
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", fake_setup_password)
+
+    from core import roxy_registration
+    monkeypatch.setattr(
+        roxy_registration,
+        "_registration_password",
+        lambda: pytest.fail("task desired_password must be reused"),
+    )
+
+    fake_driver = object()
+    result = account_export.setup_2fa_result(
+        object(),
+        "user@example.com",
+        driver=fake_driver,
+        desired_password="Ab3!cdefgh123",
+    )
+
+    assert result.secret == "JBSWY3DPEHPK3PXP"
+    assert result.password == "Ab3!cdefgh123"
+    assert result.password_setup is not None
+    assert result.password_setup["ok"] is True
+    assert len(password_setup_calls) == 1
+    assert password_setup_calls[0]["driver"] is fake_driver
+    assert password_setup_calls[0]["password"] == "Ab3!cdefgh123"
+    assert password_setup_calls[0]["totp_secret"] == "JBSWY3DPEHPK3PXP"
+
+
+def test_setup_2fa_result_keeps_secret_when_password_setup_fails(monkeypatch) -> None:
+    """补设密码失败不能影响账号保存与 TOTP Secret 返回。"""
+    from config import email as email_cfg
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
+    monkeypatch.setattr(account_export, "human_delay", lambda *args, **kwargs: None)
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: "https://auth.openai.com/authorize/x")
+    monkeypatch.setattr(account_export, "_follow_reauth", lambda *args: "https://auth.openai.com/email-verification")
+    monkeypatch.setattr(account_export, "_validate_reauth_otp", lambda *args: "https://auth.openai.com/continue/x")
+    monkeypatch.setattr(account_export, "_exchange_new_token", lambda *args: "fresh-token")
+    monkeypatch.setattr(account_export, "_enroll_totp", lambda *args: ("JBSWY3DPEHPK3PXP", "sid"))
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
+    monkeypatch.setattr(account_export, "_activate_totp", lambda *args: True)
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: 200)
+    import core.email_provider
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
+
+    def fake_setup_password_fail(**kwargs):
+        raise account_export.TwoFASetupError("password_setup", "password_setup_failed", "补设失败")
+
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", fake_setup_password_fail)
+
+    from core import roxy_registration
+    monkeypatch.setattr(roxy_registration, "_registration_password", lambda: "Ab3!cdefgh123")
+
+    result = account_export.setup_2fa_result(object(), "user@example.com", driver=object())
+
+    assert result.secret == "JBSWY3DPEHPK3PXP"
+    assert result.access_token == "fresh-token"
+    assert result.password is None  # 失败则不带密码
+    assert result.password_setup is not None
+    assert result.password_setup["ok"] is False
+    assert result.password_setup["code"] == "password_setup_failed"
+
+
+def test_password_setup_uses_selenium_async_callback_and_skips_totp_when_password_page_is_ready(monkeypatch) -> None:
+    """Selenium/Cloak 分支必须等待异步重认证结果，且可直接提交密码页。"""
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+
+    class Field:
+        def __init__(self, owner):
+            self.owner = owner
+            self.values = []
+
+        def is_displayed(self):
+            return not self.owner.submitted
+
+        def is_enabled(self):
+            return True
+
+        def clear(self):
+            self.values.clear()
+
+        def send_keys(self, value):
+            self.values.append(str(value))
+
+        def find_element(self, *_args):
+            return self.owner.form
+
+    class Form:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def find_element(self, *_args):
+            return self.owner.submit
+
+    class Submit:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def is_displayed(self):
+            return True
+
+        def is_enabled(self):
+            return True
+
+        def click(self):
+            self.owner.submitted = True
+
+    class Driver:
+        def __init__(self):
+            self.submitted = False
+            self.current_url = "https://auth.openai.com/create-account/password"
+            self.async_scripts = []
+            self.password = Field(self)
+            self.form = Form(self)
+            self.submit = Submit(self)
+
+        def execute_async_script(self, script, *args):
+            self.async_scripts.append(script)
+            return {"ok": True, "stage": "signin", "status": 200, "url": "https://auth.openai.com/reauth"}
+
+        def execute_script(self, script, *args):
+            if "document.body" in script:
+                return "Password updated" if self.submitted else "Set a password"
+            return False
+
+        def get(self, url):
+            self.current_url = url
+
+        def find_elements(self, *_args):
+            selector = str(_args[-1])
+            if "password" in selector and not self.submitted:
+                return [self.password]
+            return []
+
+        def save_screenshot(self, _path):
+            return True
+
+    driver = Driver()
+    result = account_export._setup_password_with_driver(
+        driver=driver,
+        session=object(),
+        email="user@example.com",
+        password="Ab3!cdefgh123",
+        totp_secret="JBSWY3DPEHPK3PXP",
+        timeout_seconds=30,
+    )
+
+    assert result["ok"] is True, result
+    assert result["code"] == "password_setup_success"
+    assert result["password"] == "Ab3!cdefgh123"
+    assert driver.async_scripts
+    assert "execute_async" not in driver.async_scripts[0]
+    assert "const done = arguments[arguments.length - 1]" in driver.async_scripts[0]
+    assert "post_login_add_password" in driver.async_scripts[0]
+
+
+def test_password_resend_invokes_arrow_function_for_selenium() -> None:
+    class Driver:
+        def __init__(self):
+            self.scripts = []
+
+        def execute_script(self, script):
+            self.scripts.append(script)
+            return True
+
+    driver = Driver()
+    assert account_export._password_click_resend(driver) is True
+    assert driver.scripts
+    assert driver.scripts[0].startswith("return (")
+    assert driver.scripts[0].rstrip().endswith(")();")
+
+
+def test_password_setup_uses_playwright_evaluate_for_async_reauth(monkeypatch) -> None:
+    """Browser Use/Skyvern Playwright 页面走 evaluate，而不是 Selenium API。"""
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        def count(self):
+            if "password" in self.selector:
+                return 0 if self.page.submitted else 1
+            if "one-time-code" in self.selector or "name=\'code\'" in self.selector or "inputmode" in self.selector:
+                return 0
+            if "button" in self.selector or "input[type='submit']" in self.selector:
+                return 1
+            return 1
+
+        def nth(self, _index):
+            return self
+
+        def is_visible(self, timeout=0):
+            if "password" in self.selector:
+                return not self.page.submitted
+            return True
+
+        def inner_text(self, timeout=0):
+            return "Password updated" if self.page.submitted else "Set a password"
+
+        def locator(self, selector):
+            return Locator(self.page, selector)
+
+        def fill(self, value, timeout=0):
+            self.page.filled = str(value)
+
+        def click(self, timeout=0):
+            self.page.submitted = True
+
+    class Page:
+        def __init__(self):
+            self.url = "https://chatgpt.com/"
+            self.submitted = False
+            self.filled = ""
+            self.evaluate_calls = []
+
+        def evaluate(self, script, *args):
+            self.evaluate_calls.append(script)
+            if "api/auth/session" in script:
+                return {"ok": True, "stage": "signin", "status": 200, "url": "https://auth.openai.com/reauth"}
+            return False
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        def goto(self, url, **_kwargs):
+            self.url = url
+
+        def screenshot(self, **_kwargs):
+            return None
+
+    page = Page()
+    result = account_export._setup_password_with_driver(
+        driver=page,
+        session=object(),
+        email="user@example.com",
+        password="Ab3!cdefgh123",
+        totp_secret=None,
+        timeout_seconds=30,
+    )
+
+    assert result["ok"] is True
+    assert result["password"] == "Ab3!cdefgh123"
+    assert any("api/auth/session" in call for call in page.evaluate_calls)
+
+
+def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -> None:
+    """密码补设重认证落到邮箱验证码页时，先取新码再提交密码。"""
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    import core.email_provider
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "654321")
+
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        def count(self):
+            if "password" in self.selector:
+                return 1 if self.page.stage == "password" else 0
+            if "one-time-code" in self.selector or "name=\'code\'" in self.selector or "inputmode" in self.selector:
+                return 1 if self.page.stage == "email" else 0
+            if "button" in self.selector or "input[type='submit']" in self.selector:
+                return 1
+            return 1
+
+        def nth(self, _index):
+            return self
+
+        def is_visible(self, timeout=0):
+            return self.count() > 0
+
+        def inner_text(self, timeout=0):
+            if self.page.stage == "email":
+                return "Enter the verification code sent to your email"
+            if self.page.stage == "password":
+                return "Set a password"
+            return "Password updated"
+
+        def locator(self, selector):
+            return Locator(self.page, selector)
+
+        def fill(self, value, timeout=0):
+            self.page.last_fill = str(value)
+
+        def click(self, timeout=0):
+            if self.page.stage == "email":
+                self.page.stage = "password"
+            elif self.page.stage == "password":
+                self.page.stage = "done"
+
+    class Page:
+        def __init__(self):
+            self.url = "https://chatgpt.com/"
+            self.stage = "email"
+            self.last_fill = ""
+            self.evaluate_calls = []
+
+        def evaluate(self, script, *args):
+            self.evaluate_calls.append(script)
+            if "api/auth/session" in script:
+                return {"ok": True, "stage": "signin", "status": 200, "url": "https://auth.openai.com/reauth"}
+            return False
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        def goto(self, url, **_kwargs):
+            self.url = "https://auth.openai.com/email-verification"
+
+        def screenshot(self, **_kwargs):
+            return None
+
+    page = Page()
+    result = account_export._setup_password_with_driver(
+        driver=page,
+        session=object(),
+        email="user@example.com",
+        password="Ab3!cdefgh123",
+        totp_secret=None,
+        timeout_seconds=30,
+    )
+
+    assert result["ok"] is True, result
+    assert result["email_reauth_used"] is True
+    assert result["totp_reauth_used"] is False
+
+
+def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypatch) -> None:
+    """初始 create-account/password 成功后，TOTP 阶段不能再次改密。"""
+    from config import email as email_cfg
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
+    monkeypatch.setattr(account_export, "human_delay", lambda *args, **kwargs: None)
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: "https://auth.openai.com/authorize/x")
+    monkeypatch.setattr(account_export, "_follow_reauth", lambda *args: "https://auth.openai.com/email-verification")
+    monkeypatch.setattr(account_export, "_validate_reauth_otp", lambda *args: "https://auth.openai.com/continue/x")
+    monkeypatch.setattr(account_export, "_exchange_new_token", lambda *args: "fresh-token")
+    monkeypatch.setattr(account_export, "_enroll_totp", lambda *args: ("JBSWY3DPEHPK3PXP", "sid"))
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
+    monkeypatch.setattr(account_export, "_activate_totp", lambda *args: True)
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: 200)
+    import core.email_provider
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
+    called = []
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", lambda **kwargs: called.append(kwargs) or {"ok": True})
+
+    result = account_export.setup_2fa_result(
+        object(),
+        "user@example.com",
+        driver=object(),
+        existing_password="Existing-pass-1!",
+    )
+
+    assert result.password == "Existing-pass-1!"
+    assert result.password_setup["code"] == "password_already_configured"
+    assert called == []

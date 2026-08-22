@@ -31,6 +31,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "BROWSER_USE_API_KEY": "Browser Use Cloud API Key",
     "SKYVERN_API_KEY": "Skyvern API Key",
     "ROXY_API_TOKEN": "RoxyBrowser 本地 API Token",
+    "REGISTER_PASSWORD": "OpenAI 注册密码",
     "PLAN_CHECK_PROXY": "套餐查询专用代理（可能包含认证信息）",
     "PLAN_CHECK_PROXY_PROFILES": "套餐检测代理/代理API列表",
     "CHECKOUT_CHECK_PROXY_PROFILES": "Checkout检测代理/代理API列表",

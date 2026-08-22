@@ -266,6 +266,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "email": row.get("email"),
         "has_access_token": bool(str(row.get("access_token") or "").strip()),
         "totp_enabled": bool(row.get("totp_secret")),
+        "password_configured": bool(_account_registration_password(row)),
         "codex_agent_has_token": bool(str(row.get("codex_agent_token") or "").strip()),
     }
 
@@ -363,6 +364,21 @@ def _compact_accounts_for_list(rows: list[dict]) -> list[dict]:
     return [_compact_account_for_list(row, jobs_by_account.get(int(row.get("id") or 0))) for row in rows]
 
 
+def _account_registration_password(row: dict) -> str:
+    """从 extra_json 读取 OpenAI 注册密码；列表只返回存在性，不返回明文。"""
+    raw = row.get("extra_json")
+    if isinstance(raw, dict):
+        extra = raw
+    else:
+        try:
+            extra = json.loads(str(raw or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+    if not isinstance(extra, dict):
+        return ""
+    return str(extra.get("registration_password") or extra.get("chatgpt_password") or "").strip()
+
+
 def _account_secret_value(row: dict, field: str) -> str:
     """Return only the explicitly allow-listed account secret requested by the UI."""
     field = str(field or "").strip()
@@ -374,9 +390,11 @@ def _account_secret_value(row: dict, field: str) -> str:
         return str(row.get("codex_agent_token") or "")
     if field == "totp_secret":
         return str(row.get("totp_secret") or "")
+    if field in {"registration_password", "chatgpt_password"}:
+        return _account_registration_password(row)
     if field == "oaics_link":
         return str(row.get("oaics_link") or "")
-    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/oaics_link")
+    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/registration_password/oaics_link")
 
 
 def _compact_job_for_list(row: dict) -> dict:

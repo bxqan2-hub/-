@@ -281,7 +281,8 @@ class ProtocolFingerprintAlignmentTests(TestCase):
         }
         session_cls.return_value = fake
 
-        with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "protocol"):
+        with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "protocol"), \
+             patch.object(main._twofa_cfg, "ENABLE_2FA", False):
             result = main.run_registration(
                 email="strict@example.com",
                 name="Strict Example",

@@ -34,7 +34,9 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 - 支持 CloakBrowser：免费 binary、无头模式、humanize、固定 fingerprint seed、按出口 IP 自动匹配语言/时区/WebRTC。
 - Roxy / Cloak 浏览器注册已兼容：
   - 填邮箱后直接进入邮箱验证码页；
-  - 填邮箱后先进入 `create-account/password`，自动设置密码再继续；
+  - 开启“密码 + 2FA”后，若先进入 `create-account/password`，自动设置密码再继续；
+  - 开启“密码 + 2FA”后，若服务端直接进入 OTP，完成 TOTP 后通过 `post_login_add_password` 补设密码；
+  - Browser Use / Skyvern 使用同一套密码页、邮箱 OTP/TOTP 重认证逻辑；
   - `about-you/profile` 页面直接输入年龄数字；
   - `about-you/profile` 页面输入年月日生日；
   - React Aria birthday select / spinbutton 年月日控件；
@@ -581,15 +583,11 @@ python tools/test_codex_oauth.py --email <已注册邮箱> --verbose
 
 ## 注册密码说明
 
-Roxy 注册如果遇到新版流程：
+默认 `ENABLE_2FA=false`，保持原来的 OTP-only 注册：不主动生成 OpenAI 密码，
+也不启用 MFA。只有在 WebUI 设置中开启“密码 + 2FA(TOTP)”后，下面的联动流程才生效。
 
-```text
-/create-account/password
-```
-
-会自动设置密码。
-
-密码来源：
+开启后，密码和 MFA 共用 `ENABLE_2FA` 这一个开关；遇到
+`/create-account/password` 时，流程会先提交密码再继续注册。
 
 1. 优先使用 `config/register.py`：
 
@@ -599,10 +597,24 @@ REGISTER_PASSWORD = "你的固定密码"
 
 2. 如果为空，自动生成 14 位强密码，包含大写、小写、数字、符号。
 
+如果注册页面没有密码步骤，Roxy/Cloak/Browser Use/Skyvern 会在 TOTP 激活后触发
+`post_login_add_password`，根据重认证页面选择邮箱验证码或认证器动态码，再提交同一个密码。
+初始密码已成功提交时不会重复改密。`protocol` 纯协议驱动没有可用浏览器页面，无法执行补密码；
+开启 2FA 时会在远端注册前直接停止，需改用 Roxy/Cloak/Browser Use/Skyvern。
+该联动还要求 `USE_EMAIL_SERVICE=true`，用于自动收取注册后重认证的第二封 OTP。
+
+配置项：
+
+- `ENABLE_2FA`：唯一联动开关，默认 `false`；开启后才设置密码并 enroll/activate TOTP。
+- `REGISTER_PASSWORD`：仅在 `ENABLE_2FA=true` 时使用；留空则每号随机生成。
+
 保存位置：
 
 - 账号 `extra_json.registration_password`
 - 批次归档 `accounts/YYYYMMDD-.../注册成功账号.json` 的 `extra.registration_password`
+
+账号页只返回“密码已设置”状态；点击“复制密码”才通过按需 Secret 接口读取明文，
+与 TOTP Secret 的显示/复制策略一致。
 
 注意：账号表里的 `password` 字段仍用于 Outlook 邮箱素材密码，不会被 OpenAI 注册密码覆盖。
 
@@ -667,7 +679,7 @@ accounts/20260709-10个-3线程/
   ↓
 提交邮箱表单
   ↓
-如进入 create-account/password：设置密码并提交
+如进入 create-account/password：开启 2FA 时设置密码；默认优先走一次性验证码
   ↓
 等待邮箱验证码页
   ↓
@@ -677,7 +689,7 @@ accounts/20260709-10个-3线程/
   ↓
 进入 ChatGPT，读取 /api/auth/session accessToken
   ↓
-可选 2FA
+可选（ENABLE_2FA=true）：enroll/activate TOTP → 若注册页未设密码则补设
   ↓
 可选 Codex OAuth
   ↓
