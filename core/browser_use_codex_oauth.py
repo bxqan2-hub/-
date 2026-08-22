@@ -1171,6 +1171,25 @@ def _ensure_add_phone_form(page, *, reason: str = "") -> bool:
     logger.warning("[Codex][BrowserUse] 无法回到手机号输入页：%s", _current_state_for_log(page))
     return False
 
+
+def _request_fresh_phone_code(page, activation_id: str, http) -> None:
+    """保留当前号码，并让 HeroSMS 等待页面重发的下一条短信。"""
+    sms_provider.request_another_code(activation_id, http=http)
+    clicked = _click_first_any_frame(
+        page,
+        [
+            "button:has-text('Resend')", "a:has-text('Resend')",
+            "button:has-text('Resend code')", "a:has-text('Resend code')",
+            "button:has-text('重新发送')", "a:has-text('重新发送')",
+            "button:has-text('再送信')", "a:has-text('再送信')",
+            "button:has-text('コードを再送')", "a:has-text('コードを再送')",
+        ],
+        timeout_ms=8000,
+    )
+    if not clicked:
+        raise RuntimeError("phone_otp_resend_missing: 页面未找到重新发送短信按钮")
+    logger.info("[Codex][BrowserUse] 已保留当前号码并点击重新发送短信")
+
 def _do_phone_verification_if_present(page, *, email: str = "") -> None:
     # 给页面一点时间从邮箱 OTP 后跳到手机号页；没有就跳过。
     end = time.time() + 20
@@ -1220,24 +1239,41 @@ def _do_phone_verification_if_present(page, *, email: str = "") -> None:
             if send_state != "code_page":
                 raise RuntimeError(f"提交手机号后未确认发送短信/进入验证码页：state={send_state}, page={_current_state_for_log(page)}")
             sms_provider.set_status(activation_id, 1, http=http)
-            _t_sms = _StepTimer(f"等待手机短信 attempt={attempt}")
-            sms_code = sms_provider.wait_for_sms_code(activation_id, http)
-            _t_sms.done()
-            logger.info("[Codex][BrowserUse] 手机 OTP 收到：%s", sms_code)
-            _clear_otp_inputs(page)
-            _type_otp(page, sms_code)
-            _bu_delay("otp_input")
-            _click_first_any_frame(
-                page,
-                ["button[type='submit']", "button:has-text('Continue')", "button:has-text('Verify')", "button:has-text('続行')", "button:has-text('送信')", "button:has-text('继续')", "button:has-text('验证')", "form button"],
-                timeout_ms=8000,
-            )
-            outcome = _wait_after_phone_otp(page, timeout=30)
-            logger.info("[Codex][BrowserUse] 手机 OTP 提交后状态：%s", outcome)
-            if outcome in ("accepted", "callback", "unknown"):
-                sms_provider.complete(activation_id, http)
-                return
-            raise RuntimeError(f"手机验证码未通过：{outcome}")
+            previous_code = None
+            for code_attempt in range(1, 4):
+                _t_sms = _StepTimer(f"等待手机短信 attempt={attempt} code={code_attempt}/3")
+                sms_code = sms_provider.wait_for_sms_code(
+                    activation_id,
+                    http,
+                    previous_code=previous_code,
+                )
+                _t_sms.done()
+                logger.info("[Codex][BrowserUse] 手机 OTP 收到：%s", sms_code)
+                _clear_otp_inputs(page)
+                _type_otp(page, sms_code)
+                _bu_delay("otp_input")
+                submitted = _click_first_any_frame(
+                    page,
+                    ["button[type='submit']", "button:has-text('Continue')", "button:has-text('Verify')", "button:has-text('続行')", "button:has-text('送信')", "button:has-text('继续')", "button:has-text('验证')", "form button"],
+                    timeout_ms=8000,
+                )
+                if not submitted:
+                    raise RuntimeError("verify_submit_missing: 手机验证码页未找到提交按钮")
+                outcome = _wait_after_phone_otp(page, timeout=30)
+                logger.info("[Codex][BrowserUse] 手机 OTP 提交后状态：%s", outcome)
+                if outcome in ("accepted", "callback"):
+                    sms_provider.complete(activation_id, http)
+                    return
+                if outcome != "invalid":
+                    raise RuntimeError(f"手机验证码结果未确认：{outcome}")
+                if code_attempt >= 3:
+                    raise RuntimeError("手机验证码未通过：同一号码连续 3 条验证码无效/过期")
+                previous_code = sms_code
+                logger.warning(
+                    "[Codex][BrowserUse] 当前短信验证码无效/过期，保留号码请求下一条（%s/3）",
+                    code_attempt,
+                )
+                _request_fresh_phone_code(page, activation_id, http)
         except (sms_provider.SmsProviderConfigurationError, sms_provider.SmsNoNumbersError):
             raise
         except Exception as exc:

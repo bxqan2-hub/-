@@ -1117,7 +1117,7 @@ def _wait_after_phone_otp_submit(driver, timeout: int = 20) -> str:
                 'code is invalid', 'code was invalid', '验证码无效', '验证码错误', '验证码已过期',
                 '認証コードが無効', 'コードが正しく',
             )):
-                raise RuntimeError(f"invalid_phone_code: {(last.get('bodyText') or '')[:240]}")
+                return "invalid"
             continue
         reason = _classify_phone_page_failure(last)
         if reason:
@@ -1132,6 +1132,20 @@ def _wait_after_phone_otp_submit(driver, timeout: int = 20) -> str:
     if _is_phone_code_state(last):
         return "still_code_page"
     return "unknown"
+
+
+def _request_fresh_phone_code(driver, activation_id: str, http) -> None:
+    """保留当前号码，请求 OpenAI 与 HeroSMS 同步发送/接收下一条短信。"""
+    sms_provider.request_another_code(activation_id, http=http)
+    clicked = _click_if_present(driver, [
+        "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'resend')]",
+        "//a[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'resend')]",
+        "//button[contains(., '重新发送') or contains(., '再送信') or contains(., 'コードを再送')]",
+        "//a[contains(., '重新发送') or contains(., '再送信') or contains(., 'コードを再送')]",
+    ], timeout=8)
+    if not clicked:
+        raise RuntimeError("phone_otp_resend_missing: 页面未找到重新发送短信按钮")
+    logger.info("[Codex][Browser] 已保留当前号码并点击重新发送短信")
 
 
 def _classify_phone_page_failure(state: dict) -> str:
@@ -1241,22 +1255,40 @@ def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
                 _wait_after_phone_send(driver, timeout=phone_page_wait)
                 logger.info("[Codex][Browser] 已进入手机验证码页")
 
-                logger.info(
-                    "[Codex][Browser] 短信已发送，开始轮询验证码 activation_id=%s wait=%ss interval=%ss",
-                    activation_id, sms_provider._cfg.SMS_CODE_WAIT, sms_provider._cfg.SMS_POLL_INTERVAL
-                )
-                sms_code = sms_provider.wait_for_sms_code(activation_id, http)
-                logger.info("[Codex][Browser] 手机 OTP 收到：%s", sms_code)
-                _type_otp(driver, sms_code)
-                logger.info("[Codex][Browser] 已填写手机 OTP")
-                human_delay("otp_input")
-                if not _click_if_present(driver, ["button[type='submit']", "input[type='submit']"], timeout=10):
-                    raise RuntimeError(f"verify_submit_missing: phone verification submit not found state={_phone_page_state(driver)}")
-                logger.info("[Codex][Browser] 已提交手机 OTP，等待验证结果")
-                otp_outcome = _wait_after_phone_otp_submit(driver, timeout=25)
-                logger.info("[Codex][Browser] 手机 OTP 提交后状态：%s", otp_outcome)
-                sms_provider.complete(activation_id, http)
-                return
+                previous_code = None
+                for code_attempt in range(1, 4):
+                    logger.info(
+                        "[Codex][Browser] 短信已发送，开始轮询验证码 activation_id=%s code_attempt=%s/3 wait=%ss interval=%ss",
+                        activation_id, code_attempt, sms_provider._cfg.SMS_CODE_WAIT, sms_provider._cfg.SMS_POLL_INTERVAL
+                    )
+                    sms_code = sms_provider.wait_for_sms_code(
+                        activation_id,
+                        http,
+                        previous_code=previous_code,
+                    )
+                    logger.info("[Codex][Browser] 手机 OTP 收到：%s", sms_code)
+                    _clear_otp_inputs(driver)
+                    _type_otp(driver, sms_code)
+                    logger.info("[Codex][Browser] 已填写手机 OTP")
+                    human_delay("otp_input")
+                    if not _click_if_present(driver, ["button[type='submit']", "input[type='submit']"], timeout=10):
+                        raise RuntimeError(f"verify_submit_missing: phone verification submit not found state={_phone_page_state(driver)}")
+                    logger.info("[Codex][Browser] 已提交手机 OTP，等待验证结果")
+                    otp_outcome = _wait_after_phone_otp_submit(driver, timeout=25)
+                    logger.info("[Codex][Browser] 手机 OTP 提交后状态：%s", otp_outcome)
+                    if otp_outcome in ("callback", "left_phone_flow"):
+                        sms_provider.complete(activation_id, http)
+                        return
+                    if otp_outcome != "invalid":
+                        raise RuntimeError(f"phone_otp_unconfirmed: {otp_outcome}")
+                    if code_attempt >= 3:
+                        raise RuntimeError("invalid_phone_code: 同一号码连续 3 条短信验证码未通过")
+                    previous_code = sms_code
+                    logger.warning(
+                        "[Codex][Browser] 当前短信验证码无效/过期，保留号码请求下一条（%s/3）",
+                        code_attempt,
+                    )
+                    _request_fresh_phone_code(driver, activation_id, http)
             except sms_provider.SmsNoNumbersError:
                 logger.warning("[Codex][Browser] 所有符合金额上限的可用地区均已尝试，本轮停止继续取号")
                 raise

@@ -52,6 +52,14 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ROXY_DEFAULT_OS")
         self.assertEqual(field["options"], ["Windows", "macOS"])
 
+    def test_unused_post_registration_chat_settings_are_not_exposed(self):
+        keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
+        self.assertTrue({
+            "ROXY_POST_REGISTRATION_CHAT_ENABLED",
+            "ROXY_POST_REGISTRATION_CHAT_PROMPT",
+            "ROXY_POST_REGISTRATION_CHAT_TIMEOUT",
+        }.isdisjoint(keys))
+
     def test_blank_env_value_uses_default_for_all_supported_types(self):
         old_loaded = env_loader._LOADED
         env_loader._LOADED = True

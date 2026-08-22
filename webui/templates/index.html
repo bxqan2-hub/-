@@ -1848,6 +1848,38 @@
       min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .config-main-v2 { min-width: 0; display: grid; gap: 16px; }
+    .config-filterbar-v2 {
+      min-height: 58px; padding: 10px 12px;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04);
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .config-search-v2 {
+      position: relative; flex: 1 1 320px; min-width: min(280px, 100%);
+    }
+    .config-search-v2 svg {
+      position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+      width: 18px; height: 18px; pointer-events: none;
+      stroke: #909399; fill: none; stroke-width: 1.8; stroke-linecap: round;
+    }
+    .config-search-v2 input {
+      width: 100%; min-height: 42px; padding: 9px 12px 9px 40px;
+      border: 1px solid #dcdfe6; border-radius: 8px; background: #fff;
+      color: #303133; font: inherit; font-size: 14px; box-sizing: border-box;
+    }
+    .config-search-v2 input:focus {
+      outline: none; border-color: #377DFF; box-shadow: 0 0 0 3px rgba(55,125,255,.12);
+    }
+    .config-scope-v2 {
+      min-height: 42px; padding: 0 14px; border: 1px solid #c6dcff; border-radius: 8px;
+      background: #f4f8ff; color: #377DFF; cursor: pointer;
+      font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap;
+    }
+    .config-scope-v2:hover { background: #eaf2ff; border-color: #9fc2ff; }
+    .config-scope-v2:focus-visible { outline: 2px solid rgba(55,125,255,.35); outline-offset: 2px; }
+    .config-filter-meta-v2 {
+      min-width: 118px; color: #909399; font-size: 12px; text-align: right; white-space: nowrap;
+    }
     .config-cards-v2 {
       display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
     }
@@ -2118,6 +2150,8 @@
     }
     @media (max-width: 600px) {
       .config-cards-v2 { grid-template-columns: 1fr; }
+      .config-scope-v2 { flex: 1 1 auto; }
+      .config-filter-meta-v2 { flex: 1 1 auto; text-align: right; }
     }
 
     /* ---- 配置页概览 ---- */
@@ -2747,6 +2781,14 @@
         <div class="config-nav-v2-list" id="configNavV2"></div>
       </aside>
       <div class="config-main-v2">
+        <div class="config-filterbar-v2" role="search" aria-label="筛选运行配置">
+          <label class="config-search-v2" for="configSearchV2">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input id="configSearchV2" type="search" placeholder="搜索配置名称、说明或键名" autocomplete="off">
+          </label>
+          <button type="button" class="config-scope-v2" id="configScopeV2" aria-pressed="false">仅当前驱动</button>
+          <span class="config-filter-meta-v2" id="configFilterMetaV2" aria-live="polite">正在读取配置…</span>
+        </div>
         <div class="config-cards-v2" id="configCardsV2" aria-label="配置概览卡片">
           <div class="config-card-v2" id="configCardRegistrationV2">
             <div class="config-card-v2-top">
@@ -2768,15 +2810,25 @@
             <div class="config-card-v2-value is-placeholder" id="configCardProxyApiLabelV2">—</div>
             <div class="config-card-v2-hint" id="configCardProxyApiHintV2">尚未导入代理 API</div>
           </div>
-          <div class="config-card-v2">
-            <div class="config-card-v2-label">占位卡片 3</div>
-            <div class="config-card-v2-value is-placeholder">—</div>
-            <div class="config-card-v2-hint">内容稍后完善</div>
+          <div class="config-card-v2" id="configCardSmsV2">
+            <div class="config-card-v2-top">
+              <div class="config-card-v2-label">接码状态</div>
+              <span class="config-card-v2-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M9 7h6M9 11h6M12 18h.01"/></svg>
+              </span>
+            </div>
+            <div class="config-card-v2-value is-placeholder" id="configCardSmsLabelV2">—</div>
+            <div class="config-card-v2-hint" id="configCardSmsHintV2">正在检查 HeroSMS 配置</div>
           </div>
-          <div class="config-card-v2">
-            <div class="config-card-v2-label">占位卡片 4</div>
-            <div class="config-card-v2-value is-placeholder">—</div>
-            <div class="config-card-v2-hint">内容稍后完善</div>
+          <div class="config-card-v2" id="configCardViewV2">
+            <div class="config-card-v2-top">
+              <div class="config-card-v2-label">当前配置视图</div>
+              <span class="config-card-v2-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="2"/></svg>
+              </span>
+            </div>
+            <div class="config-card-v2-value" id="configCardViewLabelV2">0 项</div>
+            <div class="config-card-v2-hint" id="configCardViewHintV2">仅显示当前注册驱动相关配置</div>
           </div>
         </div>
         <div class="config-sections-v2" id="configSectionsV2"></div>
@@ -3146,10 +3198,26 @@ async function copyText(text) {
   } catch(e) { showToast('复制失败'); }
 }
 async function api(url, opts) {
-  const r = await fetch(url, opts);
-  const j = await r.json().catch(()=>({}));
-  if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
-  return j;
+  const input = opts || {};
+  const requestOptions = {
+    ...input,
+    headers: {Accept:'application/json', ...(input.headers || {})},
+  };
+  const r = await fetch(url, requestOptions);
+  const raw = await r.text();
+  let payload = {};
+  if (raw) {
+    try { payload = JSON.parse(raw); }
+    catch (_) {
+      if (r.ok) throw new Error(`接口返回格式异常（HTTP ${r.status}）`);
+      payload = {};
+    }
+  }
+  if (!r.ok) {
+    const detail = payload && (payload.error || payload.message || payload.detail);
+    throw new Error(detail || raw.slice(0, 240) || `HTTP ${r.status}`);
+  }
+  return payload;
 }
 async function resolveSelectionEmails(payload) {
   const result = await api('/api/emails/resolve', {
@@ -7161,11 +7229,50 @@ async function codexDeleteBulk() {
 let CONFIG_EMAIL_ACTIVE_SECTION_V2 = '通用邮箱 / OTP';
 let CONFIG_SMS_ACTIVE_SECTION_V2 = 'HeroSMS';
 let CONFIG_CODEX_ACTIVE_SECTION_V2 = '基础配置';
+let CONFIG_ROXY_ACTIVE_SECTION_V2 = '连接与团队';
+let CONFIG_QUERY_V2 = '';
+let CONFIG_SHOW_ALL_DRIVERS_V2 = false;
 const CONFIG_PENDING_UPDATES = {};
+
+const CONFIG_DRIVER_GROUPS_V2 = new Set(['CloakBrowser', 'Browser Use', 'Skyvern', 'RoxyBrowser', 'Roxy流量优化']);
+const CONFIG_DRIVER_GROUP_MAP_V2 = {
+  roxy: ['RoxyBrowser', 'Roxy流量优化'],
+  cloak: ['CloakBrowser'],
+  browser_use: ['Browser Use'],
+  skyvern: ['Skyvern'],
+  protocol: [],
+};
+
+function configContextDriverGroupsV2() {
+  const drivers = new Set([getRegistrationDriverValue()]);
+  const codexDriver = getCodexOauthDriverValue();
+  if (codexDriver && codexDriver !== 'same_as_registration') drivers.add(codexDriver);
+  const groups = new Set();
+  drivers.forEach(driver => (CONFIG_DRIVER_GROUP_MAP_V2[driver] || []).forEach(group => groups.add(group)));
+  return groups;
+}
+
+function isConfigGroupRelevantV2(group) {
+  if (CONFIG_SHOW_ALL_DRIVERS_V2 || !CONFIG_DRIVER_GROUPS_V2.has(group)) return true;
+  return configContextDriverGroupsV2().has(group);
+}
+
+function configFieldMatchesV2(field, query) {
+  if (!query) return true;
+  const haystack = [field.group, field.label, field.key, field.help]
+    .map(value => String(value || '').toLocaleLowerCase())
+    .join(' ');
+  return haystack.includes(query);
+}
 
 function configGroups() {
   const groups = {};
-  CONFIG.forEach(f => { (groups[f.group || '其他'] = groups[f.group || '其他'] || []).push(f); });
+  const query = String(CONFIG_QUERY_V2 || '').trim().toLocaleLowerCase();
+  CONFIG.forEach(f => {
+    const group = f.group || '其他';
+    if (!isConfigGroupRelevantV2(group) || !configFieldMatchesV2(f, query)) return;
+    (groups[group] = groups[group] || []).push(f);
+  });
   return groups;
 }
 
@@ -7187,6 +7294,25 @@ function emailConfigSectionForKey(key) {
 
 function smsConfigSectionForKey(key) {
   return ['HeroSMS', 'HeroSMS 取号、短信轮询和释放配置；API Key 保存到 .env'];
+}
+
+function roxyConfigSectionForKey(key) {
+  if ([
+    'ROXY_API_BASE', 'ROXY_API_TOKEN', 'ROXY_PROFILE_ID', 'ROXY_WORKSPACE_ID', 'ROXY_PROJECT_ID',
+    'ROXY_WORKSPACE_LIST_PATH', 'ROXY_OPEN_PATH', 'ROXY_CLOSE_PATH', 'ROXY_DELETE_PATH',
+  ].includes(key)) {
+    return ['连接与团队', 'Roxy 本地 API、团队/项目、固定环境和生命周期接口路径'];
+  }
+  if ([
+    'ROXY_OPEN_HEADLESS', 'ROXY_KEEP_BROWSER_OPEN', 'ROXY_ONE_PROFILE_PER_ACCOUNT',
+    'ROXY_DELETE_PROFILE_AFTER_RUN', 'ROXY_RANDOM_OS_ON_CREATE', 'ROXY_RANDOM_OS_CHOICES',
+    'ROXY_DEFAULT_OS', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE', 'ROXY_PROFILE_NAME_PREFIX',
+    'ROXY_CREATE_USE_PROXY_POOL', 'ROXY_PROXY_CHECK_CHANNEL', 'ROXY_PROXY_PREFLIGHT_ATTEMPTS',
+    'ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS', 'ROXY_BROWSER_EXIT_IP_ATTEMPTS',
+  ].includes(key)) {
+    return ['环境与代理', '新建环境、系统画像、代理注入和出口复核策略'];
+  }
+  return ['流程重试', '注册、OTP、密码、Session 和 Codex 回调的超时与重试参数'];
 }
 
 function codexConfigSectionForKey(key) {
@@ -7604,11 +7730,7 @@ function setRegistrationDriverValue(value) {
   const cur = String(value || 'protocol').trim().toLowerCase() || 'protocol';
   CONFIG_PENDING_UPDATES.REGISTRATION_DRIVER = cur;
   closeConfigEpSelects();
-  renderRegistrationDriverCard();
-  const sectionMount = document.getElementById('configRegistrationSelectV2');
-  if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
-  bindRoxyWorkspaceToolsV2();
-  bindCloudMailToolsV2();
+  renderConfigLayoutV2();
 }
 function renderRegistrationEpSelect(mount, wrapId) {
   if (!mount) return;
@@ -7905,6 +8027,8 @@ function renderSectionedConfigSectionV2(name, fields, sectionForKey, preferred, 
   let extra = '';
   if (name === '邮箱 / OTP' && active === 'CloudMail') {
     extra = renderCloudMailTokenToolsV2();
+  } else if (name === 'RoxyBrowser' && active === '连接与团队') {
+    extra = renderRoxyWorkspaceToolsV2();
   }
   return `
     <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
@@ -8111,6 +8235,16 @@ function renderConfigSectionV2(name, fields) {
   if (name === 'Codex') {
     return renderCodexSectionV2(fields);
   }
+  if (name === 'RoxyBrowser') {
+    return renderSectionedConfigSectionV2(
+      name,
+      fields,
+      roxyConfigSectionForKey,
+      ['连接与团队', '环境与代理', '流程重试'],
+      { get: () => CONFIG_ROXY_ACTIVE_SECTION_V2, set: v => { CONFIG_ROXY_ACTIVE_SECTION_V2 = v; } },
+      'roxy-section-v2'
+    );
+  }
   if (name === '邮箱 / OTP') {
     return renderSectionedConfigSectionV2(
       name,
@@ -8133,6 +8267,53 @@ function renderConfigSectionV2(name, fields) {
   }
   return renderMixedConfigSectionV2(name, fields, configSectionIntro(name));
 }
+
+function currentConfigValueV2(key) {
+  if (Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, key)) return CONFIG_PENDING_UPDATES[key];
+  const field = (CONFIG || []).find(item => item.key === key);
+  return field ? field.value : undefined;
+}
+
+function renderConfigStatusCardsV2(groups) {
+  const visibleCount = Object.values(groups).reduce((sum, fields) => sum + fields.length, 0);
+  const totalCount = (CONFIG || []).length;
+  const hiddenCount = Math.max(0, totalCount - visibleCount);
+  const viewLabel = $('#configCardViewLabelV2');
+  const viewHint = $('#configCardViewHintV2');
+  if (viewLabel) viewLabel.textContent = `${visibleCount} 项`;
+  if (viewHint) {
+    if (CONFIG_QUERY_V2) viewHint.textContent = `搜索匹配 · 共 ${totalCount} 项配置`;
+    else if (CONFIG_SHOW_ALL_DRIVERS_V2) viewHint.textContent = `全部驱动 · ${Object.keys(groups).length} 个分组`;
+    else viewHint.textContent = `当前注册/Codex 驱动 · 已收起 ${hiddenCount} 项无关配置`;
+  }
+
+  const smsRequired = ['SMS_API_BASE', 'SMS_API_KEY', 'SMS_SERVICE', 'SMS_COUNTRY'];
+  const smsMissing = smsRequired.filter(key => !String(currentConfigValueV2(key) ?? '').trim());
+  const smsLabel = $('#configCardSmsLabelV2');
+  const smsHint = $('#configCardSmsHintV2');
+  if (smsLabel) {
+    smsLabel.textContent = smsMissing.length ? '待配置' : '已就绪';
+    smsLabel.classList.toggle('is-placeholder', smsMissing.length > 0);
+  }
+  if (smsHint) {
+    const country = String(currentConfigValueV2('SMS_COUNTRY') || 'auto');
+    smsHint.textContent = smsMissing.length
+      ? `还需填写 ${smsMissing.map(key => key.replace('SMS_', '')).join(' / ')}`
+      : `${country === 'auto' ? '按价格与库存自动选号' : `固定国家 ID ${country}`} · 验证失败自动换区/换号`;
+  }
+
+  const search = $('#configSearchV2');
+  if (search && search.value !== CONFIG_QUERY_V2) search.value = CONFIG_QUERY_V2;
+  const scope = $('#configScopeV2');
+  if (scope) {
+    scope.textContent = CONFIG_SHOW_ALL_DRIVERS_V2 ? '全部驱动' : '仅当前驱动';
+    scope.setAttribute('aria-pressed', CONFIG_SHOW_ALL_DRIVERS_V2 ? 'true' : 'false');
+    scope.title = CONFIG_SHOW_ALL_DRIVERS_V2 ? '点击收起与当前流程无关的浏览器驱动配置' : '点击显示全部浏览器驱动配置';
+  }
+  const meta = $('#configFilterMetaV2');
+  if (meta) meta.textContent = `显示 ${visibleCount} / ${totalCount} 项`;
+}
+
 function renderConfigLayoutV2() {
   document.body.classList.remove('bulk-list-editor-open');
   const nav = document.getElementById('configNavV2');
@@ -8140,9 +8321,10 @@ function renderConfigLayoutV2() {
   if (!nav || !sections) return;
   const groups = configGroups();
   const names = Object.keys(groups);
+  renderConfigStatusCardsV2(groups);
   if (!names.length) {
-    nav.innerHTML = '<div class="muted" style="padding:8px 12px;font-size:13px;">暂无分组</div>';
-    sections.innerHTML = '';
+    nav.innerHTML = '<div class="muted" style="padding:8px 12px;font-size:13px;line-height:1.5;">没有匹配的配置分组</div>';
+    sections.innerHTML = '<section class="config-section-v2"><h3>没有找到配置</h3><p>换一个关键词，或切换到“全部驱动”后再搜索。</p></section>';
     return;
   }
   nav.innerHTML = names.map((name, i) => `
@@ -8172,6 +8354,28 @@ function setActiveConfigNav(slug) {
   });
 }
 function bindConfigLayoutV2() {
+  const search = document.getElementById('configSearchV2');
+  if (search && !search.dataset.bound) {
+    search.dataset.bound = '1';
+    search.addEventListener('input', () => {
+      CONFIG_QUERY_V2 = search.value;
+      renderConfigLayoutV2();
+    });
+    search.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || !search.value) return;
+      search.value = '';
+      CONFIG_QUERY_V2 = '';
+      renderConfigLayoutV2();
+    });
+  }
+  const scope = document.getElementById('configScopeV2');
+  if (scope && !scope.dataset.bound) {
+    scope.dataset.bound = '1';
+    scope.addEventListener('click', () => {
+      CONFIG_SHOW_ALL_DRIVERS_V2 = !CONFIG_SHOW_ALL_DRIVERS_V2;
+      renderConfigLayoutV2();
+    });
+  }
   const nav = document.getElementById('configNavV2');
   if (!nav || nav.dataset.bound) return;
   nav.dataset.bound = '1';
@@ -8204,6 +8408,13 @@ function bindConfigLayoutV2() {
       if (smsTab) {
         e.preventDefault();
         CONFIG_SMS_ACTIVE_SECTION_V2 = smsTab.dataset.smsSectionV2;
+        renderConfigLayoutV2();
+        return;
+      }
+      const roxyTab = e.target.closest('[data-roxy-section-v2]');
+      if (roxyTab) {
+        e.preventDefault();
+        CONFIG_ROXY_ACTIVE_SECTION_V2 = roxyTab.dataset.roxySectionV2;
         renderConfigLayoutV2();
         return;
       }

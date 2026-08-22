@@ -366,8 +366,14 @@ def wait_for_sms_code(
     http: CurlSession | None = None,
     max_wait: int | None = None,
     poll_interval: int | None = None,
+    previous_code: str | None = None,
 ) -> str:
-    """轮询 getStatus，直到 HeroSMS 返回 STATUS_OK。"""
+    """轮询 getStatus，直到 HeroSMS 返回新鲜的 ``STATUS_OK`` 验证码。
+
+    ``previous_code`` 用于同一号码请求第二条短信的场景。HeroSMS 在新短信尚未
+    到达时可能短暂返回上一条 ``STATUS_OK``；此时继续轮询，避免把旧验证码再次
+    提交给 OpenAI。
+    """
     own_http = http is None
     http = http or _http()
     total_wait = _cfg.SMS_CODE_WAIT if max_wait is None else max_wait
@@ -389,6 +395,14 @@ def wait_for_sms_code(
                 code = text.split(":", 1)[1].strip()
                 if not code:
                     raise SmsProviderError("HeroSMS 返回 STATUS_OK，但验证码为空")
+                if previous_code and code == str(previous_code).strip():
+                    logger.info(
+                        "[SMS:HeroSMS] 第 %s 轮仍是上一条验证码，继续等待新短信",
+                        round_no,
+                    )
+                    if interval > 0:
+                        time.sleep(interval)
+                    continue
                 logger.info("[SMS:HeroSMS] 第 %s 轮收到验证码：%s", round_no, code)
                 return code
             if text == "STATUS_CANCEL":
@@ -411,6 +425,13 @@ def wait_for_sms_code(
     finally:
         if own_http:
             http.close()
+
+
+def request_another_code(activation_id: str, http: CurlSession | None = None) -> str:
+    """保留当前号码并通知 HeroSMS 等待下一条短信。"""
+    result = set_status(activation_id, 3, http=http)
+    logger.info("[SMS:HeroSMS] 已请求当前号码继续接收下一条短信 activation_id=%s", activation_id)
+    return result
 
 
 def set_status(activation_id: str, status: int, http: CurlSession | None = None) -> str:

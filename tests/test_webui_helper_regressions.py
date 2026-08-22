@@ -277,6 +277,23 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('proxyPoolEntryCountV2', html)
         self.assertNotIn('maxlength="10"', html)
 
+    def test_settings_ui_filters_irrelevant_drivers_and_has_real_status_cards(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="configSearchV2"', html)
+        self.assertIn('id="configScopeV2"', html)
+        self.assertIn('id="configCardSmsLabelV2"', html)
+        self.assertIn('id="configCardViewLabelV2"', html)
+        self.assertIn("CONFIG_DRIVER_GROUPS_V2", html)
+        self.assertIn("configContextDriverGroupsV2", html)
+        self.assertIn("roxyConfigSectionForKey", html)
+        self.assertIn("['连接与团队', '环境与代理', '流程重试']", html)
+        self.assertIn("显示 ${visibleCount} / ${totalCount} 项", html)
+        self.assertIn("接口返回格式异常", html)
+        self.assertNotIn("占位卡片 3", html)
+        self.assertNotIn("占位卡片 4", html)
+        self.assertNotIn("内容稍后完善", html)
+
     def test_plan_check_ui_bursts_until_completed_result_is_rendered(self):
         html = self.client.get("/").get_data(as_text=True)
 

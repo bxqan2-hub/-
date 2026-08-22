@@ -275,18 +275,6 @@ EDITABLE_FIELDS = [
         "label": "单次刷新对象上限字节", "help": "默认65536字节（64 KiB）",
     },
     {
-        "key": "ROXY_POST_REGISTRATION_CHAT_ENABLED", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
-        "label": "注册后发送消息", "help": "拿到 accessToken 后在当前 ChatGPT 窗口发送消息，收到回复后再结束窗口",
-    },
-    {
-        "key": "ROXY_POST_REGISTRATION_CHAT_PROMPT", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
-        "label": "注册后消息内容", "help": "默认发送 hi",
-    },
-    {
-        "key": "ROXY_POST_REGISTRATION_CHAT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
-        "label": "等待回复秒数", "help": "等待 ChatGPT 新回复的最长时间，默认 90 秒",
-    },
-    {
         "key": "ROXY_ONE_PROFILE_PER_ACCOUNT", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
         "label": "一号一环境", "help": "每个账号强制创建新 Roxy Profile，用完关闭并删除，禁止复用固定环境",
     },

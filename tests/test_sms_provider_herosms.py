@@ -179,6 +179,30 @@ class HeroSmsProviderTests(unittest.TestCase):
         self.assertEqual(http.calls[0]["params"]["action"], "getStatus")
         self.assertEqual(http.calls[0]["params"]["id"], "activation-1")
 
+    def test_wait_for_fresh_sms_code_skips_previous_code(self):
+        http = _Http(["STATUS_OK:123456", "STATUS_WAIT_RETRY:123456", "STATUS_OK:654321"])
+
+        code = sms_provider.wait_for_sms_code(
+            "activation-1",
+            http=http,
+            max_wait=1,
+            poll_interval=0,
+            previous_code="123456",
+        )
+
+        self.assertEqual(code, "654321")
+        self.assertEqual([call["params"]["action"] for call in http.calls], ["getStatus"] * 3)
+
+    def test_request_another_code_keeps_activation_and_uses_status_three(self):
+        sms_provider._remember_activation("activation-1", "56")
+        http = _Http(["ACCESS_RETRY_GET"])
+
+        result = sms_provider.request_another_code("activation-1", http=http)
+
+        self.assertEqual(result, "ACCESS_RETRY_GET")
+        self.assertEqual(http.calls[0]["params"]["status"], "3")
+        self.assertEqual(sms_provider.activation_country("activation-1"), "56")
+
     def test_lists_only_affordable_countries_with_stock(self):
         http = _Http([
             '{"1":{"dr":{"cost":0.20,"count":5}},"2":{"dr":{"cost":0.60,"count":9}},"3":{"dr":{"cost":0.10,"count":0}}}',
