@@ -367,9 +367,11 @@ def _account_secret_value(row: dict, field: str) -> str:
         return str(row.get("copy_line") or "")
     if field == "codex_agent_token":
         return str(row.get("codex_agent_token") or "")
+    if field == "totp_secret":
+        return str(row.get("totp_secret") or "")
     if field == "oaics_link":
         return str(row.get("oaics_link") or "")
-    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/oaics_link")
+    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/oaics_link")
 
 
 def _compact_job_for_list(row: dict) -> dict:

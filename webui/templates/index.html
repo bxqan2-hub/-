@@ -771,6 +771,30 @@
       display: flex; flex-direction: column; align-items: center;
       justify-content: center; gap: 5px; width: 100%; min-width: 0;
     }
+    #accountsPanelV2 .acc-v2-twofa,
+    .plus-pool-table .acc-v2-twofa {
+      display: flex; flex-direction: column; align-items: center; gap: 3px;
+      width: 100%; min-width: 0;
+    }
+    #accountsPanelV2 .acc-v2-twofa-actions,
+    .plus-pool-table .acc-v2-twofa-actions {
+      display: flex; align-items: center; justify-content: center; gap: 4px;
+    }
+    #accountsPanelV2 .acc-v2-twofa-btn,
+    .plus-pool-table .acc-v2-twofa-btn {
+      min-height: 21px; padding: 0 5px; border: 1px solid #a0cfff;
+      border-radius: 4px; background: #ecf5ff; color: #377dff;
+      font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+      white-space: nowrap;
+    }
+    #accountsPanelV2 .acc-v2-twofa-btn:hover:not(:disabled),
+    .plus-pool-table .acc-v2-twofa-btn:hover:not(:disabled) {
+      color: #fff; background: #377dff; border-color: #377dff;
+    }
+    #accountsPanelV2 .acc-v2-twofa-btn:disabled,
+    .plus-pool-table .acc-v2-twofa-btn:disabled {
+      opacity: .55; cursor: not-allowed;
+    }
     #accountsPanelV2 .account-plan-stack .mail-status-pill {
       min-height: 20px; padding: 1px 8px; font-size: 11px; line-height: 18px;
     }
@@ -4216,6 +4240,17 @@ function _codexAction(r) {
   const label = s === 'success' ? '重新补跑 Codex' : '补跑 Codex';
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
+function _twoFaCellV2(r) {
+  if (!r.totp_enabled) return '<div class="acc-v2-sub acc-v2-twofa-status">2FA: 未启用</div>';
+  const id = esc(r.id);
+  return `<div class="acc-v2-twofa" data-account-twofa="${id}">
+    <div class="acc-v2-sub acc-v2-twofa-status" data-account-twofa-value="${id}">2FA: 已启用</div>
+    <div class="acc-v2-twofa-actions">
+      <button type="button" class="acc-v2-twofa-btn" data-account-reveal-secret="totp_secret" data-account-id="${id}" title="按需显示 TOTP Secret">显示</button>
+      <button type="button" class="acc-v2-twofa-btn" data-account-copy-secret="totp_secret" data-account-id="${id}" title="复制完整 TOTP Secret">复制</button>
+    </div>
+  </div>`;
+}
 function _tokenCellV2(r) {
   const live = r.live_check_status || '';
   const liveErr = r.live_check_error || '';
@@ -4226,7 +4261,7 @@ function _tokenCellV2(r) {
   else if (live === 'running') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}" style="color:#e6a23c">查活: 运行中</div>`;
   else if (live === 'deactivated') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#f56c6c">查活: 已废</div>`;
   else if (live === 'failed') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#e6a23c">查活: 失败</div>`;
-  const twoFaHtml = `<div class="acc-v2-sub">2FA: ${r.totp_enabled ? '已启用' : '未启用'}</div>`;
+  const twoFaHtml = _twoFaCellV2(r);
   if (r.has_access_token) {
     return `<div class="account-token-stack"><button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制 AT</button>${twoFaHtml}${liveHtml}</div>`;
   }
@@ -4402,7 +4437,7 @@ function renderPlusAccounts() {
       </td>
       <td class="col-plan"><div class="plan-inline-wrap">${_planCell(r)}${_planRefreshAction(r)}</div></td>
       <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
-      <td class="col-small">${r.totp_enabled ? '已启用' : '<span class="acc-v2-muted">未启用</span>'}</td>
+      <td class="col-small">${_twoFaCellV2(r)}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
     </tr>`;
   const body = $('#plusAccountsBodyV2');
@@ -4640,6 +4675,36 @@ async function onAccountsBodyClick(e) {
     closeAccountsV2MoreMenus();
   }
 
+  const revealSecretBtn = e.target.closest('[data-account-reveal-secret]');
+  if (revealSecretBtn) {
+    const id = Number(revealSecretBtn.dataset.accountId);
+    const field = revealSecretBtn.dataset.accountRevealSecret;
+    const cell = revealSecretBtn.closest('[data-account-twofa]');
+    const valueEl = cell?.querySelector('[data-account-twofa-value]');
+    if (!cell || !valueEl) return;
+    if (revealSecretBtn.dataset.accountRevealState === 'shown') {
+      valueEl.textContent = '2FA: 已启用';
+      valueEl.title = '';
+      revealSecretBtn.dataset.accountRevealState = '';
+      revealSecretBtn.textContent = '显示';
+      return;
+    }
+    revealSecretBtn.disabled = true;
+    try {
+      const value = await fetchOneAccountSecret(id, field);
+      if (!value) { showToast('2FA Secret 为空'); return; }
+      valueEl.textContent = `2FA: ${value}`;
+      valueEl.title = value;
+      revealSecretBtn.dataset.accountRevealState = 'shown';
+      revealSecretBtn.textContent = '隐藏';
+    } catch (err) {
+      showToast('显示 2FA Secret 失败: ' + err.message);
+    } finally {
+      revealSecretBtn.disabled = false;
+    }
+    return;
+  }
+
   const mailCheckBtn = e.target.closest('[data-account-mail-check]');
   if (mailCheckBtn) {
     await checkAccountMailbox(Number(mailCheckBtn.dataset.accountMailCheck), mailCheckBtn);
@@ -4655,7 +4720,7 @@ async function onAccountsBodyClick(e) {
       const value = await fetchOneAccountSecret(id, field);
       if (!value) { showToast('可复制内容为空'); return; }
       copyText(value);
-      showToast(field === 'access_token' ? 'Token 已复制' : field === 'codex_agent_token' ? 'Agent Token 已复制' : field === 'oaics_link' ? 'BA 链接已复制' : '账号整行已复制');
+      showToast(field === 'access_token' ? 'Token 已复制' : field === 'codex_agent_token' ? 'Agent Token 已复制' : field === 'totp_secret' ? '2FA Secret 已复制' : field === 'oaics_link' ? 'BA 链接已复制' : '账号整行已复制');
     } catch(err) {
       showToast('复制失败: ' + err.message);
     } finally {

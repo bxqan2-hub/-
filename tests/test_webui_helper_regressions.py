@@ -53,6 +53,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
             "access_token": f"token-{account_id}",
             "copy_line": f"line-{account_id}",
             "codex_agent_token": f"agent-{account_id}",
+            "totp_secret": f"totp-{account_id}",
         }
 
         single = self.client.get("/api/accounts/7/secret?field=access_token")
@@ -68,6 +69,17 @@ class WebUiHelperRegressionTests(unittest.TestCase):
             [item["value"] for item in bulk.get_json()["values"]],
             ["token-7", "token-8"],
         )
+
+        totp = self.client.get("/api/accounts/7/secret?field=totp_secret")
+        self.assertEqual(totp.status_code, 200)
+        self.assertEqual(totp.get_json()["value"], "totp-7")
+
+        totp_bulk = self.client.post(
+            "/api/accounts/secret-bulk",
+            json={"account_ids": [7], "field": "totp_secret"},
+        )
+        self.assertEqual(totp_bulk.status_code, 200)
+        self.assertEqual(totp_bulk.get_json()["values"][0]["value"], "totp-7")
 
         rejected = self.client.get("/api/accounts/7/secret?field=password")
         self.assertEqual(rejected.status_code, 400)
@@ -117,6 +129,8 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("_oaicsLinkCell", html)
         self.assertIn('colspan="10"', html)
         self.assertIn("/api/accounts/extract-oaics-bulk", html)
+        self.assertIn('data-account-copy-secret="totp_secret"', html)
+        self.assertIn('data-account-reveal-secret="totp_secret"', html)
         self.assertIn('id="btnRenameAccountGroupV2"', html)
         self.assertIn("const PAGER_DRAFT_SIZES = Object.create(null)", html)
         self.assertIn("oninput=\"pagerDraftSize('${id}',this.value)\"", html)
