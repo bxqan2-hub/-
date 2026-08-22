@@ -2403,7 +2403,7 @@
               <th class="col-checkout" title="OpenAI Checkout 返回的会话类型">Checkout类型</th>
               <th class="col-gcash" title="PH/PHP Checkout 是否返回 GCash 支付方式">GC</th>
               <th class="col-status">Codex</th>
-              <th class="col-time">存活小时</th>
+              <th class="col-time">注册时间</th>
               <th class="col-sms">接码授权</th>
             </tr>
           </thead>
@@ -4304,7 +4304,9 @@ function _twoFaCellV2(r) {
     <div class="acc-v2-twofa-actions">
       <button type="button" class="acc-v2-twofa-btn" data-account-reveal-secret="totp_secret" data-account-id="${id}" title="按需显示 TOTP Secret">显示</button>
       <button type="button" class="acc-v2-twofa-btn" data-account-copy-secret="totp_secret" data-account-id="${id}" title="复制完整 TOTP Secret">复制</button>
+      <button type="button" class="acc-v2-twofa-btn acc-v2-totp-code-btn" data-account-totp-code="${id}" title="按已保存 Secret 生成当前 6 位动态验证码；再次点击停止自动刷新">验证码</button>
     </div>
+    <div class="acc-v2-sub acc-v2-totp-code-value" data-account-totp-code-value="${id}"></div>
   </div>`;
 }
 function _tokenCellV2(r) {
@@ -4412,7 +4414,7 @@ function _accountCreatedCell(r) {
   const value = r.openai_created_at || r.created_at || '';
   const source = r.openai_created_at ? 'OpenAI 账号创建时间' : '本站落库时间';
   const lifetime = accountLifetimeHours(value);
-  return `<span class="account-lifetime-only" title="${esc(source)}">${esc(lifetime)}</span>`;
+  return `<span class="account-lifetime-only" title="${esc(source)}；注册：${esc(value)}；时长：${esc(lifetime)}">${esc(value ? formatDateTime(value) : '-')}</span>`;
 }
 function _smsOauthAction(r) {
   const status = String(r.codex_status || '').toLowerCase();
@@ -4765,6 +4767,61 @@ async function onAccountsBodyClick(e) {
   const mailCheckBtn = e.target.closest('[data-account-mail-check]');
   if (mailCheckBtn) {
     await checkAccountMailbox(Number(mailCheckBtn.dataset.accountMailCheck), mailCheckBtn);
+    return;
+  }
+
+  const totpCodeBtn = e.target.closest('[data-account-totp-code]');
+  if (totpCodeBtn) {
+    const id = Number(totpCodeBtn.dataset.accountTotpCode);
+    const target = document.querySelector(`[data-account-totp-code-value="${id}"]`);
+    if (target?.dataset.totpRunning === '1') {
+      // 停止自动刷新
+      clearInterval(Number(target.dataset.totpTimer || 0));
+      delete target.dataset.totpRunning;
+      delete target.dataset.totpTimer;
+      target.textContent = '';
+      totpCodeBtn.textContent = '验证码';
+      return;
+    }
+    totpCodeBtn.disabled = true;
+    let code = '';
+    let firstRemain = 30;
+    try {
+      const data = await (await fetch(`/api/accounts/${id}/totp-code`)).json();
+      if (!data.ok) { showToast('获取验证码失败: ' + (data.error || '未知')); return; }
+      code = data.totp_code;
+      firstRemain = Math.max(1, Number(data.remaining_seconds) || 30);
+    } catch (err) {
+      showToast('获取验证码失败: ' + err.message);
+      return;
+    } finally {
+      totpCodeBtn.disabled = false;
+    }
+    if (!code) { showToast('验证码为空'); return; }
+    // 启动自动刷新循环：每秒更新，倒计时走完自动换新码
+    let remain = Math.max(1, firstRemain);
+    const tick = async () => {
+      if (remain > 1) { remain -= 1; draw(); return; }
+      try {
+        const data = await (await fetch(`/api/accounts/${id}/totp-code`)).json();
+        if (!data.ok) { draw(); return; }
+        code = data.totp_code;
+        remain = 30;
+        draw();
+      } catch (_) { draw(); }
+    };
+    const draw = () => {
+      if (!target) return;
+      if (target.dataset.totpRunning !== '1') return; // 被停止
+      target.textContent = `${code}（${remain}s）`;
+      target.title = `TOTP 动态码，剩余 ${remain} 秒后更换；点击“验证码”按钮停止`;
+    };
+    target.dataset.totpRunning = '1';
+    remain = Number(target.dataset.totpRemain || 30);
+    draw();
+    const timer = setInterval(tick, 1000);
+    target.dataset.totpTimer = String(timer);
+    totpCodeBtn.textContent = '停止';
     return;
   }
 
@@ -8139,7 +8196,7 @@ document.addEventListener('click', (e) => {
 
 // ---------- 初始化 ----------
 const accountLifetimeHeader = document.querySelector('#accountsPanelV2 thead .col-time');
-if (accountLifetimeHeader) accountLifetimeHeader.textContent = '存活小时';
+if (accountLifetimeHeader) accountLifetimeHeader.textContent = '注册时间';
 loadAccountGroups();
 loadSummary();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);

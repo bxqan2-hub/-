@@ -824,6 +824,44 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 400
         return jsonify({"ok": True, "id": acc_id, "field": field, "value": value})
 
+    @app.get("/api/accounts/<int:acc_id>/totp-code")
+    def api_account_totp_code(acc_id: int):
+        """按需生成账号当前 6 位 TOTP 动态验证码（基于已保存的 totp_secret）。
+
+        等价于在 2FA 认证器/2FA.cn 里填入该 Secret 后显示的动态码；
+        不返回 Secret 本身，避免在响应里重复暴露凭据。
+        """
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        secret = str(acc.get("totp_secret") or "").strip()
+        if not secret:
+            return jsonify({"ok": False, "error": "该账号未启用 2FA（缺少 TOTP Secret）"}), 400
+        try:
+            from core.account_export import normalize_totp_secret
+            import pyotp
+            import time as _time
+
+            normalized = normalize_totp_secret(secret)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"TOTP Secret 解析失败：{type(exc).__name__}"}), 400
+        try:
+            otp = pyotp.TOTP(normalized)
+            now = int(_time.time())
+            code = otp.at(now)
+            remaining = 30 - (now % 30)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"验证码生成失败：{type(exc).__name__}"}), 400
+        return jsonify({
+            "ok": True,
+            "id": acc_id,
+            "email": acc.get("email"),
+            "totp_code": code,
+            "period": 30,
+            "remaining_seconds": int(remaining),
+            "valid_until": int(now) + int(remaining),
+        })
+
     @app.post("/api/accounts/secret-bulk")
     def api_accounts_secret_bulk():
         """按需批量读取账号敏感值。Body {account_ids:[...], field}."""
