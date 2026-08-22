@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request
 from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service
+from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service
 from core import integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
@@ -278,6 +278,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "has_active_plus_subscription", "is_free_plan", "plus_trial_eligible",
         "plan_check_status", "plan_detection_source", "plan_authority", "plan_confidence",
         "checkout_kind_status", "checkout_kind",
+        "gcash_status", "gcash_eligible", "gcash_payment_method_id",
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error", "jp_trial_checked_at",
         "codex_status", "codex_agent_status",
     ):
@@ -313,6 +314,9 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "checkout_kind_ok", "checkout_kind_provider", "checkout_kind_processor",
         "checkout_kind_session_prefix", "checkout_kind_confirm_sent",
         "checkout_kind_checked_at", "checkout_kind_error",
+        # GCash 资格检测。
+        "gcash_ok", "gcash_checkout_country", "gcash_checkout_currency",
+        "gcash_checked_at", "gcash_completed_at", "gcash_error",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_queued_at", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",
         # 邮箱检测结果：账号页直接展示并支持单账号刷新。
@@ -584,6 +588,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_oaics_extracts = db.recover_interrupted_oaics_extracts()
     if recovered_oaics_extracts:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 OAICS 提链状态", recovered_oaics_extracts)
+    recovered_gcash = db.recover_interrupted_gcash_checks()
+    if recovered_gcash:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 GCash 资格检测状态", recovered_gcash)
     # ----------------------------------------------------------
     # 页面
     # ----------------------------------------------------------
@@ -1238,6 +1245,90 @@ def create_app(auth_code: str | None = None) -> Flask:
             "workers": workers,
             "confirm_sent": False,
             "message": "检测只创建 Checkout 并读取类型，不执行 promo update 或 confirm",
+        }), 202
+
+    @app.post("/api/accounts/check-gcash-bulk")
+    def api_accounts_check_gcash_bulk():
+        """Create one PH/PHP Checkout per selected account and read GCash
+        availability without confirming or starting any payment method."""
+        from core import detection_proxy
+        from config import proxy as proxy_cfg
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多检测 500 个账号"}), 400
+        try:
+            workers = _positive_worker_count(data.get("workers"), 6)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
+        # GCash 探测必须走 PH 出口；代理池为设置在“gc查询代理池”的 PH 代理列表。
+        pool_specs = detection_proxy.parse_detection_proxy_pool(
+            getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
+        )
+        if not pool_specs:
+            return jsonify({"ok": False, "error": "尚未配置 gc查询代理池（PH 出口代理）"}), 409
+        profiles = detection_proxy.detection_proxy_profiles(pool_specs)
+        active = str(getattr(proxy_cfg, "GC_CHECK_PROXY_ACTIVE", "") or "").strip()
+        selected = next((item for item in profiles if item["key"] == active or item["label"] == active), None)
+        ordered_specs = [str((selected or profiles[0])["spec"])] if selected else pool_specs
+
+        executor = gcash_service.get_executor(workers)
+        started, busy, failed, skipped = [], [], [], []
+        seen: set[int] = set()
+        for raw_id in ids:
+            try:
+                account_id = int(raw_id)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if account_id in seen:
+                continue
+            seen.add(account_id)
+            account = db.get_account(account_id)
+            if not account:
+                skipped.append({"id": account_id, "reason": "账号不存在"})
+                continue
+            token = str(account.get("access_token") or "").strip()
+            if not token:
+                skipped.append({"id": account_id, "email": account.get("email"), "reason": "缺少 AT/access_token"})
+                continue
+            proxy_spec = ordered_specs[0]
+            proxy_url = ""
+            try:
+                proxy_url = detection_proxy.resolve_detection_proxy(proxy_spec) or ""
+            except Exception as exc:
+                skipped.append({"id": account_id, "email": account.get("email"), "reason": f"代理解析失败：{exc}"})
+                continue
+            queued = gcash_service.enqueue(
+                account_id=account_id,
+                access_token=token,
+                trigger="manual_gcash_bulk",
+                proxy=proxy_url or None,
+                executor=executor,
+            )
+            item = {"id": account_id, "email": account.get("email"), **queued}
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "started": started,
+            "started_count": len(started),
+            "busy": busy,
+            "busy_count": len(busy),
+            "failed": failed,
+            "failed_count": len(failed),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            "workers": workers,
+            "confirm_sent": False,
+            "message": "每个账号创建一次 PH Checkout 并读取 GCash 支付方式，不执行 confirm/start",
         }), 202
 
     @app.post("/api/accounts/extract-oaics-bulk")

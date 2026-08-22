@@ -90,6 +90,9 @@ PLAN_CHECK_PROXY_ACTIVE = ""
 CHECKOUT_CHECK_PROXY_PROFILES = []
 CHECKOUT_CHECK_PROXY_ACTIVE = ""
 
+# GCash 资格检测专用代理池；需要 PH 出口代理。每行 `名称|代理或代理API`。
+GC_CHECK_PROXY_PROFILES = []
+
 # PayPal OAICS 提链专用代理池；格式支持 `名称|代理` 或直接代理，每行一条。
 PAYPAL_OAICS_PROXY_PROFILES = []
 PAYPAL_OAICS_PROXY_ACTIVE = ""
@@ -675,6 +678,7 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_PROXY_ACTIVE': 'str',
     'CHECKOUT_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'CHECKOUT_CHECK_PROXY_ACTIVE': 'str',
+    'GC_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'PAYPAL_OAICS_PROXY_PROFILES': 'list_str_multiline',
     'PAYPAL_OAICS_PROXY_ACTIVE': 'str',
     'PAYPAL_OAICS_WORKERS': 'int',

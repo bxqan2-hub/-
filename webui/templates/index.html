@@ -685,6 +685,7 @@
     .accounts-table-v2 .col-token { width: 105px; }
     .accounts-table-v2 .col-plan { width: 120px; }
     .accounts-table-v2 .col-checkout { width: 125px; }
+    .accounts-table-v2 .col-gcash { width: 90px; }
     .accounts-table-v2 .col-mail { width: 130px; }
     .accounts-table-v2 .col-trial { width: 130px; }
     .accounts-table-v2 .col-small { width: 72px; }
@@ -693,7 +694,7 @@
     .accounts-table-v2 .col-time { width: 170px; }
     .accounts-table-v2 .col-sms { width: 116px; }
     #accountsPanelV2 .accounts-table-v2 {
-      min-width: 1320px; font-size: 13px;
+      min-width: 1420px; font-size: 13px;
     }
     #accountsPanelV2 .accounts-table-v2 th,
     #accountsPanelV2 .accounts-table-v2 td {
@@ -717,6 +718,7 @@
     #accountsPanelV2 .accounts-table-v2 .col-token { width: 110px; }
     #accountsPanelV2 .accounts-table-v2 .col-plan { width: 190px; }
     #accountsPanelV2 .accounts-table-v2 .col-checkout { width: 145px; }
+    #accountsPanelV2 .accounts-table-v2 .col-gcash { width: 105px; }
     #accountsPanelV2 .accounts-table-v2 .col-status { width: 105px; }
     #accountsPanelV2 .accounts-table-v2 .col-time { width: 120px; }
     #accountsPanelV2 .accounts-table-v2 .col-sms { width: 145px; }
@@ -725,6 +727,7 @@
     #accountsPanelV2 .accounts-table-v2 .col-token,
     #accountsPanelV2 .accounts-table-v2 .col-plan,
     #accountsPanelV2 .accounts-table-v2 .col-checkout,
+    #accountsPanelV2 .accounts-table-v2 .col-gcash,
     #accountsPanelV2 .accounts-table-v2 .col-status,
     #accountsPanelV2 .accounts-table-v2 .col-time,
     #accountsPanelV2 .accounts-table-v2 .col-sms {
@@ -839,6 +842,7 @@
     .accounts-table-v2 .col-profile,
     .accounts-table-v2 .col-plan,
     .accounts-table-v2 .col-checkout,
+    .accounts-table-v2 .col-gcash,
     .accounts-table-v2 .col-mail,
     .accounts-table-v2 .col-trial,
     .accounts-table-v2 .col-agent,
@@ -2349,6 +2353,7 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="一次查询当前套餐、是否已开通 Plus，以及 Free 账号是否可试用 Plus">检测套餐/Plus/试用</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedCheckoutKindV2" disabled title="使用下方检测代理创建一次最小 Plus Checkout，只判断返回 oaics 或 cs_live，不执行支付确认">检测 OAICS/CSLIVE</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedGcashV2" disabled title="使用 gc查询代理池 的 PH 出口代理创建一次最小 PH/PHP Checkout，读取是否支持 GCash 支付方式，不执行支付确认">查询GC</button>
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">邮箱检测</span>
@@ -2380,7 +2385,7 @@
         <table class="accounts-table-v2">
           <colgroup>
             <col class="col-check"><col class="col-id"><col class="col-email"><col class="col-profile">
-            <col class="col-token"><col class="col-plan"><col class="col-checkout"><col class="col-status">
+            <col class="col-token"><col class="col-plan"><col class="col-checkout"><col class="col-gcash"><col class="col-status">
             <col class="col-time"><col class="col-sms">
           </colgroup>
           <thead>
@@ -2392,6 +2397,7 @@
               <th class="col-token">凭据</th>
               <th class="col-plan">套餐</th>
               <th class="col-checkout" title="OpenAI Checkout 返回的会话类型">Checkout类型</th>
+              <th class="col-gcash" title="PH/PHP Checkout 是否返回 GCash 支付方式">GC</th>
               <th class="col-status">Codex</th>
               <th class="col-time">存活小时</th>
               <th class="col-sms">接码授权</th>
@@ -4005,10 +4011,13 @@ async function pollAccountPlanStatuses() {
         const isAgenting = ['queued', 'running'].includes(item.codex_agent_status);
         const wasOaicsExtracting = ['queued', 'running'].includes(account?.oaics_extract_status);
         const isOaicsExtracting = ['queued', 'running'].includes(item.oaics_extract_status);
+        const wasGcashChecking = ['queued', 'running'].includes(account?.gcash_status);
+        const isGcashChecking = ['queued', 'running'].includes(item.gcash_status);
         if ((wasChecking && !isChecking) || planCompletedChanged) needsFullReload = true;
         if (wasKindChecking && !isKindChecking) needsFullReload = true;
         if (wasAgenting && !isAgenting) needsFullReload = true;
         if (wasOaicsExtracting && !isOaicsExtracting) needsFullReload = true;
+        if (wasGcashChecking && !isGcashChecking) needsFullReload = true;
         Object.assign(account, item);
       });
       planStatusRevision = snapshot.revision || '';
@@ -4090,6 +4099,32 @@ function _discountLabel(r) {
   if (type === 'percentage' && !Number.isNaN(n)) { const v = Number.isInteger(n) ? String(n) : String(n); return `${v}%折扣`; }
   if (!Number.isNaN(n)) return `${n}折扣`;
   return `${amount}折扣`;
+}
+function _gcashBadge(r) {
+  const status = String(r.gcash_status || '').toLowerCase();
+  if (status === 'queued') return '<span class="pill status-running" title="已排队；通过 PH 代理创建 Checkout 只读 GCash，不会 confirm">待检测</span>';
+  if (status === 'running') return '<span class="pill status-running" title="正在通过 PH 代理创建 Checkout 读取 GCash 支付方式；不会 confirm">检测中</span>';
+  if (status === 'failed') {
+    return `<span class="pill status-failed" title="${esc(r.gcash_error || 'GCash 检测失败')}">失败</span>`;
+  }
+  if (r.gcash_eligible === true) {
+    const title = [
+      r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '',
+      r.gcash_payment_method_id ? `payment_method: ${r.gcash_payment_method_id}` : '',
+      `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
+      '支持 GCash 支付；未执行 confirm',
+    ].filter(Boolean).join('；');
+    return `<span class="pill status-available" title="${esc(title)}">有 GC</span>`;
+  }
+  if (status === 'success') {
+    const title = [
+      r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '',
+      `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
+      '未发现 cpmt_ GCash 支付方式；未执行 confirm',
+    ].filter(Boolean).join('；');
+    return `<span class="pill status-used" title="${esc(title)}">无 GC</span>`;
+  }
+  return '<span class="pill status-used" title="尚未检测 GCash 资格；选中后点击上方“查询GC”">未检测</span>';
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();
@@ -4385,6 +4420,7 @@ function renderAccounts() {
       <td class="col-token">${_tokenCellV2(r)}</td>
       <td class="col-plan">${_planAndMailCell(r)}</td>
       <td class="col-checkout">${_checkoutKindBadge(r)}</td>
+      <td class="col-gcash">${_gcashBadge(r)}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
       <td class="col-time">${_accountCreatedCell(r)}</td>
       <td class="col-sms">${_smsOauthAction(r)}</td>
@@ -4392,7 +4428,7 @@ function renderAccounts() {
 
   const bodyV2 = $('#accountsBodyV2');
   if (bodyV2) {
-    bodyV2.innerHTML = rows.map(rowHtmlV2).join('') || '<tr><td colspan="10" style="text-align:center;color:#909399;padding:28px;">暂无账号</td></tr>';
+    bodyV2.innerHTML = rows.map(rowHtmlV2).join('') || '<tr><td colspan="11" style="text-align:center;color:#909399;padding:28px;">暂无账号</td></tr>';
   }
   updateAccountSelectionUi(rows);
   _renderPager('accounts', total);
@@ -4472,7 +4508,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const archiveLabel = SHOW_ARCHIVED_ACCOUNTS ? '恢复选中' : '归档选中';
   const archiveTitle = SHOW_ARCHIVED_ACCOUNTS ? '把选中的归档账号恢复到默认账号列表' : '归档选中的账号；默认账号列表将不再查询/显示这些账号';
   const v2Ids = [
-    'btnCheckSelectedPlansV2', 'btnCheckSelectedCheckoutKindV2', 'btnCheckSelectedAccountMailV2',
+    'btnCheckSelectedPlansV2', 'btnCheckSelectedCheckoutKindV2', 'btnCheckSelectedGcashV2', 'btnCheckSelectedAccountMailV2',
    'btnExtractSelectedOaicsV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
@@ -5422,6 +5458,34 @@ async function checkSelectedCheckoutKinds() {
   }
 }
 
+async function checkSelectedGcash() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  const workers = Math.min(8, getCodexBulkWorkers());
+  if (!confirm(`确定查询选中的 ${ids.length} 个账号的 GCash 资格吗？\n\n每个账号通过 gc查询代理池 的 PH 出口代理创建一次最小 PH/PHP Checkout，只读取是否返回 GCash 支付方式（cpmt_），不执行税区、PaymentMethod、ctoken 或 confirm。\n\n并发线程数：${workers}`)) return;
+  const btn = $('#btnCheckSelectedGcashV2');
+  if (!btn) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'GC查询中…';
+  try {
+    const r = await api('/api/accounts/check-gcash-bulk', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids, workers}),
+    });
+    const skipped = (r.skipped_count || 0) + (r.busy_count || 0) + (r.failed_count || 0);
+    const firstProblem = (r.failed?.[0]?.error || r.skipped?.[0]?.reason || r.busy?.[0]?.error || '').trim();
+    showToast(`已入队 ${r.started_count || 0} 个 GCash 检测${skipped ? `，跳过/忙碌/失败 ${skipped} 个` : ''}${firstProblem ? `：${firstProblem}` : ''}；不会执行 confirm`);
+    await pollAccountPlanStatuses();
+  } catch(err) {
+    showToast('GCash 检测失败: ' + err.message);
+  } finally {
+    btn.textContent = old;
+    updateAccountSelectionUi();
+  }
+}
+
 async function extractSelectedOaics() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (!ids.length) { showToast('请先选择账号'); return; }
@@ -5750,6 +5814,7 @@ async function findSelectedAccountsInEmailPool() {
   });
   bind('btnCheckSelectedPlansV2', checkSelectedPlans);
   bind('btnCheckSelectedCheckoutKindV2', checkSelectedCheckoutKinds);
+  bind('btnCheckSelectedGcashV2', checkSelectedGcash);
   bind('btnExtractSelectedOaicsV2', extractSelectedOaics);
   bind('btnCopyAllOaicsLinksV2', copyAllOaicsLinks);
   bind('btnCheckSelectedAccountMailV2', e => checkAccountMailboxes({all:false}, e.currentTarget));
@@ -7423,25 +7488,37 @@ function renderDetectionProxyPanelV2(fields) {
   const planActive = byKey.PLAN_CHECK_PROXY_ACTIVE;
   const checkoutProfiles = byKey.CHECKOUT_CHECK_PROXY_PROFILES;
   const checkoutActive = byKey.CHECKOUT_CHECK_PROXY_ACTIVE;
-  if (!planProfiles || !planActive || !checkoutProfiles || !checkoutActive) return '';
+  const gcProfiles = byKey.GC_CHECK_PROXY_PROFILES;
+  if (!gcProfiles) return '';
+  const checkoutCard = (checkoutProfiles && checkoutActive) ? `
+    <section class="detection-proxy-card-v2" aria-label="Checkout 检测代理">
+      <h4>Checkout 检测代理</h4>
+      <p>只用于 OAICS / CSLIVE 检测，不与套餐检测共用。</p>
+      ${renderConfigPlainFieldV2(checkoutProfiles)}
+      ${renderConfigPlainFieldV2(checkoutActive)}
+    </section>
+  ` : '';
+  const planCard = (planProfiles && planActive) ? `
+    <section class="detection-proxy-card-v2" aria-label="套餐检测代理">
+      <h4>套餐 / Plus / 试用检测代理</h4>
+      <p>只用于“检测套餐/Plus/试用”，不会用于 Checkout 检测。</p>
+      ${renderConfigPlainFieldV2(planProfiles)}
+      ${renderConfigPlainFieldV2(planActive)}
+    </section>
+  ` : '';
   return `
     <div class="detection-proxy-panel-v2">
       <div class="detection-proxy-panel-v2-head">
         <div><b>检测代理（套餐与 Checkout 完全分离）</b></div>
-        <span>填写多条后，从下拉框选择当前线路</span>
+        <span>填写多条后，从下拉框选择当前线路；GCash 代理池为多行列表</span>
       </div>
       <div class="detection-proxy-grid-v2">
-        <section class="detection-proxy-card-v2" aria-label="套餐检测代理">
-          <h4>套餐 / Plus / 试用检测代理</h4>
-          <p>只用于“检测套餐/Plus/试用”，不会用于 Checkout 检测。</p>
-          ${renderConfigPlainFieldV2(planProfiles)}
-          ${renderConfigPlainFieldV2(planActive)}
-        </section>
-        <section class="detection-proxy-card-v2" aria-label="Checkout 检测代理">
-          <h4>Checkout 检测代理</h4>
-          <p>只用于 OAICS / CSLIVE 检测，不与套餐检测共用。</p>
-          ${renderConfigPlainFieldV2(checkoutProfiles)}
-          ${renderConfigPlainFieldV2(checkoutActive)}
+        ${planCard}
+        ${checkoutCard}
+        <section class="detection-proxy-card-v2" aria-label="GCash 检测代理">
+          <h4>GCash 检测代理</h4>
+          <p>只用于账号页“查询GC”，需 PH 出口代理；每行一个，按钮按行轮询调用。</p>
+          ${renderConfigPlainFieldV2(gcProfiles)}
         </section>
       </div>
     </div>

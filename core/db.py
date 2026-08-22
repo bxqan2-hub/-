@@ -1310,6 +1310,96 @@ def recover_interrupted_checkout_kind_checks() -> int:
         return recovered
 
 
+def claim_account_gcash(acc_id: int, trigger: str = "manual") -> bool:
+    """Atomically reserve a non-confirming GCash eligibility detection task."""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("gcash_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "gcash_queued_at" if current_status == "queued" else "gcash_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["gcash_status"] = "queued"
+        row["gcash_ok"] = False
+        row["gcash_eligible"] = False
+        row["gcash_trigger"] = str(trigger or "manual")
+        row["gcash_payment_method_id"] = ""
+        row["gcash_error"] = None
+        row["gcash_queued_at"] = now
+        row["gcash_started_at"] = None
+        row["gcash_completed_at"] = None
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_gcash_running(acc_id: int) -> bool:
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("gcash_status") not in {"queued", "running"}:
+            return False
+        row["gcash_status"] = "running"
+        row["gcash_started_at"] = _now()
+        row["gcash_error"] = None
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def update_account_gcash(acc_id: int, result: dict | None = None) -> bool:
+    """Persist GCash threshold metadata only; never the AT or Checkout URL."""
+    result = result or {}
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        gcash = bool(result.get("gcash"))
+        ok = bool(result.get("ok")) or gcash
+        row["gcash_status"] = "success" if ok else "failed"
+        row["gcash_ok"] = ok
+        row["gcash_eligible"] = gcash
+        row["gcash_payment_method_id"] = str(result.get("custom_payment_method_id") or "")[:80]
+        row["gcash_checkout_country"] = str(result.get("checkout_country") or "PH")[:8]
+        row["gcash_checkout_currency"] = str(result.get("checkout_currency") or "PHP")[:8]
+        row["gcash_checked_at"] = result.get("checked_at") or _now()
+        row["gcash_completed_at"] = _now()
+        row["gcash_error"] = None if ok else str(result.get("error") or "GCash 检测失败")[:500]
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_gcash_checks() -> int:
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("gcash_status") not in {"queued", "running"}:
+                continue
+            row["gcash_status"] = "failed"
+            row["gcash_ok"] = False
+            row["gcash_eligible"] = False
+            row["gcash_error"] = "WebUI 重启导致 GCash 检测中断，请重新检测"
+            row["gcash_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
 def claim_account_oaics_extract(acc_id: int, trigger: str = "manual") -> bool:
     with _LOCK:
         accounts = _load_accounts()
@@ -1657,6 +1747,9 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "checkout_kind_provider", "checkout_kind_processor",
         "checkout_kind_session_prefix", "checkout_kind_confirm_sent",
         "checkout_kind_checked_at", "checkout_kind_error",
+        "gcash_status", "gcash_ok", "gcash_eligible",
+        "gcash_payment_method_id", "gcash_checkout_country", "gcash_checkout_currency",
+        "gcash_checked_at", "gcash_error", "gcash_completed_at",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error",
@@ -1719,6 +1812,9 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     "plus_trial_eligible": row.get("plus_trial_eligible"),
                     "checkout_kind_status": row.get("checkout_kind_status"),
                     "checkout_kind": row.get("checkout_kind"),
+                    "gcash_status": row.get("gcash_status"),
+                    "gcash_ok": row.get("gcash_ok"),
+                    "gcash_eligible": row.get("gcash_eligible"),
                     "oaics_extract_status": row.get("oaics_extract_status"),
                     "oaics_extract_ok": row.get("oaics_extract_ok"),
                     "oaics_extract_error": row.get("oaics_extract_error"),

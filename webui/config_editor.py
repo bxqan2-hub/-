@@ -18,7 +18,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES",
-    "CHECKOUT_CHECK_PROXY_PROFILES", "PAYPAL_OAICS_PROXY_PROFILES",
+    "CHECKOUT_CHECK_PROXY_PROFILES", "GC_CHECK_PROXY_PROFILES",
+    "PAYPAL_OAICS_PROXY_PROFILES",
 }
 
 
@@ -746,6 +747,11 @@ EDITABLE_FIELDS = [
     {
         "key": "CHECKOUT_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
         "label": "Checkout检测当前线路", "help": "从 Checkout 检测代理列表选择；只影响 OAICS/CSLIVE 检测",
+    },
+    {
+        "key": "GC_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "gc查询代理池", "help": "GCash 资格检测专用 PH 出口代理；每行一个，支持 名称|代理 或 名称|API。只影响账号页“查询GC”",
+        "storage": "env", "secret": True,
     },
     {
         "key": "PAYPAL_OAICS_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",

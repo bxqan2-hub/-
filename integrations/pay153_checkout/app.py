@@ -3275,6 +3275,128 @@ def health():
     })
 
 
+def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
+    """Create the smallest PH/PHP Plus Checkout and read whether GCash is offered.
+
+    Never progresses past the tax-address step: it stops as soon as
+    ``custom_payment_methods`` is readable, so no PaymentMethod confirm,
+    ctoken, or payment-state advance is ever triggered. Backend reports
+    ``gcash`` when a ``cpmt_*`` method appears on the PH Checkout.
+    """
+    data = data if isinstance(data, dict) else {}
+    token_raw = str(data.get("token") or "").strip()
+    if not token_raw:
+        return {"ok": False, "gcash": False, "error": "缺少 AT/access_token"}, 400
+    try:
+        token, meta = extract_access_token(token_raw)
+    except Exception as exc:
+        return {"ok": False, "gcash": False, "error": f"AT 解析失败：{exc}"}, 400
+    proxy = str(data.get("proxy") or "").strip()
+    proxy_source = "request" if proxy else "direct"
+    if proxy:
+        try:
+            proxy = normalize_proxy(proxy)
+        except ValueError as exc:
+            return {"ok": False, "gcash": False, "error": f"代理格式错误：{exc}"}, 400
+    device_id = str(uuid.uuid4())
+    did = str(uuid.uuid4())
+    options = {
+        "plan": "plus",
+        # "detection" selects the generic custom Checkout response; it does not
+        # run Kakao/Stripe/PayPal processing and never confirms a method.
+        "link_type": "detection",
+        "country": "PH",
+        "currency": "PHP",
+        "checkout_country": "PH",
+        "checkout_currency": "PHP",
+        "use_promo": False,
+    }
+    try:
+        created = create_checkout(
+            token,
+            checkout_payload(options, meta),
+            proxy,
+            device_id,
+            did,
+            lambda _message: None,
+            use_sen=True,
+            use_so=True,
+        )
+        checkout = dict(created.get("data") or {})
+        session_id = str(checkout.get("checkout_session_id") or "")
+        processor = (
+            str(checkout.get("processor_entity") or "").strip()
+            or ("openai_llc" if str(checkout.get("checkout_country") or "").strip().upper() == "US" else "openai_ie")
+        )
+        if not session_id or not str(session_id).startswith("oaics_"):
+            return {
+                "ok": False, "gcash": False,
+                "error": "当前账号未返回 OAICS 自定义 Checkout，无法读取 GCash 支付方式"
+                        if session_id else "创建 Checkout 失败：未返回 Session",
+                "session_prefix": session_id[:16],
+            }, 422
+        http = created.get("http")
+        if http is None:
+            return {"ok": False, "gcash": False, "error": "创建 Checkout 未提供会话"}, 502
+        # OAICS custom methods can publish a moment after the Checkout itself
+        # becomes readable; poll briefly before submitting PH taxes.
+        custom_state = fetch_custom_checkout_session(http, token, session_id, processor, device_id)
+        custom_method_id = next(
+            (str(item.get("id") or "") for item in (custom_state.get("custom_payment_methods") or [])
+             if str(item.get("id") or "").startswith("cpmt_")), "",
+        )
+        for poll in range(1, 4):
+            if custom_method_id:
+                break
+            time.sleep(0.8 * poll)
+            custom_state = fetch_custom_checkout_session(http, token, session_id, processor, device_id)
+            custom_method_id = next(
+                (str(item.get("id") or "") for item in (custom_state.get("custom_payment_methods") or [])
+                 if str(item.get("id") or "").startswith("cpmt_")), "",
+            )
+        if not custom_method_id:
+            # Submit PH billing first; some accounts only surface GCash after the
+            # tax address is set (matches the extraction flow).
+            billing = default_billing("PH", meta.get("email") or "", real_random=True)
+            try:
+                tax_checkout = submit_custom_checkout_taxes(
+                    http, token, session_id, processor, billing,
+                    custom_checkout_currency(custom_state) or "PHP", device_id,
+                )
+            except Exception:
+                tax_checkout = {}
+            if tax_checkout:
+                custom_state = tax_checkout
+            custom_method_id = next(
+                (str(item.get("id") or "") for item in (custom_state.get("custom_payment_methods") or [])
+                 if str(item.get("id") or "").startswith("cpmt_")), "",
+            )
+        gcash = bool(custom_method_id)
+        return {
+            "ok": gcash,
+            "gcash": gcash,
+            "custom_payment_method_id": custom_method_id,
+            "checkout_provider": str(checkout.get("checkout_provider") or ""),
+            "processor_entity": processor,
+            "session_prefix": session_id[:32],
+            "confirm_sent": False,
+            "promo_update_sent": False,
+            "proxy_source": proxy_source,
+            "checkout_country": "PH",
+            "checkout_currency": custom_checkout_currency(custom_state) or "PHP",
+            "checked_at": int(time.time()),
+            "error": None if gcash else "当前 PH Checkout 未返回 GCash 支付方式",
+        }, (200 if gcash else 422)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "gcash": False,
+            "confirm_sent": False,
+            "promo_update_sent": False,
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+        }, 502
+
+
 def detect_checkout_kind(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
     """Create the smallest DE/EUR Plus Checkout and classify its backend."""
     data = data if isinstance(data, dict) else {}
@@ -3350,6 +3472,13 @@ def detect_checkout_kind(data: dict[str, Any] | None) -> tuple[dict[str, Any], i
 def checkout_kind():
     """HTTP compatibility wrapper for the single-port in-process detector."""
     payload, status = detect_checkout_kind(request.get_json(silent=True) or {})
+    return jsonify(payload), status
+
+
+@app.post("/api/gcash")
+def gcash():
+    """HTTP compatibility wrapper for the in-process GCash eligibility detector."""
+    payload, status = detect_gcash(request.get_json(silent=True) or {})
     return jsonify(payload), status
 
 
