@@ -277,6 +277,44 @@ class FlysmsPickupTests(unittest.TestCase):
             )
         self.assertEqual(code, "398154")
 
+    def test_polling_wordck_mailtop_allows_same_code_from_new_minute(self):
+        clock = [0.0]
+        html = """
+        <a class="mail" href="/m/new">
+          <div class="mailtop"><strong>ChatGPT</strong><span>2026/08/22 22:12</span></div>
+          <div class="subject">ChatGPT temporary login code</div>
+          <div>Your verification code is 398154</div>
+        </a>
+        <a class="mail" href="/m/old">
+          <div class="mailtop"><strong>ChatGPT</strong><span>2026/08/22 22:11</span></div>
+          <div class="subject">ChatGPT temporary login code</div>
+          <div>Your verification code is 398154</div>
+        </a>
+        """
+
+        class WordckSameCodeSession:
+            def get(self, *_args, **_kwargs):
+                return FakeResponse(text=html)
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        account = GenericApiEmailAccount("a@icloud.com", "https://mail.wordck.top/messages/test")
+        sent_at = datetime(2026, 8, 22, 22, 11, 58).timestamp()
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", WordckSameCodeSession), \
+             patch("core.generic_api_mail_client.time.time", side_effect=lambda: clock[0]), \
+             patch("core.generic_api_mail_client.time.sleep", side_effect=advance):
+            code = fetch_latest_otp(
+                account.email,
+                after_ts=sent_at,
+                max_wait=5,
+                poll_interval=1,
+                settle_seconds=0,
+                exclude_codes={"398154"},
+            )
+        self.assertEqual(code, "398154")
+
     def test_polling_stops_when_browser_has_advanced(self):
         account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")
         session = FakeSession()

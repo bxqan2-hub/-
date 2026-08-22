@@ -453,7 +453,13 @@ def _parse_generic_api_ts(value) -> float | None:
     except Exception:
         pass
     # 常见字符串格式
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+    ):
         try:
             return datetime.strptime(raw[:19], fmt).timestamp()
         except Exception:
@@ -689,20 +695,22 @@ def _extract_inline_messages_html_otp(
             card,
             flags=re.DOTALL | re.IGNORECASE,
         )
-        if not date_m:
-            # wordck.top 的 <div class="mailtop"><strong>ChatGPT</strong><span>DATE</span></div>
-            # 日期在 mailtop 里的 <span>，不在带 class 的 div 上。
-            date_tail_m = re.search(
-                r"<div\b[^>]*class=[\"'][^\"']*mailtop[^\"']*[\"'][^>]*>(.*?)</div>",
-                card,
+        # wordck.top 的 <div class="mailtop"><strong>ChatGPT</strong><span>DATE</span></div>
+        # 会先命中上面的 mailtop 容器；必须继续取内部 span，否则文本会变成
+        # "ChatGPT 2026/08/..."，时间解析失败，同数字的新邮件就会被历史码过滤。
+        date_tail_m = re.search(
+            r"<div\b[^>]*class=[\"'][^\"']*mailtop[^\"']*[\"'][^>]*>(.*?)</div>",
+            card,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if date_tail_m:
+            nested_date_m = re.search(
+                r"<span\b[^>]*>(\d{4}[/-]\d{1,2}[/-]\d{1,2}[^<]*)</span>",
+                date_tail_m.group(1),
                 flags=re.DOTALL | re.IGNORECASE,
             )
-            if date_tail_m:
-                date_m = re.search(
-                    r"<span\b[^>]*>(\d{4}/\d{1,2}/\d{1,2}[^<]*)</span>",
-                    date_tail_m.group(1),
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
+            if nested_date_m:
+                date_m = nested_date_m
         from_m = re.search(
             r"<div\b[^>]*class=[\"'][^\"']*(?:meta|\bfr\b)[^\"']*[\"'][^>]*>(.*?)</div>",
             card,
