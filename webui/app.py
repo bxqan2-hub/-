@@ -1253,6 +1253,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         availability without confirming or starting any payment method."""
         from core import detection_proxy
         from config import proxy as proxy_cfg
+        import random
 
         data = request.get_json(silent=True) or {}
         ids = data.get("account_ids") or data.get("ids") or []
@@ -1260,20 +1261,20 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
         if len(ids) > 500:
             return jsonify({"ok": False, "error": "单次最多检测 500 个账号"}), 400
+        max_workers = 100
         try:
-            workers = _positive_worker_count(data.get("workers"), 6)
+            workers = _positive_worker_count(data.get("workers"), 50)
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
+        workers = max(1, min(workers, max_workers, len(ids)))
         # GCash 探测必须走 PH 出口；代理池为设置在“gc查询代理池”的 PH 代理列表。
         pool_specs = detection_proxy.parse_detection_proxy_pool(
             getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
         )
         if not pool_specs:
             return jsonify({"ok": False, "error": "尚未配置 gc查询代理池（PH 出口代理）"}), 409
-        profiles = detection_proxy.detection_proxy_profiles(pool_specs)
-        active = str(getattr(proxy_cfg, "GC_CHECK_PROXY_ACTIVE", "") or "").strip()
-        selected = next((item for item in profiles if item["key"] == active or item["label"] == active), None)
-        ordered_specs = [str((selected or profiles[0])["spec"])] if selected else pool_specs
+        if len(pool_specs) < workers:
+            workers = len(pool_specs)
 
         executor = gcash_service.get_executor(workers)
         started, busy, failed, skipped = [], [], [], []
@@ -1295,7 +1296,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             if not token:
                 skipped.append({"id": account_id, "email": account.get("email"), "reason": "缺少 AT/access_token"})
                 continue
-            proxy_spec = ordered_specs[0]
+            proxy_spec = random.choice(pool_specs)
             proxy_url = ""
             try:
                 proxy_url = detection_proxy.resolve_detection_proxy(proxy_spec) or ""

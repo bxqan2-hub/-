@@ -4104,9 +4104,7 @@ function _gcashBadge(r) {
   const status = String(r.gcash_status || '').toLowerCase();
   if (status === 'queued') return '<span class="pill status-running" title="已排队；通过 PH 代理创建 Checkout 只读 GCash，不会 confirm">待检测</span>';
   if (status === 'running') return '<span class="pill status-running" title="正在通过 PH 代理创建 Checkout 读取 GCash 支付方式；不会 confirm">检测中</span>';
-  if (status === 'failed') {
-    return `<span class="pill status-failed" title="${esc(r.gcash_error || 'GCash 检测失败')}">失败</span>`;
-  }
+  // 只关心“有没有 GCash”；失败/无资格统一显示“无 GC”，不再显示失败红标。
   if (r.gcash_eligible === true) {
     const title = [
       r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '',
@@ -4114,17 +4112,16 @@ function _gcashBadge(r) {
       `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
       '支持 GCash 支付；未执行 confirm',
     ].filter(Boolean).join('；');
-    return `<span class="pill status-available" title="${esc(title)}">有 GC</span>`;
+    return `<span class="pill status-available" title="${esc(title)}">有GC</span>`;
   }
-  if (status === 'success') {
-    const title = [
-      r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '',
-      `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-      '未发现 cpmt_ GCash 支付方式；未执行 confirm',
-    ].filter(Boolean).join('；');
-    return `<span class="pill status-used" title="${esc(title)}">无 GC</span>`;
-  }
-  return '<span class="pill status-used" title="尚未检测 GCash 资格；选中后点击上方“查询GC”">未检测</span>';
+  const reason = (status === 'failed' && r.gcash_error) ? r.gcash_error : '未发现 cpmt_ GCash 支付方式';
+  const title = [
+    status === 'success' || status === 'failed' ? `检测: ${r.gcash_checked_at || ''}` : '',
+    `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
+    reason,
+    '未执行 confirm',
+  ].filter(Boolean).join('；');
+  return `<span class="pill status-used" title="${esc(title)}">无GC</span>`;
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();
@@ -5461,8 +5458,9 @@ async function checkSelectedCheckoutKinds() {
 async function checkSelectedGcash() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const workers = Math.min(8, getCodexBulkWorkers());
-  if (!confirm(`确定查询选中的 ${ids.length} 个账号的 GCash 资格吗？\n\n每个账号通过 gc查询代理池 的 PH 出口代理创建一次最小 PH/PHP Checkout，只读取是否返回 GCash 支付方式（cpmt_），不执行税区、PaymentMethod、ctoken 或 confirm。\n\n并发线程数：${workers}`)) return;
+  // GCash 检测无滑块挑战，100 条代理时可满并发；后端会按账号数/代理池数量自动收敛。
+  const workers = Math.min(ids.length, 100);
+  if (!confirm(`确定查询选中的 ${ids.length} 个账号的 GCash 资格吗？\n\n每个账号通过 gc查询代理池 随机挑一条 PH 出口代理创建最小 PH/PHP Checkout，只读取是否返回 GCash 支付方式（cpmt_），不执行税区、PaymentMethod、ctoken 或 confirm。\n\n并发线程数：${workers}`)) return;
   const btn = $('#btnCheckSelectedGcashV2');
   if (!btn) return;
   const old = btn.textContent;

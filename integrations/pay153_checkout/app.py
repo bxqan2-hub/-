@@ -3312,6 +3312,9 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         "use_promo": False,
     }
     try:
+        # GCash 资格检测只读取 custom_payment_methods，不执行 PaymentMethod
+        # confirm/start，因此不需要 Sentinel 挑战 token；关闭后大幅减少每次
+        # 检测的耗时（省掉 ProxySentinel 的 TLS + asyncio.run + 0.6s*2 重试）。
         created = create_checkout(
             token,
             checkout_payload(options, meta),
@@ -3319,8 +3322,8 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
             device_id,
             did,
             lambda _message: None,
-            use_sen=True,
-            use_so=True,
+            use_sen=False,
+            use_so=False,
         )
         checkout = dict(created.get("data") or {})
         session_id = str(checkout.get("checkout_session_id") or "")
@@ -3345,10 +3348,10 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
             (str(item.get("id") or "") for item in (custom_state.get("custom_payment_methods") or [])
              if str(item.get("id") or "").startswith("cpmt_")), "",
         )
-        for poll in range(1, 4):
+        for poll in range(1, 3):
             if custom_method_id:
                 break
-            time.sleep(0.8 * poll)
+            time.sleep(0.3 * poll)
             custom_state = fetch_custom_checkout_session(http, token, session_id, processor, device_id)
             custom_method_id = next(
                 (str(item.get("id") or "") for item in (custom_state.get("custom_payment_methods") or [])
