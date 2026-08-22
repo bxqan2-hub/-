@@ -27,14 +27,14 @@ _EXECUTOR_WORKERS = _DEFAULT_WORKERS
 _EXECUTOR = ThreadPoolExecutor(max_workers=_DEFAULT_WORKERS, thread_name_prefix="gcash-check")
 _RETIRED_EXECUTORS: list[ThreadPoolExecutor] = []
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
-# 代理轮换重试：遇到代理/连接/风控类失败换下一个代理，最多试 MAX_PROXY_RETRIES 个。
-# 无GC/确实无资格（探测成功）不重试。
+# 代理轮换重试：遇到代理/连接/风控类失败换下一个代理。
+# None = 无上限（遍历整个代理池，每条代理至多一次）；直到有确定结果为止。
 PROXY_RETRYABLE_HINTS = (
     "SSL", "ProxyError", "Connection", "timeout", "timed out",
     "Failed to perform", "OpenAI Checkout HTTP 400", "HTTP 400",
     "unusual activity", "502", "5xx",
 )
-MAX_PROXY_RETRIES = 5
+MAX_PROXY_RETRIES: int | None = None
 
 
 def _should_retry_with_next_proxy(result: dict) -> bool:
@@ -123,20 +123,31 @@ def _run_with_proxy_retry(
     account_id: int,
     access_token: str,
     proxies: list[str],
-    max_retries: int = MAX_PROXY_RETRIES,
+    max_retries: int | None = None,
 ) -> dict:
-    """Try each candidate proxy in order until GCash detection succeeds or is
-    definitively answered (eligible / confirmed no-eligible / account-level failure).
+    """Try candidate proxies until GCash detection reaches a definitive answer.
 
-    Only proxy/connection/risk-control class failures swap to the next proxy;
-    a successful probe that concludes "no GCash" is not retried.
+    ``max_retries=None`` walks the entire proxy pool once (each proxy tried at
+    most once) — effectively "unlimited", bounded only by pool size. Proxy /
+    connection / risk-control class failures advance to the next proxy; a
+    definitive result (eligible / confirmed no-eligible) or an account-level
+    failure (e.g. bad access token) stops immediately.
     """
     attempts: list[str] = []
-    total = max(1, min(int(max_retries or 0), len(proxies) or 1))
-    pool = list(proxies or [])
-    # 至少尝试一次；若只有一条代理则只跑一次。
+    pool = [p for p in (proxies or []) if p]
+    # None → 遍历整个池（每条代理至多一次）；指定数字 → 试探 min(n, 池长) 条。
+    if max_retries is None:
+        total = len(pool)
+    else:
+        try:
+            total = max(1, min(int(max_retries), len(pool) or 1))
+        except (TypeError, ValueError):
+            total = len(pool)
+    if total <= 0:
+        total = 1
+    last_result: dict = {"ok": False, "gcash": False}
     for idx in range(total):
-        proxy = pool[idx % len(pool)] if pool else None
+        proxy = pool[idx] if pool else None
         try:
             result = check_gcash(access_token, proxy=proxy)
         except Exception as exc:
@@ -148,13 +159,15 @@ def _run_with_proxy_retry(
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}",
             }
         attempts.append(str(proxy)[:64] if proxy else "direct")
+        last_result = result
         if not _should_retry_with_next_proxy(result):
             # 成功 / 确定无资格 / 账号级失败（不可换代理解决）→ 结束
             if result.get("gcash") or result.get("ok"):
                 result["retried_proxies"] = attempts
                 result["attempt_count"] = idx + 1
             return db.update_account_gcash(account_id, result) and result
-    # 全部代理都失败：记录尝试过的代理，方便用户看换了几次。
+    # 整个池子都试完仍有代理/风控类失败：记录尝试过的代理，方便用户看。
+    result = dict(last_result)
     result.setdefault("ok", False)
     result["gcash"] = False
     result["retried_proxies"] = attempts
@@ -172,7 +185,7 @@ def enqueue(
     trigger: str = "manual",
     proxy: str | None = None,
     proxies: list[str] | None = None,
-    max_retries: int = MAX_PROXY_RETRIES,
+    max_retries: int | None = MAX_PROXY_RETRIES,
     executor: ThreadPoolExecutor | None = None,
 ) -> dict:
     account_id = int(account_id)
