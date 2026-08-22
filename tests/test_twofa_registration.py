@@ -12,7 +12,9 @@ from core import account_export
 def _disable_real_security_checkpoint_writes(monkeypatch):
     """本模块使用伪账号验证状态机，禁止测试凭据写进工作区运行时文件。"""
     from core import registration_password
+    from config import twofa
 
+    monkeypatch.setattr(twofa, "ENABLE_2FA", False)
     monkeypatch.setattr(account_export, "_persist_activated_totp_checkpoint", lambda *args: True)
     monkeypatch.setattr(
         registration_password,
@@ -323,6 +325,94 @@ def test_reauth_navigation_http_error_fails_before_otp_wait() -> None:
         account_export._follow_reauth(Session(), "https://auth.openai.com/authorize/x")
     assert exc_info.value.code == "totp_reauth_navigation_failed"
     assert exc_info.value.http_status == 500
+
+
+def test_browser_reauth_fallback_reuses_current_driver_and_syncs_cookies(monkeypatch) -> None:
+    navigated = []
+    synced = []
+
+    class Driver:
+        current_url = "https://chatgpt.com/"
+
+        def get(self, url):
+            navigated.append(url)
+            self.current_url = "https://auth.openai.com/email-verification"
+
+        def execute_script(self, *_args):
+            return "Check your email for a verification code"
+
+        def find_elements(self, *_args):
+            return []
+
+    monkeypatch.setattr(
+        account_export,
+        "import_browser_cookies",
+        lambda session, driver, require_auth=False: synced.append(require_auth) or 3,
+    )
+
+    session = SimpleNamespace(blocked_until=9999999999.0, blocked_reason="Cloudflare challenge")
+    result = account_export._follow_reauth_with_driver(
+        session,
+        Driver(),
+        "https://auth.openai.com/authorize/x",
+        password="Stable-pass-1!",
+        timeout_seconds=15,
+    )
+
+    assert result == ("https://auth.openai.com/email-verification", False)
+    assert navigated == ["https://auth.openai.com/authorize/x"]
+    assert synced == [True]
+    assert session.blocked_until == 0.0
+    assert session.blocked_reason == ""
+
+
+def test_setup_2fa_uses_browser_fallback_only_for_protocol_403(monkeypatch) -> None:
+    from config import email as email_cfg
+    from config import twofa
+    import core.email_provider
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
+    monkeypatch.setattr(account_export, "human_delay", lambda *args, **kwargs: None)
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: "https://auth.openai.com/authorize/x")
+    monkeypatch.setattr(
+        account_export,
+        "_follow_reauth",
+        lambda *args: (_ for _ in ()).throw(
+            account_export.TwoFASetupError(
+                "totp_reauth",
+                "totp_reauth_navigation_failed",
+                "managed challenge",
+                http_status=403,
+            )
+        ),
+    )
+    fallback = []
+    monkeypatch.setattr(
+        account_export,
+        "_follow_reauth_with_driver",
+        lambda session, driver, url, password, **kwargs: fallback.append((driver, password))
+        or ("https://auth.openai.com/email-verification", False),
+    )
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
+    monkeypatch.setattr(account_export, "_validate_reauth_otp", lambda *args: "https://auth.openai.com/continue/x")
+    monkeypatch.setattr(account_export, "_exchange_new_token", lambda *args: "fresh-token")
+    monkeypatch.setattr(account_export, "_enroll_totp", lambda *args: ("JBSWY3DPEHPK3PXP", "sid"))
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
+    monkeypatch.setattr(account_export, "_activate_totp", lambda *args: True)
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: 200)
+
+    driver = object()
+    result = account_export.setup_2fa_result(
+        SimpleNamespace(),
+        "user@example.com",
+        driver=driver,
+        existing_password="Stable-pass-1!",
+    )
+
+    assert result.security_ok is True
+    assert fallback == [(driver, "Stable-pass-1!")]
 
 
 def test_reauth_callback_http_error_fails_before_session_fetch(monkeypatch) -> None:
@@ -680,7 +770,7 @@ def test_twofa_failure_payload_does_not_copy_arbitrary_exception_text() -> None:
 
 
 def test_setup_2fa_result_adds_password_when_enable_2fa_with_driver(monkeypatch) -> None:
-    """ENABLE_2FA=True + driver 时，TOTP 激活后会补设账号密码并透传结果。"""
+    """ENABLE_2FA=True + driver 时，必须先确认密码再开始 MFA。"""
     from config import email as email_cfg
     from config import twofa
 
@@ -688,7 +778,8 @@ def test_setup_2fa_result_adds_password_when_enable_2fa_with_driver(monkeypatch)
     monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
     monkeypatch.setattr(account_export, "human_delay", lambda *args, **kwargs: None)
     monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
-    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: "https://auth.openai.com/authorize/x")
+    flow_order = []
+    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: flow_order.append("totp_reauth") or "https://auth.openai.com/authorize/x")
     monkeypatch.setattr(account_export, "_follow_reauth", lambda *args: "https://auth.openai.com/email-verification")
     monkeypatch.setattr(account_export, "_validate_reauth_otp", lambda *args: "https://auth.openai.com/continue/x")
     monkeypatch.setattr(account_export, "_exchange_new_token", lambda *args: "fresh-token")
@@ -702,10 +793,12 @@ def test_setup_2fa_result_adds_password_when_enable_2fa_with_driver(monkeypatch)
     password_setup_calls: list[dict] = []
 
     def fake_setup_password(*, driver, session, email, password, totp_secret, timeout_seconds=120.0):
+        flow_order.append("password")
         password_setup_calls.append({"driver": driver, "password": password, "totp_secret": totp_secret})
         return {"ok": True, "status": "success", "stage": "password_done", "code": "password_setup_success", "message": "密码已补设", "password": password}
 
     monkeypatch.setattr(account_export, "_setup_password_with_driver", fake_setup_password)
+    monkeypatch.setattr(account_export, "import_browser_cookies", lambda *args, **kwargs: flow_order.append("cookie_sync") or 2)
 
     from core import roxy_registration
     from core import registration_password
@@ -738,12 +831,13 @@ def test_setup_2fa_result_adds_password_when_enable_2fa_with_driver(monkeypatch)
     assert len(password_setup_calls) == 1
     assert password_setup_calls[0]["driver"] is fake_driver
     assert password_setup_calls[0]["password"] == "Ab3!cdefgh123"
-    assert password_setup_calls[0]["totp_secret"] == "JBSWY3DPEHPK3PXP"
+    assert password_setup_calls[0]["totp_secret"] is None
     assert password_checkpoints == [("user@example.com", "Ab3!cdefgh123")]
+    assert flow_order[:3] == ["password", "cookie_sync", "totp_reauth"]
 
 
-def test_setup_2fa_result_keeps_secret_when_password_setup_fails(monkeypatch) -> None:
-    """补设密码失败不能影响账号保存与 TOTP Secret 返回。"""
+def test_setup_2fa_aborts_before_mfa_when_password_setup_fails(monkeypatch) -> None:
+    """密码未确认时不能继续 enroll/activate MFA。"""
     from config import email as email_cfg
     from config import twofa
 
@@ -751,11 +845,11 @@ def test_setup_2fa_result_keeps_secret_when_password_setup_fails(monkeypatch) ->
     monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
     monkeypatch.setattr(account_export, "human_delay", lambda *args, **kwargs: None)
     monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
-    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: "https://auth.openai.com/authorize/x")
+    monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: pytest.fail("password failure must stop before MFA reauth"))
     monkeypatch.setattr(account_export, "_follow_reauth", lambda *args: "https://auth.openai.com/email-verification")
     monkeypatch.setattr(account_export, "_validate_reauth_otp", lambda *args: "https://auth.openai.com/continue/x")
     monkeypatch.setattr(account_export, "_exchange_new_token", lambda *args: "fresh-token")
-    monkeypatch.setattr(account_export, "_enroll_totp", lambda *args: ("JBSWY3DPEHPK3PXP", "sid"))
+    monkeypatch.setattr(account_export, "_enroll_totp", lambda *args: pytest.fail("password failure must stop before TOTP enroll"))
     monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
     monkeypatch.setattr(account_export, "_activate_totp", lambda *args: True)
     monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: 200)
@@ -776,14 +870,11 @@ def test_setup_2fa_result_keeps_secret_when_password_setup_fails(monkeypatch) ->
         lambda *args: password_checkpoints.append(args) or True,
     )
 
-    result = account_export.setup_2fa_result(object(), "user@example.com", driver=object())
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export.setup_2fa_result(object(), "user@example.com", driver=object())
 
-    assert result.secret == "JBSWY3DPEHPK3PXP"
-    assert result.access_token == "fresh-token"
-    assert result.password is None  # 失败则不带密码
-    assert result.password_setup is not None
-    assert result.password_setup["ok"] is False
-    assert result.password_setup["code"] == "password_setup_failed"
+    assert exc_info.value.stage == "password_setup"
+    assert exc_info.value.code == "password_setup_failed"
     assert password_checkpoints == []
 
 

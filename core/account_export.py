@@ -598,6 +598,11 @@ _PASSWORD_SUCCESS_RE = re.compile(
     r"パスワード.*更新|비밀번호.*업데이트",
     re.IGNORECASE,
 )
+_BROWSER_CHALLENGE_RE = re.compile(
+    r"cloudflare|managed challenge|checking your browser|verify (?:you are )?human|"
+    r"just a moment|正在验证|验证您是真人|セキュリティチェック|보안 확인",
+    re.IGNORECASE,
+)
 
 _PASSWORD_REAUTH_JS = r"""
 async () => {
@@ -1151,6 +1156,137 @@ def _setup_password_with_driver(
     }
 
 
+def _follow_reauth_with_driver(
+    session: BrowserSession,
+    driver,
+    auth_url: str,
+    *,
+    password: str | None,
+    timeout_seconds: float = 45.0,
+) -> tuple[str, bool]:
+    """协议导航被 Cloudflare 拦截时，改用当前真实浏览器完成重认证导航。
+
+    返回 ``(final_url, completed_in_browser)``。通常浏览器会落到邮箱验证码页，
+    此时只同步 Cookie 并继续既有 OTP API；若浏览器已直接完成回调，则返回
+    ``completed_in_browser=True``，调用方直接从同步后的会话读取新 Token。
+    """
+    if driver is None:
+        raise TwoFASetupError(
+            "totp_reauth",
+            "totp_reauth_browser_required",
+            "2FA 重认证被风控拦截，且没有可复用的注册浏览器",
+        )
+    trusted_auth_url = _validate_trusted_openai_url(
+        auth_url,
+        stage="totp_reauth",
+        code="totp_reauth_url_untrusted",
+        message="2FA 浏览器重认证返回了非可信地址",
+    )
+    logger.warning("[2FA] 协议重认证被 HTTP 403 拦截，切换当前注册浏览器继续")
+    try:
+        if _is_playwright_page(driver):
+            driver.goto(trusted_auth_url, wait_until="domcontentloaded", timeout=30_000)
+        else:
+            driver.get(trusted_auth_url)
+    except Exception as exc:
+        raise TwoFASetupError(
+            "totp_reauth",
+            "totp_reauth_browser_navigation_failed",
+            "2FA 浏览器重认证页面加载失败",
+        ) from exc
+
+    def sync_and_resume_protocol() -> None:
+        imported = import_browser_cookies(session, driver, require_auth=True)
+        if int(imported or 0) <= 0:
+            raise TwoFASetupError(
+                "totp_reauth",
+                "totp_reauth_browser_cookie_sync_failed",
+                "浏览器通过重认证后没有同步到可用 Cookie",
+            )
+        # BrowserSession 会在协议 403 后熔断 900 秒。只有真实浏览器已经离开
+        # challenge 并同步登录 Cookie 后，才恢复同一会话的后续 OTP/enroll 请求。
+        try:
+            session.blocked_until = 0.0
+            session.blocked_reason = ""
+        except Exception:
+            pass
+
+    deadline = time.monotonic() + max(15.0, float(timeout_seconds or 45.0))
+    submitted_password = False
+    last_url = ""
+    while time.monotonic() < deadline:
+        last_url = _password_page_url(driver)
+        body = _password_body_text(driver)
+        if last_url:
+            _validate_trusted_openai_url(
+                last_url,
+                stage="totp_reauth",
+                code="totp_reauth_browser_url_untrusted",
+                message="2FA 浏览器重认证落点不可信",
+            )
+        code_fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+        password_fields = _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR)
+        parsed = urlparse(last_url) if last_url else None
+        host = str(getattr(parsed, "hostname", "") or "").lower()
+        path = str(getattr(parsed, "path", "") or "").lower()
+        query = parse_qs(str(getattr(parsed, "query", "") or "")) if parsed else {}
+
+        if "email-verification" in path or (
+            code_fields and not password_fields and bool(_PASSWORD_EMAIL_RE.search(body))
+        ):
+            sync_and_resume_protocol()
+            logger.info("[2FA] 浏览器已通过风控并到达邮箱验证码页")
+            return last_url, False
+
+        if password_fields and not submitted_password:
+            confirmed_password = str(password or "").strip()
+            if not confirmed_password:
+                raise TwoFASetupError(
+                    "totp_reauth",
+                    "totp_reauth_password_missing",
+                    "2FA 浏览器重认证要求密码，但本次注册没有已确认密码",
+                )
+            if not _password_submit_new_password(driver, password_fields, confirmed_password):
+                raise TwoFASetupError(
+                    "totp_reauth",
+                    "totp_reauth_password_submit_failed",
+                    "2FA 浏览器重认证密码提交失败",
+                )
+            submitted_password = True
+            time.sleep(1.0)
+            continue
+
+        if submitted_password and _PASSWORD_REJECTION_RE.search(body):
+            raise TwoFASetupError(
+                "totp_reauth",
+                "totp_reauth_password_rejected",
+                "2FA 浏览器重认证密码被拒绝",
+            )
+
+        completed_callback = bool(
+            (host == "chatgpt.com" or host.endswith(".chatgpt.com"))
+            and (
+                path.startswith("/api/auth/callback/openai")
+                or (
+                    str((query.get("action") or [""])[0]).lower() == "enable"
+                    and str((query.get("factor") or [""])[0]).lower() == "totp"
+                )
+            )
+        )
+        if completed_callback and not _BROWSER_CHALLENGE_RE.search(body):
+            sync_and_resume_protocol()
+            logger.info("[2FA] 浏览器已完成重认证回调并同步登录 Cookie")
+            return last_url, True
+
+        time.sleep(0.5 if not _BROWSER_CHALLENGE_RE.search(body) else 1.0)
+
+    raise TwoFASetupError(
+        "totp_reauth",
+        "totp_reauth_browser_timeout",
+        f"2FA 浏览器重认证超时 url={last_url}",
+    )
+
+
 def _validate_2fa_token(session: BrowserSession, access_token: str) -> int:
     """激活后用一个只读 ChatGPT API 验证新 token 仍可用。"""
     headers = session.get_chatgpt_headers(referer="https://chatgpt.com/")
@@ -1247,7 +1383,90 @@ def _setup_2fa_result(
     logger.info("开始设置 2FA")
     logger.info("=" * 60)
 
-    # 阶段一：重认证。先读取一次 generic/inbox_mate 当前缓存的验证码，
+    # 阶段一：开启安全设置后必须先确认密码，再进行 MFA 重认证。
+    # OTP-only 注册不会出现 create-account/password；旧顺序把补设密码放在
+    # TOTP activate 之后，导致 MFA 重认证先失败时密码永远没有执行。
+    password_setup: dict | None = None
+    configured_password = str(existing_password or "").strip() or None
+    try:
+        from core.registration_password import registration_password_required
+        require_password = registration_password_required()
+    except Exception:
+        require_password = True
+    if not require_password:
+        password_setup = {
+            "ok": True,
+            "status": "skipped",
+            "stage": "password_setup",
+            "code": "password_setup_disabled",
+            "message": "注册密码要求已关闭",
+            "http_status": None,
+        }
+    elif configured_password:
+        password_setup = {
+            "ok": True,
+            "status": "already_configured",
+            "stage": "password_setup",
+            "code": "password_already_configured",
+            "message": "注册密码页已完成，无需重复设置",
+            "http_status": None,
+        }
+        from core.registration_password import persist_confirmed_registration_password
+        password_setup["checkpoint_persisted"] = persist_confirmed_registration_password(
+            email,
+            configured_password,
+        )
+    else:
+        if driver is None:
+            raise TwoFASetupError(
+                "password_setup",
+                "password_driver_required",
+                "当前注册驱动没有可用浏览器页面，不能在 MFA 前补设密码",
+            )
+        try:
+            try:
+                from core.roxy_registration import _registration_password
+            except Exception:
+                from core.registration_password import registration_password as _registration_password
+            configured_password = str(desired_password or "").strip() or _registration_password()
+            logger.info("[2FA] 注册页未设置密码，先执行 post_login_add_password，再启用 MFA")
+            password_setup = _setup_password_with_driver(
+                driver=driver,
+                session=session,
+                email=email,
+                password=configured_password,
+                totp_secret=None,
+            )
+        except TwoFASetupError:
+            configured_password = None
+            raise
+        except Exception as exc:
+            configured_password = None
+            raise TwoFASetupError(
+                "password_setup",
+                "password_setup_failed",
+                f"补设密码异常：{type(exc).__name__}: {str(exc)[:160]}",
+            ) from exc
+        if not isinstance(password_setup, dict) or not bool(password_setup.get("ok")):
+            failure = password_setup if isinstance(password_setup, dict) else {}
+            configured_password = None
+            raise TwoFASetupError(
+                str(failure.get("stage") or "password_setup"),
+                str(failure.get("code") or "password_setup_failed"),
+                str(failure.get("message") or "补设密码未确认成功")[:180],
+                http_status=failure.get("http_status"),
+            )
+        logger.info("[2FA] 账号密码已先行补设成功")
+        from core.registration_password import persist_confirmed_registration_password
+        password_setup["checkpoint_persisted"] = persist_confirmed_registration_password(
+            email,
+            configured_password,
+        )
+        # 浏览器重认证可能刷新 session-token/Cloudflare Cookie；MFA 协议阶段
+        # 必须重新同步，而不是继续使用补设密码之前的旧 Cookie 快照。
+        import_browser_cookies(session, driver, require_auth=True)
+
+    # 阶段二：MFA 重认证。先读取一次 generic/inbox_mate 当前缓存的验证码，
     # 再记录时间边界并触发新邮件，避免把旧缓存当成本次 OTP。
     historical_otp_codes: set[str] = set()
     if otp_code is None and bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False)):
@@ -1255,10 +1474,21 @@ def _setup_2fa_result(
     reauth_otp_after_ts = time.time()
     auth_url = _trigger_reauth(session, email)
     human_delay("api")
-    _follow_reauth(session, auth_url)
+    browser_reauth_completed = False
+    try:
+        _follow_reauth(session, auth_url)
+    except TwoFASetupError as exc:
+        if exc.http_status != 403 or driver is None:
+            raise
+        _, browser_reauth_completed = _follow_reauth_with_driver(
+            session,
+            driver,
+            auth_url,
+            password=configured_password,
+        )
     human_delay("navigate")
 
-    if otp_code is None:
+    if not browser_reauth_completed and otp_code is None:
         if _email_cfg.USE_EMAIL_SERVICE:
             from core.email_provider import wait_for_otp
             logger.info("[2FA] 自动等待邮箱重认证 OTP...")
@@ -1285,13 +1515,32 @@ def _setup_2fa_result(
             logger.info("[2FA] 请检查邮箱，输入新收到的 6 位验证码")
             otp_code = input(">>> 2FA 验证码: ").strip()
 
-    human_delay("otp_input")
-    continue_url = _validate_reauth_otp(session, otp_code)
-    human_delay("api")
-    new_token = _exchange_new_token(session, continue_url)
-    human_delay("api")
+    if browser_reauth_completed:
+        try:
+            new_session = fetch_session(session)
+            new_token = str(new_session.get("accessToken") or "").strip()
+            setattr(session, "_twofa_session_expires", str(new_session.get("expires") or "").strip() or None)
+        except Exception as exc:
+            raise TwoFASetupError(
+                "totp_session",
+                "totp_session_refresh_failed",
+                "浏览器重认证完成后未取得新的 Session Token",
+            ) from exc
+        if not new_token:
+            raise TwoFASetupError(
+                "totp_session",
+                "totp_session_refresh_failed",
+                "浏览器重认证完成后 Session Token 为空",
+            )
+        logger.info("[2FA] 已从浏览器重认证会话取得新 Token")
+    else:
+        human_delay("otp_input")
+        continue_url = _validate_reauth_otp(session, otp_code)
+        human_delay("api")
+        new_token = _exchange_new_token(session, continue_url)
+        human_delay("api")
 
-    # 阶段二：enroll + activate
+    # 阶段三：enroll + activate
     secret, session_id = _enroll_totp(session, new_token)
     human_delay("form")
     _wait_for_totp_window()
@@ -1322,99 +1571,6 @@ def _setup_2fa_result(
         validation_code = "totp_token_validation_failed"
         validation_message = redact_otp_text(str(exc)[:240])
         logger.warning("[2FA] TOTP 已激活，但 Token 校验异常；保留 Secret：%s", type(exc).__name__)
-
-    # 阶段三：要求密码时，只有注册初始阶段没有密码才调用
-    # post_login_add_password；这避免对已完成 create-account/password 的账号重复改密。
-    password_setup = None
-    configured_password = str(existing_password or "").strip() or None
-    try:
-        from core.registration_password import registration_password_required
-        require_password = registration_password_required()
-    except Exception:
-        require_password = True
-    if not require_password:
-        password_setup = {
-            "ok": True,
-            "status": "skipped",
-            "stage": "password_setup",
-            "code": "password_setup_disabled",
-            "message": "注册密码要求已关闭",
-            "http_status": None,
-        }
-    elif configured_password:
-        password_setup = {
-            "ok": True,
-            "status": "already_configured",
-            "stage": "password_setup",
-            "code": "password_already_configured",
-            "message": "注册密码页已完成，无需重复设置",
-            "http_status": None,
-        }
-        from core.registration_password import persist_confirmed_registration_password
-        password_setup["checkpoint_persisted"] = persist_confirmed_registration_password(
-            email,
-            configured_password,
-        )
-    elif driver is None:
-        password_setup = {
-            "ok": False,
-            "status": "failed",
-            "stage": "password_setup",
-            "code": "password_driver_required",
-            "message": "当前注册驱动没有可用浏览器页面，无法补设密码",
-            "http_status": None,
-        }
-    else:
-        try:
-            # 保留 Roxy 旧调用点的可替换性；Roxy/Cloak/Playwright 的实现
-            # 最终都委托到 core.registration_password。
-            try:
-                from core.roxy_registration import _registration_password
-            except Exception:
-                from core.registration_password import registration_password as _registration_password
-            configured_password = str(desired_password or "").strip() or _registration_password()
-            logger.info("[2FA] TOTP 已激活，开始补设账号密码（post_login_add_password）...")
-            password_setup = _setup_password_with_driver(
-                driver=driver,
-                session=session,
-                email=email,
-                password=configured_password,
-                totp_secret=secret,
-            )
-            if bool(password_setup.get("ok")):
-                logger.info("[2FA] 账号密码已补设成功")
-                from core.registration_password import persist_confirmed_registration_password
-                password_setup["checkpoint_persisted"] = persist_confirmed_registration_password(
-                    email,
-                    configured_password,
-                )
-        except TwoFASetupError as exc:
-            password_setup = {
-                "ok": False,
-                "status": "failed",
-                "stage": exc.stage,
-                "code": exc.code,
-                "message": str(exc)[:180],
-                "http_status": exc.http_status,
-            }
-            configured_password = None
-        except Exception as exc:
-            password_setup = {
-                "ok": False,
-                "status": "failed",
-                "stage": "password_setup",
-                "code": "password_setup_failed",
-                "message": f"{type(exc).__name__}: {str(exc)[:180]}",
-                "http_status": None,
-            }
-            configured_password = None
-            logger.warning("[2FA] 补设密码异常（保留账号）：%s", type(exc).__name__)
-    if password_setup and not bool(password_setup.get("ok")):
-        configured_password = None
-        logger.warning(
-            "[2FA] 补设密码未完成（保留账号与 TOTP Secret）：code=%s",
-            password_setup.get("code") or "password_setup_failed",
-        )
 
     return TwoFASetupResult(
         secret=secret,

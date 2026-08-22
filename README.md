@@ -35,7 +35,7 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 - Roxy / Cloak 浏览器注册已兼容：
   - 填邮箱后直接进入邮箱验证码页；
   - 开启“密码 + 2FA”后，若先进入 `create-account/password`，自动设置密码再继续；
-  - 开启“密码 + 2FA”后，若服务端直接进入 OTP，完成 TOTP 后通过 `post_login_add_password` 补设密码；
+  - 开启“密码 + 2FA”后，若服务端直接进入 OTP，登录后先通过 `post_login_add_password` 补设密码，再 enroll/activate TOTP；
   - Browser Use / Skyvern 使用同一套密码页、邮箱 OTP/TOTP 重认证逻辑；
   - `about-you/profile` 页面直接输入年龄数字；
   - `about-you/profile` 页面输入年月日生日；
@@ -597,11 +597,13 @@ REGISTER_PASSWORD = "你的固定密码"
 
 2. 如果为空，自动生成 14 位强密码，包含大写、小写、数字、符号。
 
-如果注册页面没有密码步骤，Roxy/Cloak/Browser Use/Skyvern 会在 TOTP 激活后触发
-`post_login_add_password`，根据重认证页面选择邮箱验证码或认证器动态码，再提交同一个密码。
+如果注册页面没有密码步骤，Roxy/Cloak/Browser Use/Skyvern 会在 MFA 重认证前触发
+`post_login_add_password`，通过邮箱验证码确认并提交同一个密码；密码未确认时不会继续 enroll TOTP。
 初始密码已成功提交时不会重复改密。`protocol` 纯协议驱动没有可用浏览器页面，无法执行补密码；
 开启 2FA 时会在远端注册前直接停止，需改用 Roxy/Cloak/Browser Use/Skyvern。
 该联动还要求 `USE_EMAIL_SERVICE=true`，用于自动收取注册后重认证的第二封 OTP。
+MFA 协议重认证遇到 Cloudflare HTTP 403 时，会复用当前注册浏览器通过挑战、同步 Cookie，
+再继续邮箱 OTP 与 TOTP 激活，而不是直接结束任务。
 
 配置项：
 
@@ -693,7 +695,7 @@ accounts/20260709-10个-3线程/
   ↓
 进入 ChatGPT，读取 /api/auth/session accessToken
   ↓
-可选（ENABLE_2FA=true）：enroll/activate TOTP → 若注册页未设密码则补设
+可选（ENABLE_2FA=true）：若注册页未设密码则先补设 → MFA 重认证 → enroll/activate TOTP
   ↓
 可选 Codex OAuth
   ↓
