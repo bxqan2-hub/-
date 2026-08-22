@@ -2400,36 +2400,84 @@ def _is_login_password_page(driver) -> bool:
     return '/log-in/password' in url
 
 
-def _password_page_targets(driver) -> dict:
-    """Return the live password input and its exact form submit control."""
+def _click_signup_password_link_if_present(driver, timeout: int = 15) -> bool:
+    """从新账号的邮箱验证码页切换到创建密码分支。
+
+    流程来源：Torin-x/GPT-utral-platform 的 Roxy 注册适配。
+    """
+    if not _is_email_verification_page(driver):
+        return False
+    try:
+        clicked = bool(driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const link = [...document.querySelectorAll('a[href]')].find(el => {
+          try {
+            return visible(el) && new URL(el.href, location.href).pathname === '/create-account/password';
+          } catch (_) {
+            return false;
+          }
+        });
+        if (!link) return false;
+        link.scrollIntoView({block:'center'});
+        link.click();
+        return true;
+        """))
+    except Exception as exc:
+        logger.info("%s 注册密码入口不可用：%s", _log_prefix(driver), str(exc)[:120])
+        return False
+    if not clicked:
+        return False
+    end = time.time() + max(1, int(timeout))
+    while time.time() < end:
+        if _is_signup_password_page(driver):
+            return True
+        if not _is_email_verification_page(driver):
+            break
+        time.sleep(0.25)
+    return _is_signup_password_page(driver)
+
+
+def _submit_signup_password_direct(driver, password: str) -> dict:
+    """在一次页面脚本中写入 React 密码值并点击该表单的提交按钮。
+
+    流程来源：Torin-x/GPT-utral-platform 的浏览器密码提交实现。
+    """
     return driver.execute_script(r"""
+    const password = String(arguments[0]);
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
       && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
       && !el.disabled && !el.readOnly;
+    const setValue = (el, value) => {
+      el.scrollIntoView({block:'center'});
+      el.focus();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(el, value); else el.value = value;
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+    };
     const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
       .find(visible);
     if (!input) return {ok:false, reason:'missing_password_input'};
+    setValue(input, password);
     const form = input.closest('form');
     const scope = form || document;
     const buttons = [...scope.querySelectorAll('button,input[type="submit"]')]
-      .filter(el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && !el.disabled && el.getAttribute('aria-disabled') !== 'true')
+      .filter(el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+        && !el.disabled && el.getAttribute('aria-disabled') !== 'true')
       .map((el, idx) => {
         const r = el.getBoundingClientRect();
         const ir = input.getBoundingClientRect();
-        const type = String(el.getAttribute('type') || '').toLowerCase();
-        const cls = String(el.className || '').toLowerCase();
-        const isSubmit = type === 'submit';
-        const isPrimary = /\bbtn-primary\b|\b_primary_|\bw-full\b/.test(cls);
-        const dist = Math.max(0, r.top - ir.bottom) + Math.abs((r.left+r.right-ir.left-ir.right)/2)/10;
-        const score = (isSubmit ? 1000 : 0) + (isPrimary ? 100 : 0) - dist;
-        return {el, idx, type, isSubmit, isPrimary, below: r.top >= ir.bottom - 10, dist, score};
+        return {el, idx, below: r.top >= ir.bottom - 10,
+          dist: Math.max(0, r.top - ir.bottom) + Math.abs((r.left+r.right-ir.left-ir.right)/2)/10};
       })
       .filter(x => x.below)
-      .sort((a,b) => b.score - a.score || a.idx - b.idx);
+      .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
     if (!buttons.length) return {ok:false, reason:'missing_submit'};
     buttons[0].el.scrollIntoView({block:'center'});
-    return {ok:true, reason:'password_targets', input, button: buttons[0].el, buttonType: buttons[0].type, isSubmit: buttons[0].isSubmit};
-    """) or {}
+    buttons[0].el.click();
+    return {ok:true, reason:'submitted_password'};
+    """, str(password or "")) or {}
 
 
 def _click_passwordless_signup_if_present(driver) -> dict:
@@ -2570,21 +2618,19 @@ def _fill_password_page_if_present(
             )
         selected_password = str(password or "").strip() or _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(selected_password), email)
-        result = _password_page_targets(driver)
-        if not result.get('ok'):
-            raise RuntimeError(f"密码页处理失败：{result} state={last}")
         submit_timeout = max(6, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_TIMEOUT", 16) or 16))
         submit_attempts = max(1, min(2, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_ATTEMPTS", 2) or 2)))
         observe_per_attempt = max(4, submit_timeout // submit_attempts)
         for submit_attempt in range(1, submit_attempts + 1):
             if submit_attempt > 1:
-                result = _password_page_targets(driver)
-                if not result.get('ok'):
-                    raise RuntimeError(f"密码页重试处理失败：{result} state={last}")
                 logger.warning("%s 密码提交无响应，重新定位同一表单并进行第 %s/%s 次提交", _log_prefix(driver), submit_attempt, submit_attempts)
-            _human_type_text(driver, result.get("input"), selected_password, clear=True)
-            human_delay("form", minimum=0.2, maximum=0.8)
-            _human_click(driver, result.get("button"), label=f"password_submit_{submit_attempt}")
+            result = _submit_signup_password_direct(driver, selected_password)
+            if not result.get('ok'):
+                if submit_attempt < submit_attempts:
+                    logger.warning("%s 密码表单暂不可提交，等待 DOM 稳定后重试：%s", _log_prefix(driver), result)
+                    time.sleep(0.5)
+                    continue
+                raise RuntimeError(f"密码页处理失败：{result} state={last}")
             logger.info("%s 已填写并提交密码页（%s/%s）", _log_prefix(driver), submit_attempt, submit_attempts)
             wait_end = time.time() + observe_per_attempt
             while time.time() < wait_end:
@@ -3297,12 +3343,19 @@ def run_roxy_registration(
             next_state = _retry_email_entry_after_traffic_fallback(driver, email, traffic_optimizer)
         _check_manual_stop()
 
-        # 新版注册流可能先进入 /create-account/password；参考 FlowPilot 的 fill-password 步骤，
-        # 先设置密码并提交，然后再等待邮箱验证码页。
-        # ENABLE_2FA=False 时保留 OTP-only；开启后禁止跳过密码页。若服务端直接
-        # 把注册流送到 OTP，2FA 阶段会用同一浏览器走 post_login_add_password 补设。
+        # 新版注册流可能直接进入邮箱 OTP 页，但该页为新账号保留了
+        # /create-account/password 链接。开启 2FA 时先切换到这个注册密码分支，
+        # 在同一 auth transaction 内设置密码，再回到邮箱 OTP；避免登录后另开
+        # post_login_add_password auth step 与 MFA 重认证互相覆盖。
         if registration_password_required():
             password_state["desired"] = _registration_password()
+            if next_state == "otp":
+                if not _click_signup_password_link_if_present(driver):
+                    raise RuntimeError(
+                        "registration_password_not_offered: 邮箱验证码页未提供创建密码入口"
+                    )
+                next_state = "password"
+                logger.info("[Roxy注册] 已从邮箱验证码页切换到创建密码分支")
         openai_password = _fill_password_page_if_present(
             driver,
             email,

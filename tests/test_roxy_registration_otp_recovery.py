@@ -369,14 +369,32 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             "accepted",
         )
 
+    def test_clicks_signup_password_link_from_email_verification(self):
+        driver = MagicMock()
+        driver.execute_script.return_value = True
+        states = iter([False, True])
+        with patch("core.roxy_registration._is_email_verification_page", return_value=True), \
+             patch("core.roxy_registration._is_signup_password_page", side_effect=lambda _driver: next(states)), \
+             patch("core.roxy_registration.time.sleep"):
+            switched = roxy_registration._click_signup_password_link_if_present(driver)
+
+        self.assertTrue(switched)
+        script = driver.execute_script.call_args.args[0]
+        self.assertIn("/create-account/password", script)
+        self.assertIn("new URL(el.href, location.href).pathname", script)
+
+    def test_does_not_click_signup_password_link_outside_email_verification(self):
+        driver = MagicMock()
+        with patch("core.roxy_registration._is_email_verification_page", return_value=False):
+            switched = roxy_registration._click_signup_password_link_if_present(driver)
+
+        self.assertFalse(switched)
+        driver.execute_script.assert_not_called()
+
     def test_password_rejection_stops_before_otp_polling(self):
         driver = MagicMock()
         checkpoints = []
-        driver.execute_script.return_value = {
-            "ok": True,
-            "input": MagicMock(),
-            "button": MagicMock(),
-        }
+        driver.execute_script.return_value = {"ok": True, "reason": "submitted_password"}
         with patch("core.roxy_registration._is_email_verification_page", return_value=False), \
              patch("core.roxy_registration._has_access_token", side_effect=[False, True]), \
              patch("core.roxy_registration._is_signup_password_page", return_value=True), \
@@ -387,8 +405,6 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
              ]), \
              patch("core.roxy_registration._click_passwordless_signup_if_present", return_value={"ok": False}), \
              patch("core.roxy_registration._registration_password", return_value="Password1!"), \
-             patch("core.roxy_registration._human_type_text"), \
-             patch("core.roxy_registration._human_click"), \
              patch("core.roxy_registration.human_delay"):
             with self.assertRaisesRegex(RuntimeError, "Failed to create account"):
                 roxy_registration._fill_password_page_if_present(
@@ -399,18 +415,17 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
                     on_confirmed=lambda *args: checkpoints.append(args),
                 )
         password_target_script = driver.execute_script.call_args.args[0]
-        self.assertIn("isSubmit ? 1000", password_target_script)
-        self.assertIn("b.score - a.score", password_target_script)
+        self.assertIn("HTMLInputElement.prototype", password_target_script)
+        self.assertIn("buttons[0].el.click()", password_target_script)
         self.assertEqual(checkpoints, [])
 
     def test_password_form_noop_is_relocated_and_submitted_once_more(self):
         driver = MagicMock()
-        target = {"ok": True, "input": MagicMock(), "button": MagicMock()}
         checkpoints = []
         clock = iter(range(100))
         with patch("core.roxy_registration.time.time", side_effect=lambda: float(next(clock))), \
              patch("core.roxy_registration.time.sleep"), \
-             patch("core.roxy_registration._password_page_targets", return_value=target) as targets, \
+             patch("core.roxy_registration._submit_signup_password_direct", return_value={"ok": True}) as submit_password, \
              patch("core.roxy_registration._has_access_token", return_value=False), \
              patch("core.roxy_registration._is_signup_password_page", return_value=True), \
              patch("core.roxy_registration._is_login_password_page", return_value=False), \
@@ -420,9 +435,7 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
              }), \
              patch("core.roxy_registration._click_passwordless_signup_if_present", return_value={"ok": False}), \
              patch("core.roxy_registration._registration_password", return_value="Password1!"), \
-             patch("core.roxy_registration._human_type_text"), \
-             patch("core.roxy_registration._human_click") as click, \
-             patch("core.roxy_registration._is_email_verification_page", side_effect=lambda *_args: click.call_count >= 2), \
+             patch("core.roxy_registration._is_email_verification_page", side_effect=lambda *_args: submit_password.call_count >= 2), \
              patch("core.roxy_registration.human_delay"), \
              patch("core.roxy_registration._cfg.ROXY_PASSWORD_SUBMIT_TIMEOUT", 6), \
              patch("core.roxy_registration._cfg.ROXY_PASSWORD_SUBMIT_ATTEMPTS", 2):
@@ -435,8 +448,7 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             )
 
         self.assertEqual(password, "Password1!")
-        self.assertEqual(click.call_count, 2)
-        self.assertEqual(targets.call_count, 2)
+        self.assertEqual(submit_password.call_count, 2)
         self.assertEqual(checkpoints, [("mail@example.test", "Password1!")])
 
     def test_email_already_verified_page_is_success_not_invalid_otp(self):
