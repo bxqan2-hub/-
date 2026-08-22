@@ -9,6 +9,7 @@
 响应可以是纯文本、HTML 或 JSON，只要其中包含 6 位验证码即可。
 """
 import json
+import hashlib
 import logging
 import re
 import time
@@ -472,6 +473,24 @@ def _parse_generic_api_ts(value) -> float | None:
     return None
 
 
+def _inline_timestamp_is_before(
+    msg_ts: float,
+    received_at: str | None,
+    after_ts: float | None,
+) -> bool:
+    """判断内嵌邮件时间是否早于发送边界，并识别分钟精度时间。"""
+    if not after_ts or not msg_ts:
+        return False
+    raw = str(received_at or "").strip()
+    minute_precision = bool(re.fullmatch(
+        r"\d{4}[/-]\d{1,2}[/-]\d{1,2}[ T]\d{1,2}:\d{2}",
+        raw,
+    ))
+    # wordck 只显示到分钟，22:28 代表整个 22:28:00-22:28:59 区间。
+    tolerance = 60.0 if minute_precision else 2.0
+    return float(msg_ts) + tolerance < float(after_ts)
+
+
 def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tuple[str, dict] | None:
     """
     兼容 newzoe 这类直接返回 JSON 的取码接口：
@@ -542,6 +561,7 @@ def _fetch_yangyang_otp(
     headers: dict,
     after_ts: float | None = None,
     request_timeout: float | None = None,
+    exclude_message_ids: set[str] | None = None,
 ) -> tuple[str, dict] | None:
     """从 yangyang 邮箱页面的列表 API + 详情 API 中抽取最新 6 位验证码。"""
     parsed = _parse_yangyang_code_url(code_url)
@@ -569,6 +589,7 @@ def _fetch_yangyang_otp(
                     headers=headers,
                     after_ts=after_ts,
                     request_timeout=timeout,
+                    exclude_message_ids=exclude_message_ids,
                 )
             logger.debug(
                 "[GenericAPI] yangyang 邮件列表 HTTP %s: %s",
@@ -647,9 +668,87 @@ def _strip_html_fragment(value: str) -> str:
     return value.strip()
 
 
+def _stable_inline_message_id(attrs: str) -> str | None:
+    """从邮件卡片属性生成不泄露取件链接的稳定消息 ID。"""
+    attrs = str(attrs or "")
+    for name in ("data-message-id", "data-mail-id", "data-id", "id", "href"):
+        match = re.search(
+            rf"\b{re.escape(name)}\s*=\s*[\"']([^\"']+)[\"']",
+            attrs,
+            flags=re.IGNORECASE,
+        )
+        if match and match.group(1).strip():
+            raw = f"{name}:{match.group(1).strip()}"
+            return "inline-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    return None
+
+
+def _inline_message_card_entries(html: str) -> list[tuple[str, str, bool]]:
+    """返回 ``(message_id, card_html, id_is_stable)`` 邮件卡片列表。"""
+    html = str(html or "")
+    entries: list[tuple[str, str, bool]] = []
+
+    article_matches = list(re.finditer(
+        r"<article\b(?P<attrs>[^>]*)class=[\"'][^\"']*mail-card[^\"']*[\"'][^>]*>(?P<body>.*?)</article>",
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    ))
+    if article_matches:
+        for idx, match in enumerate(article_matches):
+            stable_id = _stable_inline_message_id(match.group("attrs"))
+            entries.append((stable_id or f"inline-{idx}", match.group("body"), bool(stable_id)))
+        return entries
+
+    detail_matches = list(re.finditer(
+        r"<details\b(?P<attrs>[^>]*)>(?P<body>.*?)</details>",
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    ))
+    if detail_matches:
+        for idx, match in enumerate(detail_matches):
+            stable_id = _stable_inline_message_id(match.group("attrs"))
+            entries.append((stable_id or f"inline-{idx}", match.group("body"), bool(stable_id)))
+        return entries
+
+    anchor_matches = []
+    for match in re.finditer(
+        r"<a\b(?P<attrs>[^>]*)>(?P<body>.*?)</a>",
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    ):
+        if re.search(r"\bclass\s*=\s*[\"'][^\"']*\bmail\b", match.group("attrs"), re.IGNORECASE):
+            anchor_matches.append(match)
+    if anchor_matches:
+        for idx, match in enumerate(anchor_matches):
+            stable_id = _stable_inline_message_id(match.group("attrs"))
+            entries.append((stable_id or f"inline-{idx}", match.group("body"), bool(stable_id)))
+        return entries
+
+    card_starts = list(re.finditer(
+        r"<div\b(?P<attrs>[^>]*)class=[\"'][^\"']*\bcard\b[^\"']*[\"'][^>]*>",
+        html,
+        flags=re.IGNORECASE,
+    ))
+    for idx, match in enumerate(card_starts):
+        end = card_starts[idx + 1].start() if idx + 1 < len(card_starts) else len(html)
+        stable_id = _stable_inline_message_id(match.group("attrs"))
+        entries.append((stable_id or f"inline-{idx}", html[match.end():end], bool(stable_id)))
+    return entries
+
+
+def _extract_inline_message_ids(html: str) -> set[str]:
+    """提取触发验证码前已存在的稳定卡片 ID。"""
+    return {
+        message_id
+        for message_id, _card, is_stable in _inline_message_card_entries(html)
+        if is_stable
+    }
+
+
 def _extract_inline_messages_html_otp(
     html: str,
     after_ts: float | None = None,
+    exclude_message_ids: set[str] | None = None,
 ) -> tuple[str, dict] | None:
     """从邮件列表 HTML 中提取发送时间之后的新 OpenAI 验证码。
 
@@ -657,34 +756,11 @@ def _extract_inline_messages_html_otp(
     ``div.card / .su / .dt / .bd`` 结构。识别出邮件卡片后不会再退回整页正则，
     从而避免把发送前的旧邮件验证码误当成新码。
     """
-    html = str(html or "")
-    cards = re.findall(
-        r"<article\b[^>]*class=[\"'][^\"']*mail-card[^\"']*[\"'][^>]*>(.*?)</article>",
-        html,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    if not cards:
-        cards = re.findall(r"<details\b[^>]*>(.*?)</details>", html, flags=re.DOTALL | re.IGNORECASE)
-    if not cards:
-        # wordck.top 等取码页把「<a class=\"mail\" href>/m/...」邮件卡片的
-        # 时间、主题、验证码一起渲染在链接里，开合结构是 <a ...></a>。
-        cards = re.findall(
-            r"<a\b[^>]*class=[\"'][^\"']*\bmail\b[^\"']*[\"'][^>]*>(.*?)</a>",
-            html,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-    if not cards:
-        card_starts = list(re.finditer(
-            r"<div\b[^>]*class=[\"'][^\"']*\bcard\b[^\"']*[\"'][^>]*>",
-            html,
-            flags=re.IGNORECASE,
-        ))
-        for idx, match in enumerate(card_starts):
-            end = card_starts[idx + 1].start() if idx + 1 < len(card_starts) else len(html)
-            cards.append(html[match.end():end])
+    cards = _inline_message_card_entries(html)
+    excluded_ids = {str(value) for value in (exclude_message_ids or set()) if str(value)}
 
     items: list[dict] = []
-    for idx, card in enumerate(cards):
+    for message_id, card, id_is_stable in cards:
         subject_m = re.search(
             r"<(?:span|div)\b[^>]*class=[\"'][^\"']*(?:subject|\bsu\b)[^\"']*[\"'][^>]*>(.*?)</(?:span|div)>",
             card,
@@ -722,7 +798,8 @@ def _extract_inline_messages_html_otp(
         body = _strip_html_fragment(card)
         msg_ts = _parse_generic_api_ts(received_at)
         items.append({
-            "mail_id": f"inline-{idx}",
+            "mail_id": message_id,
+            "mail_id_stable": id_is_stable,
             "subject": subject,
             "received_at": received_at,
             "from": from_addr,
@@ -733,7 +810,10 @@ def _extract_inline_messages_html_otp(
     items.sort(key=lambda x: float(x.get("msg_ts") or 0.0), reverse=True)
     for item in items:
         msg_ts = float(item.get("msg_ts") or 0.0)
-        if after_ts and msg_ts and msg_ts + 2 < after_ts:
+        if item.get("mail_id_stable") and str(item.get("mail_id") or "") in excluded_ids:
+            logger.debug("[GenericAPI] inline messages 跳过触发前已存在的邮件卡片")
+            continue
+        if _inline_timestamp_is_before(msg_ts, item.get("received_at"), after_ts):
             logger.debug(
                 "[GenericAPI] inline messages 跳过发送前旧邮件: id=%s ts=%s after=%s subject=%r",
                 item.get("mail_id"), item.get("received_at"),
@@ -749,6 +829,7 @@ def _extract_inline_messages_html_otp(
                 "subject": item.get("subject"),
                 "msg_ts": msg_ts,
                 "source": "inline_html",
+                "mail_id_stable": bool(item.get("mail_id_stable")),
             }
     return None
 
@@ -760,6 +841,7 @@ def _fetch_inline_messages_page_otp(
     headers: dict,
     after_ts: float | None = None,
     request_timeout: float | None = None,
+    exclude_message_ids: set[str] | None = None,
 ) -> tuple[str, dict] | None:
     """解析无 JSON API、直接把邮件卡片渲染在 HTML 里的 /messages 页面。"""
     timeout = max(1.0, min(20.0, float(request_timeout if request_timeout is not None else 20.0)))
@@ -782,7 +864,11 @@ def _fetch_inline_messages_page_otp(
         logger.debug("[GenericAPI] inline messages 页面读取失败: %s: %s", type(exc).__name__, redact_otp_text(exc))
         return None
 
-    result = _extract_inline_messages_html_otp(html, after_ts=after_ts)
+    result = _extract_inline_messages_html_otp(
+        html,
+        after_ts=after_ts,
+        exclude_message_ids=exclude_message_ids,
+    )
     if result:
         code, meta = result
         logger.info(
@@ -916,6 +1002,36 @@ def snapshot_current_otp(email: str, timeout: float = 8.0) -> str | None:
             pass
 
 
+def snapshot_current_message_ids(email: str, timeout: float = 8.0) -> set[str]:
+    """读取当前取码页稳定邮件 ID，供同一分钟/同验证码的新邮件去重。"""
+    account = get_account_context(email)
+    if account is None:
+        return set()
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        resp = session.get(
+            account.code_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
+                "User-Agent": "Mozilla/5.0 (compatible; gpt-register/1.0)",
+            },
+            timeout=max(1.0, min(2.0, float(timeout or 2.0))),
+            verify=False,
+        )
+        if resp.status_code != 200:
+            return set()
+        return _extract_inline_message_ids(resp.text or "")
+    except Exception as exc:
+        logger.debug("[GenericAPI] 读取历史邮件 ID 快照失败，继续注册：%s: %s", type(exc).__name__, redact_otp_text(exc))
+        return set()
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
 def release_account(email: str, status: str = "available", note: str | None = None) -> None:
     from core.db import release_generic_api_email
     release_generic_api_email(email, status=status, note=note)
@@ -932,6 +1048,7 @@ def fetch_latest_otp(
     retry_timeout: float | None = None,
     max_consecutive_errors: int | None = None,
     exclude_codes: set[str] | list[str] | tuple[str, ...] | None = None,
+    exclude_message_ids: set[str] | list[str] | tuple[str, ...] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> str:
     """
@@ -949,6 +1066,7 @@ def fetch_latest_otp(
     interval = poll_interval or _email_cfg.OTP_POLL_INTERVAL
     settle = settle_seconds if settle_seconds is not None else _email_cfg.OTP_SETTLE_SECONDS
     excluded = {str(code).strip() for code in (exclude_codes or []) if str(code).strip()}
+    excluded_ids = {str(value).strip() for value in (exclude_message_ids or []) if str(value).strip()}
     headers = {
         "Accept": "application/json,text/plain,*/*",
         "User-Agent": "Mozilla/5.0 (compatible; gpt-register/1.0)",
@@ -992,9 +1110,21 @@ def fetch_latest_otp(
         排除会把本次请求之后的新邮件也丢掉，导致页面有可用码而 worker 空等。
         """
         code = str(code or "").strip()
-        if not code or code not in excluded:
+        if not code:
             return False
         meta = meta or {}
+        mail_id = str(meta.get("mail_id") or "").strip()
+        stable_id = bool(meta.get("mail_id_stable"))
+        if stable_id and mail_id and mail_id in excluded_ids:
+            return True
+        if stable_id and mail_id and excluded_ids and code in excluded:
+            logger.info(
+                "[GenericAPI] OTP=%s 与历史码相同，但检测到触发后新增邮件卡片，允许提交",
+                mask_otp(code),
+            )
+            return False
+        if code not in excluded:
+            return False
         try:
             msg_ts = float(meta.get("msg_ts") or 0.0)
         except (TypeError, ValueError):
@@ -1024,7 +1154,13 @@ def fetch_latest_otp(
             )
             return best_otp
         try:
-            yy_result = _fetch_yangyang_otp(session, account.code_url, headers, after_ts=after_ts) if is_yangyang else None
+            yy_result = _fetch_yangyang_otp(
+                session,
+                account.code_url,
+                headers,
+                after_ts=after_ts,
+                exclude_message_ids=excluded_ids,
+            ) if is_yangyang else None
             fly_result = None
             if (not yy_result) and is_flysms:
                 fly_result = _fetch_flysms_otp(
@@ -1147,7 +1283,11 @@ def fetch_latest_otp(
                     text,
                     flags=re.IGNORECASE,
                 ))
-                inline = _extract_inline_messages_html_otp(text, after_ts=after_ts) if inline_html else None
+                inline = _extract_inline_messages_html_otp(
+                    text,
+                    after_ts=after_ts,
+                    exclude_message_ids=excluded_ids,
+                ) if inline_html else None
                 structured_meta = structured[1] if structured else (inline[1] if inline else {})
                 if structured:
                     code = structured[0]

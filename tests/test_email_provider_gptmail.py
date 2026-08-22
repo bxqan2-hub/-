@@ -82,6 +82,7 @@ class GPTMailProviderTests(unittest.TestCase):
                     "fresh@generic.test",
                     after_ts=123.0,
                     exclude_codes={"111111"},
+                    exclude_message_ids={"mail-old"},
                 ),
                 "778899",
             )
@@ -89,5 +90,6 @@ class GPTMailProviderTests(unittest.TestCase):
             "fresh@generic.test",
             after_ts=123.0,
             exclude_codes={"111111"},
+            exclude_message_ids={"mail-old"},
             should_stop=None,
         )

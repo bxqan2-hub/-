@@ -973,11 +973,12 @@ def _setup_password_with_driver(
             "http_status": None,
         }
     prefix = _password_log_prefix(driver)
-    requested_at = time.time()
     try:
         otp_history = _snapshot_otp_history(email, timeout=2.0)
     except Exception:
         otp_history = set()
+    otp_message_ids = _snapshot_otp_message_ids(email, timeout=2.0)
+    requested_at = time.time()
     try:
         if _is_playwright_page(driver):
             reauth = driver.evaluate(_PASSWORD_REAUTH_JS)
@@ -1103,6 +1104,7 @@ def _setup_password_with_driver(
                         poll_interval=max(1, int(getattr(twofa_cfg, "TWOFA_OTP_POLL_INTERVAL", 2) or 2)),
                         settle_seconds=max(0, int(getattr(twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", 1) or 0)),
                         exclude_codes=otp_history,
+                        exclude_message_ids=otp_message_ids,
                     )
                 except Exception as exc:
                     return {
@@ -1350,6 +1352,29 @@ def _snapshot_otp_history(email: str, *, timeout: float = 2.0) -> set[str]:
     return set()
 
 
+def _snapshot_otp_message_ids(email: str, *, timeout: float = 2.0) -> set[str]:
+    """记录触发前稳定邮件卡片 ID，解决同一分钟内 OpenAI 复用 OTP。"""
+    try:
+        from core.email_provider import resolve_email_source
+
+        source = str(resolve_email_source(email) or "").strip().lower()
+    except Exception:
+        return set()
+    if source not in {"generic_api", "domain_api"}:
+        return set()
+    try:
+        from core.generic_api_mail_client import snapshot_current_message_ids
+
+        message_ids = snapshot_current_message_ids(email, timeout=max(1.0, float(timeout or 2.0)))
+    except Exception as exc:
+        logger.debug("[2FA] 历史邮件 ID 快照失败，继续正常取码：%s", type(exc).__name__)
+        return set()
+    result = {str(value) for value in (message_ids or set()) if str(value)}
+    if result:
+        logger.info("[2FA] 已记录重认证前的历史邮件卡片快照：%s 条", len(result))
+    return result
+
+
 def _setup_2fa_result(
     session: BrowserSession,
     email: str,
@@ -1469,8 +1494,10 @@ def _setup_2fa_result(
     # 阶段二：MFA 重认证。先读取一次 generic/inbox_mate 当前缓存的验证码，
     # 再记录时间边界并触发新邮件，避免把旧缓存当成本次 OTP。
     historical_otp_codes: set[str] = set()
+    historical_message_ids: set[str] = set()
     if otp_code is None and bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False)):
         historical_otp_codes = _snapshot_otp_history(email, timeout=2.0)
+        historical_message_ids = _snapshot_otp_message_ids(email, timeout=2.0)
     reauth_otp_after_ts = time.time()
     auth_url = _trigger_reauth(session, email)
     human_delay("api")
@@ -1509,6 +1536,7 @@ def _setup_2fa_result(
                 retry_timeout=float(getattr(_twofa_cfg, "TWOFA_GENERIC_API_RETRY_TIMEOUT", 8) or 8),
                 max_consecutive_errors=int(getattr(_twofa_cfg, "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", 2) or 2),
                 exclude_codes=historical_otp_codes,
+                exclude_message_ids=historical_message_ids,
             )
         else:
             logger.info("")

@@ -141,6 +141,7 @@ def wait_for_otp(
     retry_timeout: float | None = None,
     max_consecutive_errors: int | None = None,
     exclude_codes: set[str] | list[str] | tuple[str, ...] | None = None,
+    exclude_message_ids: set[str] | list[str] | tuple[str, ...] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> str:
     """等待并返回该邮箱最新的 ChatGPT OTP（6 位数字字符串）。
@@ -204,6 +205,7 @@ def wait_for_otp(
             email,
             after_ts=after_ts,
             exclude_codes=exclude_codes,
+            exclude_message_ids=exclude_message_ids,
             should_stop=should_stop,
             **extra_kwargs,
         )
@@ -213,6 +215,7 @@ def wait_for_otp(
             email,
             after_ts=after_ts,
             exclude_codes=exclude_codes,
+            exclude_message_ids=exclude_message_ids,
             should_stop=should_stop,
             **common_kwargs,
         )

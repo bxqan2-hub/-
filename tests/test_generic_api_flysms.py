@@ -14,6 +14,7 @@ from core.generic_api_mail_client import (
     _fetch_flysms_otp,
     _parse_flysms_pickup_url,
     fetch_latest_otp,
+    snapshot_current_message_ids,
     snapshot_current_otp,
 )
 
@@ -277,30 +278,42 @@ class FlysmsPickupTests(unittest.TestCase):
             )
         self.assertEqual(code, "398154")
 
-    def test_polling_wordck_mailtop_allows_same_code_from_new_minute(self):
+    def test_polling_wordck_allows_new_card_with_same_code_in_same_minute(self):
         clock = [0.0]
-        html = """
+        old_html = """
+        <a class="mail" href="/m/old">
+          <div class="mailtop"><strong>ChatGPT</strong><span>2026/08/22 22:28</span></div>
+          <div class="subject">ChatGPT temporary login code</div>
+          <div>Your verification code is 398154</div>
+        </a>
+        """
+        fresh_html = """
         <a class="mail" href="/m/new">
-          <div class="mailtop"><strong>ChatGPT</strong><span>2026/08/22 22:12</span></div>
+          <div class="mailtop"><strong>ChatGPT</strong><span>2026/08/22 22:28</span></div>
           <div class="subject">ChatGPT temporary login code</div>
           <div>Your verification code is 398154</div>
         </a>
         <a class="mail" href="/m/old">
-          <div class="mailtop"><strong>ChatGPT</strong><span>2026/08/22 22:11</span></div>
+          <div class="mailtop"><strong>ChatGPT</strong><span>2026/08/22 22:28</span></div>
           <div class="subject">ChatGPT temporary login code</div>
           <div>Your verification code is 398154</div>
         </a>
         """
 
         class WordckSameCodeSession:
+            calls = 0
+
             def get(self, *_args, **_kwargs):
-                return FakeResponse(text=html)
+                self.__class__.calls += 1
+                return FakeResponse(text=old_html if self.__class__.calls == 1 else fresh_html)
 
         def advance(seconds):
             clock[0] += seconds
 
         account = GenericApiEmailAccount("a@icloud.com", "https://mail.wordck.top/messages/test")
-        sent_at = datetime(2026, 8, 22, 22, 11, 58).timestamp()
+        old_ids = generic_client._extract_inline_message_ids(old_html)
+        self.assertEqual(len(old_ids), 1)
+        sent_at = datetime(2026, 8, 22, 22, 28, 40).timestamp()
         with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
              patch("core.generic_api_mail_client.requests.Session", WordckSameCodeSession), \
              patch("core.generic_api_mail_client.time.time", side_effect=lambda: clock[0]), \
@@ -312,8 +325,30 @@ class FlysmsPickupTests(unittest.TestCase):
                 poll_interval=1,
                 settle_seconds=0,
                 exclude_codes={"398154"},
+                exclude_message_ids=old_ids,
             )
         self.assertEqual(code, "398154")
+        self.assertEqual(WordckSameCodeSession.calls, 2)
+
+    def test_snapshot_current_message_ids_uses_stable_href_not_card_index(self):
+        html = """
+        <a class="mail" href="/m/first"><div>message one</div></a>
+        <a class="mail" href="/m/second"><div>message two</div></a>
+        """
+        account = GenericApiEmailAccount("a@icloud.com", "https://mail.wordck.top/messages/test")
+
+        class SnapshotIdsSession:
+            def get(self, *_args, **_kwargs):
+                return FakeResponse(text=html)
+
+            def close(self):
+                pass
+
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", SnapshotIdsSession):
+            ids = snapshot_current_message_ids(account.email)
+        self.assertEqual(len(ids), 2)
+        self.assertTrue(all(value.startswith("inline-") for value in ids))
 
     def test_polling_stops_when_browser_has_advanced(self):
         account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")

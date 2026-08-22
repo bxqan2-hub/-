@@ -167,6 +167,7 @@ def test_setup_2fa_forwards_historical_otp_exclusion(monkeypatch) -> None:
     monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
     monkeypatch.setattr(account_export, "human_delay", lambda *args, **kwargs: None)
     monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: {"654321"})
+    monkeypatch.setattr(account_export, "_snapshot_otp_message_ids", lambda *args, **kwargs: {"mail-old"})
     monkeypatch.setattr(account_export, "_trigger_reauth", lambda *args: "https://auth.openai.com/authorize/x")
     monkeypatch.setattr(account_export, "_follow_reauth", lambda *args: "https://auth.openai.com/email-verification")
     monkeypatch.setattr(account_export, "_validate_reauth_otp", lambda *args: "https://auth.openai.com/continue/x")
@@ -188,6 +189,7 @@ def test_setup_2fa_forwards_historical_otp_exclusion(monkeypatch) -> None:
 
     assert result.validation_ok is True
     assert captured["exclude_codes"] == {"654321"}
+    assert captured["exclude_message_ids"] == {"mail-old"}
     assert captured["settle_seconds"] == 1
 
 
@@ -1065,9 +1067,15 @@ def test_password_setup_uses_playwright_evaluate_for_async_reauth(monkeypatch) -
 
 def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -> None:
     """密码补设重认证落到邮箱验证码页时，先取新码再提交密码。"""
-    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: {"654321"})
+    monkeypatch.setattr(account_export, "_snapshot_otp_message_ids", lambda *args, **kwargs: {"mail-old"})
     import core.email_provider
-    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "654321")
+    mail_kwargs = {}
+    monkeypatch.setattr(
+        core.email_provider,
+        "wait_for_otp",
+        lambda *args, **kwargs: (mail_kwargs.update(kwargs), "654321")[-1],
+    )
 
     class Locator:
         def __init__(self, page, selector):
@@ -1144,6 +1152,8 @@ def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -
     assert result["ok"] is True, result
     assert result["email_reauth_used"] is True
     assert result["totp_reauth_used"] is False
+    assert mail_kwargs["exclude_codes"] == {"654321"}
+    assert mail_kwargs["exclude_message_ids"] == {"mail-old"}
 
 
 def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypatch) -> None:
