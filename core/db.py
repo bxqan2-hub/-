@@ -1375,6 +1375,8 @@ def update_account_gcash(acc_id: int, result: dict | None = None) -> bool:
         row["gcash_checked_at"] = result.get("checked_at") or _now()
         row["gcash_completed_at"] = _now()
         row["gcash_error"] = None if ok else str(result.get("error") or "GCash 检测失败")[:500]
+        row["gcash_attempt_count"] = int(result.get("attempt_count") or 1)
+        row["gcash_retried_proxies"] = result.get("retried_proxies")
         # 合并查询：同一会话返回的 kind/provider/processor 一并写入类型字段，
         # 让 GC 查询同时刷新为这次会话的类型，避免和单独的“查询Checkout类型”
         # 产生矛盾。只有结果明确带 kind 时才覆盖类型字段。

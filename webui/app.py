@@ -317,6 +317,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         # GCash 资格检测。
         "gcash_ok", "gcash_checkout_country", "gcash_checkout_currency",
         "gcash_checked_at", "gcash_completed_at", "gcash_error",
+        "gcash_attempt_count", "gcash_retried_proxies",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_queued_at", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",
         # 邮箱检测结果：账号页直接展示并支持单账号刷新。
@@ -1290,6 +1291,17 @@ def create_app(auth_code: str | None = None) -> Flask:
             workers = len(pool_specs)
 
         executor = gcash_service.get_executor(workers)
+        # 解析整个代理池一次：每个账号拿到一个随机起点，失败时按池顺序换代理重试。
+        proxy_urls: list[str] = []
+        for spec in pool_specs:
+            try:
+                url = detection_proxy.resolve_detection_proxy(spec) or ""
+                if url:
+                    proxy_urls.append(url)
+            except Exception:
+                continue
+        if not proxy_urls:
+            return jsonify({"ok": False, "error": "gc查询代理池全部无法解析"}), 409
         started, busy, failed, skipped = [], [], [], []
         seen: set[int] = set()
         for raw_id in ids:
@@ -1309,18 +1321,15 @@ def create_app(auth_code: str | None = None) -> Flask:
             if not token:
                 skipped.append({"id": account_id, "email": account.get("email"), "reason": "缺少 AT/access_token"})
                 continue
-            proxy_spec = random.choice(pool_specs)
-            proxy_url = ""
-            try:
-                proxy_url = detection_proxy.resolve_detection_proxy(proxy_spec) or ""
-            except Exception as exc:
-                skipped.append({"id": account_id, "email": account.get("email"), "reason": f"代理解析失败：{exc}"})
-                continue
+            # 随机起点 + 整体池作为候选：proxy 顺序每次洗牌，避免多条线程同挤一条代理。
+            shuffled = list(proxy_urls)
+            random.shuffle(shuffled)
             queued = gcash_service.enqueue(
                 account_id=account_id,
                 access_token=token,
                 trigger="manual_gcash_bulk",
-                proxy=proxy_url or None,
+                proxies=shuffled,
+                max_retries=gcash_service.MAX_PROXY_RETRIES,
                 executor=executor,
             )
             item = {"id": account_id, "email": account.get("email"), **queued}
@@ -1342,7 +1351,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped_count": len(skipped),
             "workers": workers,
             "confirm_sent": False,
-            "message": "每个账号创建一次 PH Checkout 并读取 GCash 支付方式，不执行 confirm/start",
+            "message": "每个账号创建一次 PH Checkout 读取 GCash 资格；代理/风控类失败会自动换代理重试（最多 5 个）",
         }), 202
 
     @app.post("/api/accounts/extract-oaics-bulk")

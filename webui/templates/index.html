@@ -4127,13 +4127,14 @@ function _gcashBadge(r) {
   }
   // 探测失败（风控/代理/非OAICS/网络）绝不归为“无GC”，要明确显示原因。
   if (status === 'failed') {
+    const retried = r.gcash_attempt_count > 1 ? `已尝试 ${r.gcash_attempt_count} 个代理；` : '';
     const title = [
       `检测: ${r.gcash_checked_at || ''}`,
       `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-      r.gcash_error || 'GCash 检测失败',
+      retried + (r.gcash_error || 'GCash 检测失败'),
       '未执行 confirm',
     ].filter(Boolean).join('；');
-    return `<span class="pill status-failed" title="${esc(title)}">失败</span>`;
+    return `<span class="pill status-failed" title="${esc(title)}">${r.gcash_attempt_count > 1 ? `失败(${r.gcash_attempt_count}代理)` : '失败'}</span>`;
   }
   // 只有完成完整成功探测仍未发现 cpmt_ 才算“无GC”。
   const typeTag = String(r.checkout_kind || '').toLowerCase() === 'oaics' ? 'OAICS·' : '';
