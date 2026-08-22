@@ -44,6 +44,41 @@ class AccountPlanFilterTests(unittest.TestCase):
         self.assertFalse(db._account_matches_plan_filter(plus, "trial"))
         self.assertTrue(db._account_matches_plan_filter(plus, "plus"))
 
+    def test_trial_offer_filters_distinguish_zero_half_and_other_discounts(self):
+        base = {
+            "current_plan_type": "free",
+            "is_free_plan": True,
+            "plan_last_success_at": "2026-08-23T12:00:00",
+            "plus_trial_eligible": True,
+        }
+        zero = {**base, "plus_trial_offer_kind": "free_trial"}
+        half = {**base, "plus_trial_offer_kind": "half_price"}
+        other = {**base, "plus_trial_offer_kind": "discount"}
+
+        self.assertTrue(db._account_matches_plan_filter(zero, "zero-trial"))
+        self.assertFalse(db._account_matches_plan_filter(zero, "half-trial"))
+        self.assertTrue(db._account_matches_plan_filter(half, "half-trial"))
+        self.assertFalse(db._account_matches_plan_filter(half, "discount-trial"))
+        self.assertTrue(db._account_matches_plan_filter(other, "discount-trial"))
+        self.assertTrue(all(db._account_matches_plan_filter(row, "trial") for row in (zero, half, other)))
+
+    def test_legacy_trial_filter_uses_campaign_metadata_when_kind_is_missing(self):
+        legacy_zero = {
+            "current_plan_type": "free",
+            "is_free_plan": True,
+            "plan_last_success_at": "2026-08-23T12:00:00",
+            "plus_trial_eligible": True,
+            "plus_trial_campaign_id": "plus-1-month-free",
+        }
+        legacy_half = {
+            **legacy_zero,
+            "plus_trial_campaign_id": "plus-half-price",
+            "plus_trial_discount_percentage": 50,
+        }
+
+        self.assertTrue(db._account_matches_plan_filter(legacy_zero, "zero-trial"))
+        self.assertTrue(db._account_matches_plan_filter(legacy_half, "half-trial"))
+
     def test_unpromoted_raw_plus_mail_remains_in_account_page_free_filter(self):
         raw_mail_only = {
             "current_plan_type": "free",
@@ -74,6 +109,97 @@ class AccountPlanFilterTests(unittest.TestCase):
         self.assertTrue(result["has_active_plus_subscription"])
         self.assertFalse(result["is_free_plan"])
         self.assertFalse(result["plus_trial_eligible"])
+
+    def test_accounts_check_classifies_zero_and_half_price_trial_metadata(self):
+        def parse_campaign(campaign):
+            return chatgpt_plan.parse_accounts_check({
+                "accounts": {
+                    "default": {
+                        "account": {"account_id": "acct-trial", "plan_type": "free"},
+                        "entitlement": {
+                            "subscription_plan": "chatgptfreeplan",
+                            "has_active_subscription": False,
+                        },
+                        "eligible_promo_campaigns": {"plus": campaign},
+                    },
+                },
+            })
+
+        zero = parse_campaign({
+            "id": "plus-1-month-free",
+            "metadata": {
+                "title": "One month free",
+                "discount": {"percentage": 100},
+                "duration": {"num_periods": 1, "period": "month"},
+            },
+        })
+        half = parse_campaign({
+            "id": "plus-half-price",
+            "metadata": {
+                "title": "50% off first month",
+                "discount": {"percentage": 50},
+                "duration": {"num_periods": 1, "period": "month"},
+            },
+        })
+        ratio = chatgpt_plan.classify_plus_trial_offer({
+            "id": "plus-discount",
+            "metadata": {"discount": {"percentage": 0.25}},
+        })
+
+        self.assertEqual(zero["plus_trial_offer_kind"], "free_trial")
+        self.assertEqual(zero["plus_trial_offer_label"], "0元试用")
+        self.assertEqual(zero["plus_trial_offer_percentage"], 100)
+        self.assertEqual(half["plus_trial_offer_kind"], "half_price")
+        self.assertEqual(half["plus_trial_offer_label"], "半价试用")
+        self.assertEqual(half["plus_trial_offer_percentage"], 50)
+        self.assertEqual(ratio["kind"], "discount")
+        self.assertEqual(ratio["percentage"], 25)
+
+    def test_trial_offer_classifier_does_not_invent_missing_discount(self):
+        generic = chatgpt_plan.classify_plus_trial_offer({
+            "id": "plus-seasonal-offer",
+            "metadata": {"title": "Special offer"},
+        })
+        absent = chatgpt_plan.classify_plus_trial_offer(None)
+
+        self.assertEqual(generic["kind"], "trial")
+        self.assertIsNone(generic["percentage"])
+        self.assertEqual(absent["kind"], "none")
+
+    def test_plan_result_persists_trial_offer_classification_and_details(self):
+        stored = {}
+
+        def capture(rows):
+            stored["rows"] = json.loads(json.dumps(rows))
+
+        with patch.object(db, "_load_accounts", return_value=[{"id": 4, "email": "trial@test.com"}]), \
+             patch.object(db, "_save_accounts", side_effect=capture):
+            updated = db.update_account_plan_check(acc_id=4, result={
+                "ok": True,
+                "checked_at": "2026-08-23T12:00:00",
+                "plan_authority": "authoritative",
+                "current_plan_type": "free",
+                "is_free_plan": True,
+                "plus_trial_eligible": True,
+                "plus_trial_campaign_id": "plus-half-price",
+                "plus_trial_title": "50% off first month",
+                "plus_trial_summary": "First month promotional price",
+                "plus_trial_discount_percentage": 50,
+                "plus_trial_duration_num_periods": 1,
+                "plus_trial_duration_period": "month",
+                "plus_trial_promotion_type_label": "Promotional pricing",
+                "plus_trial_offer_kind": "half_price",
+                "plus_trial_offer_label": "半价试用",
+                "plus_trial_offer_percentage": 50,
+                "plus_trial_offer_evidence": "metadata.discount.percentage",
+            })
+
+        self.assertTrue(updated)
+        row = stored["rows"][0]
+        self.assertEqual(row["plus_trial_offer_kind"], "half_price")
+        self.assertEqual(row["plus_trial_offer_label"], "半价试用")
+        self.assertEqual(row["plus_trial_offer_percentage"], 50)
+        self.assertEqual(row["plus_trial_summary"], "First month promotional price")
 
     def test_accounts_check_never_borrows_default_workspace(self):
         with self.assertRaisesRegex(ValueError, "JWT 当前 workspace"):

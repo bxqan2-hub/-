@@ -694,7 +694,7 @@
     .accounts-table-v2 .col-time { width: 170px; }
     .accounts-table-v2 .col-sms { width: 116px; }
     #accountsPanelV2 .accounts-table-v2 {
-      min-width: 1500px; font-size: 13px;
+      min-width: 1530px; font-size: 13px;
     }
     #accountsPanelV2 .accounts-table-v2 th,
     #accountsPanelV2 .accounts-table-v2 td {
@@ -716,7 +716,7 @@
     #accountsPanelV2 .accounts-table-v2 .col-email { width: 220px; }
     #accountsPanelV2 .accounts-table-v2 .col-profile { width: 160px; }
     #accountsPanelV2 .accounts-table-v2 .col-token { width: 190px; }
-    #accountsPanelV2 .accounts-table-v2 .col-plan { width: 190px; }
+    #accountsPanelV2 .accounts-table-v2 .col-plan { width: 220px; }
     #accountsPanelV2 .accounts-table-v2 .col-checkout { width: 145px; }
     #accountsPanelV2 .accounts-table-v2 .col-gcash { width: 105px; }
     #accountsPanelV2 .accounts-table-v2 .col-status { width: 105px; }
@@ -818,6 +818,31 @@
     }
     #accountsPanelV2 .account-plan-stack .mail-status-pill {
       min-height: 20px; padding: 1px 8px; font-size: 11px; line-height: 18px;
+    }
+    #accountsPanelV2 .trial-offer-pill,
+    .plus-pool-table .trial-offer-pill {
+      min-width: 116px; gap: 5px; padding: 0 9px; font-weight: 700;
+      border-width: 1px; border-style: solid; white-space: nowrap;
+    }
+    #accountsPanelV2 .trial-offer-pill .trial-offer-plan,
+    .plus-pool-table .trial-offer-pill .trial-offer-plan { font-weight: 600; opacity: .8; }
+    #accountsPanelV2 .trial-offer-pill .trial-offer-divider,
+    .plus-pool-table .trial-offer-pill .trial-offer-divider { opacity: .45; }
+    #accountsPanelV2 .trial-offer-pill--free,
+    .plus-pool-table .trial-offer-pill--free {
+      color: #067647; background: #ecfdf3; border-color: #a6f4c5;
+    }
+    #accountsPanelV2 .trial-offer-pill--half,
+    .plus-pool-table .trial-offer-pill--half {
+      color: #93370d; background: #fffaeb; border-color: #fedf89;
+    }
+    #accountsPanelV2 .trial-offer-pill--discount,
+    .plus-pool-table .trial-offer-pill--discount {
+      color: #175cd3; background: #eff8ff; border-color: #b2ddff;
+    }
+    #accountsPanelV2 .trial-offer-pill--none,
+    .plus-pool-table .trial-offer-pill--none {
+      color: #667085; background: #f9fafb; border-color: #eaecf0;
     }
     #accountsPanelV2 .account-lifetime-only {
       color: #606266; font-size: 12px; font-weight: 600; white-space: nowrap;
@@ -2339,8 +2364,11 @@
           </label>
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="打开归档分组，单独查看和恢复已归档账号">归档分组</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="显示 AT entitlement 或邮箱凭证已确认开通 Plus 的账号">已开通Plus</button>
-          <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测已确认是 Free，且确认可试用 Plus 的账号">可试用 Free</button>
-          <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测已确认是 Free，且明确没有 Plus 试用资格的账号">Free 无试用资格</button>
+          <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="显示全部已确认存在 Plus 试用或优惠活动的 Free 账号">全部试用</button>
+          <button type="button" class="acc-v2-toggle" id="showZeroTrialAccountsOnlyV2" aria-pressed="false" title="只显示活动元数据确认首期 100% 减免或一个月免费的 Free 账号">0元试用</button>
+          <button type="button" class="acc-v2-toggle" id="showHalfTrialAccountsOnlyV2" aria-pressed="false" title="只显示活动元数据确认 50% 优惠的 Free 账号">半价试用</button>
+          <button type="button" class="acc-v2-toggle" id="showDiscountTrialAccountsOnlyV2" aria-pressed="false" title="只显示其他折扣或活动折扣比例暂未返回的 Free 账号">其他优惠</button>
+          <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测成功且明确没有 Plus 试用活动的 Free 账号">无试用资格</button>
           <button type="button" class="acc-v2-toggle" id="showOaicsAccountsOnlyV2" aria-pressed="false" title="只显示 Checkout 类型已检测为 OAICS 的账号">OAICS</button>
           <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">GC资格</button>
           <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
@@ -3830,6 +3858,7 @@ function planResultStamp(row) {
     row.plan_check_status || '', row.plan_check_queued_at || '', row.plan_check_started_at || '',
     row.plan_check_completed_at || '', row.plan_checked_at || '', row.plan_last_success_at || '',
     row.current_plan_type || '', row.subscription_plan || '', row.plus_trial_eligible === true ? '1' : '0',
+    row.plus_trial_offer_kind || '', row.plus_trial_offer_percentage ?? '',
   ].join('|');
 }
 function capturePlanStatusBaselines(ids) {
@@ -4142,6 +4171,57 @@ function _discountLabel(r) {
   if (!Number.isNaN(n)) return `${n}折扣`;
   return `${amount}折扣`;
 }
+function _normalizeTrialOfferPercentage(value) {
+  if (value === undefined || value === null || value === '' || typeof value === 'boolean') return null;
+  let n = Number(String(value).replace('%', '').replaceAll(',', '').trim());
+  if (!Number.isFinite(n)) return null;
+  if (n > 0 && n < 1) n *= 100;
+  return n >= 0 && n <= 100 ? n : null;
+}
+function _trialOfferView(r) {
+  const allowed = ['free_trial', 'half_price', 'discount', 'trial', 'none'];
+  let kind = String(r.plus_trial_offer_kind || '').toLowerCase();
+  const percentage = _normalizeTrialOfferPercentage(
+    r.plus_trial_offer_percentage ?? r.plus_trial_discount_percentage
+  );
+  const searchable = [
+    r.plus_trial_campaign_id, r.plus_trial_title, r.plus_trial_summary,
+    r.plus_trial_promotion_type_label,
+  ].filter(Boolean).join(' ').toLowerCase().replace(/[\s_]+/g, '-');
+  if (!allowed.includes(kind) || (r.plus_trial_eligible === true && kind === 'none')) {
+    if ((percentage !== null && percentage >= 99.5)
+        || ['1-month-free','one-month-free','free-trial','100%-off','0元','零元','免费试用','無料','1か月無料'].some(x => searchable.includes(x))) {
+      kind = 'free_trial';
+    } else if ((percentage !== null && percentage >= 49.5 && percentage <= 50.5)
+        || ['half-price','50%-off','半价','半價','半額'].some(x => searchable.includes(x))) {
+      kind = 'half_price';
+    } else if (percentage !== null && percentage > 0) {
+      kind = 'discount';
+    } else {
+      kind = r.plus_trial_eligible === true ? 'trial' : 'none';
+    }
+  }
+  let label = String(r.plus_trial_offer_label || '');
+  if (kind === 'free_trial') label = '0元试用';
+  else if (kind === 'half_price') label = '半价试用';
+  else if (kind === 'discount') label = percentage !== null
+    ? `${Number.isInteger(percentage) ? percentage : Number(percentage.toFixed(2))}%优惠`
+    : (label || '其他优惠');
+  else if (kind === 'trial') label = label || '可试用（优惠未知）';
+  else label = '无试用资格';
+  const periods = Number(r.plus_trial_duration_num_periods || 0);
+  const period = String(r.plus_trial_duration_period || '').toLowerCase();
+  const periodNames = {day:'天', days:'天', week:'周', weeks:'周', month:'个月', months:'个月', year:'年', years:'年'};
+  const duration = periods > 0 ? `${periods}${periodNames[period] || period}` : '';
+  const meta = [
+    duration,
+    percentage !== null ? `${Number.isInteger(percentage) ? percentage : Number(percentage.toFixed(2))}%减免` : '',
+    r.plus_trial_promotion_type_label,
+  ].filter(Boolean).join(' · ');
+  const tone = kind === 'free_trial' ? 'free' : kind === 'half_price' ? 'half' :
+    ['discount','trial'].includes(kind) ? 'discount' : 'none';
+  return {kind, label, percentage, duration, meta, tone};
+}
 function _gcashBadge(r) {
   const status = String(r.gcash_status || '').toLowerCase();
   if (status === 'queued') return '<span class="pill status-running" title="已排队；通过 PH 代理创建 Checkout 只读 GCash，不会 confirm">待检测</span>';
@@ -4260,11 +4340,18 @@ function _planCell(r) {
       return `<span class="pill status-running" title="${title}">${esc(plan)}（待检测）</span>`;
     }
     const trialEligible = r.plus_trial_eligible === true;
-    const trialText = trialEligible ? '可试用 Plus' : '不可试用';
+    const offer = _trialOfferView(r);
     const trialDetail = trialEligible
-      ? [r.plus_trial_title, r.plus_trial_summary, r.plus_trial_campaign_id].filter(Boolean).join('；')
+      ? [
+          `优惠分类: ${offer.label}`,
+          offer.meta,
+          r.plus_trial_title,
+          r.plus_trial_summary,
+          r.plus_trial_campaign_id ? `campaign: ${r.plus_trial_campaign_id}` : '',
+          r.plus_trial_offer_evidence ? `判定依据: ${r.plus_trial_offer_evidence}` : '',
+        ].filter(Boolean).join('；')
       : '本次账号状态接口未返回 Plus 试用活动';
-    return `<span class="pill ${trialEligible ? 'status-available' : 'status-used'}" title="${esc([title, trialDetail].filter(Boolean).join('；'))}">Free · ${trialText}</span>`;
+    return `<span class="pill trial-offer-pill trial-offer-pill--${offer.tone}" title="${esc([title, trialDetail].filter(Boolean).join('；'))}"><span class="trial-offer-plan">Free</span><span class="trial-offer-divider">·</span><span>${esc(offer.label)}</span>${offer.duration ? `<span class="trial-offer-divider">·</span><span>${esc(offer.duration)}</span>` : ''}</span>`;
   }
 
   const cls = 'status-success';
@@ -5189,6 +5276,9 @@ async function applyAccountsPlanFilter(filter) {
   ACCOUNT_PLAN_FILTER = ACCOUNT_PLAN_FILTER === filter ? '' : filter;
   setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), ACCOUNT_PLAN_FILTER === 'plus');
   setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), ACCOUNT_PLAN_FILTER === 'trial');
+  setAccountsFilterToggle($('#showZeroTrialAccountsOnlyV2'), ACCOUNT_PLAN_FILTER === 'zero-trial');
+  setAccountsFilterToggle($('#showHalfTrialAccountsOnlyV2'), ACCOUNT_PLAN_FILTER === 'half-trial');
+  setAccountsFilterToggle($('#showDiscountTrialAccountsOnlyV2'), ACCOUNT_PLAN_FILTER === 'discount-trial');
   setAccountsFilterToggle($('#showNoTrialAccountsOnlyV2'), ACCOUNT_PLAN_FILTER === 'no-trial');
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
@@ -5257,6 +5347,18 @@ async function refreshAccountsList(btn) {
   const freeV2 = $('#showFreeAccountsOnlyV2');
   if (freeV2) freeV2.addEventListener('click', () => {
     applyAccountsPlanFilter('trial');
+  });
+  const zeroTrialV2 = $('#showZeroTrialAccountsOnlyV2');
+  if (zeroTrialV2) zeroTrialV2.addEventListener('click', () => {
+    applyAccountsPlanFilter('zero-trial');
+  });
+  const halfTrialV2 = $('#showHalfTrialAccountsOnlyV2');
+  if (halfTrialV2) halfTrialV2.addEventListener('click', () => {
+    applyAccountsPlanFilter('half-trial');
+  });
+  const discountTrialV2 = $('#showDiscountTrialAccountsOnlyV2');
+  if (discountTrialV2) discountTrialV2.addEventListener('click', () => {
+    applyAccountsPlanFilter('discount-trial');
   });
   const noTrialV2 = $('#showNoTrialAccountsOnlyV2');
   if (noTrialV2) noTrialV2.addEventListener('click', () => {
@@ -5936,6 +6038,9 @@ async function selectAndDeleteFreeAccounts() {
     renderAccountExactFilter();
     setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), false);
     setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), false);
+    setAccountsFilterToggle($('#showZeroTrialAccountsOnlyV2'), false);
+    setAccountsFilterToggle($('#showHalfTrialAccountsOnlyV2'), false);
+    setAccountsFilterToggle($('#showDiscountTrialAccountsOnlyV2'), false);
     setAccountsFilterToggle($('#showNoTrialAccountsOnlyV2'), false);
     await loadAccounts();
     updateAccountSelectionUi();

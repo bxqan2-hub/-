@@ -54,6 +54,26 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertTrue(secured["password_configured"])
         self.assertNotIn("registration_password", secured)
 
+    def test_account_list_exposes_trial_offer_display_metadata(self):
+        compact = _compact_account_for_list({
+            "id": 4,
+            "email": "half@test.com",
+            "current_plan_type": "free",
+            "plus_trial_eligible": True,
+            "plus_trial_offer_kind": "half_price",
+            "plus_trial_offer_label": "半价试用",
+            "plus_trial_offer_percentage": 50,
+            "plus_trial_duration_num_periods": 1,
+            "plus_trial_duration_period": "month",
+            "plus_trial_campaign_id": "plus-half-price",
+        })
+
+        self.assertEqual(compact["plus_trial_offer_kind"], "half_price")
+        self.assertEqual(compact["plus_trial_offer_label"], "半价试用")
+        self.assertEqual(compact["plus_trial_offer_percentage"], 50)
+        self.assertEqual(compact["plus_trial_duration_num_periods"], 1)
+        self.assertEqual(compact["plus_trial_duration_period"], "month")
+
     @patch("webui.app.db.get_account")
     def test_account_secret_single_and_bulk_routes_return_allowlisted_values(self, get_account):
         get_account.side_effect = lambda account_id: {
@@ -270,6 +290,17 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("markPlanChecksQueued(ids, 'manual_bulk')", html)
         self.assertIn("检测套餐/Plus/试用", html)
         self.assertIn("plus_trial_eligible", html)
+        self.assertIn("function _trialOfferView(r)", html)
+        self.assertIn("trial-offer-pill--free", html)
+        self.assertIn("trial-offer-pill--half", html)
+        self.assertIn('id="showZeroTrialAccountsOnlyV2"', html)
+        self.assertIn('id="showHalfTrialAccountsOnlyV2"', html)
+        self.assertIn('id="showDiscountTrialAccountsOnlyV2"', html)
+        self.assertIn("applyAccountsPlanFilter('zero-trial')", html)
+        self.assertIn("applyAccountsPlanFilter('half-trial')", html)
+        self.assertIn("applyAccountsPlanFilter('discount-trial')", html)
+        self.assertIn('>0元试用</button>', html)
+        self.assertIn('>半价试用</button>', html)
         self.assertIn('id="showNoTrialAccountsOnlyV2"', html)
         self.assertIn("applyAccountsPlanFilter('no-trial')", html)
         self.assertIn("ACCOUNT_PLAN_FILTER === 'no-trial'", html)

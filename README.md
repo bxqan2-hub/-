@@ -864,7 +864,7 @@ MIT
 
 账号页面保留独立的“检测 OAICS/CSLIVE”能力：每个账号只创建一次最小 custom Plus Checkout，按返回的 `oaics_*`、`checkout_provider=open_ai/oaics` 或 `cs_live_*` 分类后立即停止。检测不附加促销，也不会执行税区、支付方式、ConfirmationToken 或 confirm。设置页分别维护“套餐检测代理列表”和“Checkout 检测代理列表”；两边都支持保存多个 `名称|直接代理/代理API` 并选择当前线路，互不复用。
 
-“检测套餐/Plus/试用”一次读取 `accounts/check` 的当前套餐、Plus entitlement 与 `eligible_promo_campaigns.plus`。Free 账号直接显示“Free · 可试用 Plus”或“Free · 不可试用”，不再提供独立的日本试用按钮或表格列；是否出现日本活动由套餐检测当前选择的日本出口决定。
+“检测套餐/Plus/试用”一次读取 `accounts/check` 的当前套餐、Plus entitlement 与 `eligible_promo_campaigns.plus`。Free 账号会继续解析活动 `metadata.discount.percentage`、标题、周期和 campaign，明确显示“Free · 0元试用”“Free · 半价试用”“Free · 其他优惠”或“Free · 无试用资格”，并提供对应筛选；比例缺失时只标记“优惠未知”，不会猜成 0 元或半价。是否出现日本活动由套餐检测当前选择的日本出口决定。
 
 换电脑复制整个项目文件夹后，直接双击根目录的 `一键安装.bat`。脚本会
 检查 Python 3.10+ 和 Node.js 18+；缺少时优先调用 Windows `winget` 安装

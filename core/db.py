@@ -928,14 +928,41 @@ def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> b
         not has_active_plus
         and (plan == "free" or subscription_plan == "chatgptfreeplan")
     )
+    trial_checked = is_free and bool(row.get("plan_last_success_at"))
+    trial_eligible = trial_checked and bool(row.get("plus_trial_eligible"))
+    trial_offer_kind = str(row.get("plus_trial_offer_kind") or "").strip().lower()
+    if trial_eligible and trial_offer_kind in {"", "none"}:
+        # Backfill classification for rows saved before offer-kind persistence.
+        from core.chatgpt_plan import classify_plus_trial_offer
+        trial_offer_kind = classify_plus_trial_offer({
+            "id": row.get("plus_trial_campaign_id"),
+            "metadata": {
+                "title": row.get("plus_trial_title"),
+                "summary": row.get("plus_trial_summary"),
+                "promotion_type_label": row.get("plus_trial_promotion_type_label"),
+                "discount": {
+                    "percentage": (
+                        row.get("plus_trial_offer_percentage")
+                        if row.get("plus_trial_offer_percentage") is not None
+                        else row.get("plus_trial_discount_percentage")
+                    ),
+                },
+            },
+        })["kind"]
     if f == "plus":
         return has_active_plus
     if f == "free":
         return is_free
     if f in {"trial", "free-trial", "trial-eligible"}:
-        return is_free and bool(row.get("plan_last_success_at")) and bool(row.get("plus_trial_eligible"))
+        return trial_eligible
+    if f in {"zero-trial", "free-trial-zero", "trial-free"}:
+        return trial_eligible and trial_offer_kind == "free_trial"
+    if f in {"half-trial", "half-price", "trial-half"}:
+        return trial_eligible and trial_offer_kind == "half_price"
+    if f in {"discount-trial", "trial-discount", "other-trial"}:
+        return trial_eligible and trial_offer_kind in {"discount", "trial"}
     if f in {"no-trial", "trial-ineligible"}:
-        return is_free and bool(row.get("plan_last_success_at")) and not bool(row.get("plus_trial_eligible"))
+        return trial_checked and not bool(row.get("plus_trial_eligible"))
     if f in {"nonfree", "non-free", "not-free", "paid"}:
         # 未查询/无法识别的空套餐不归到“非 Free”，避免把未知账号误当付费账号。
         return bool(plan) and plan != "free"
@@ -1917,9 +1944,15 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
                 row["plus_trial_eligible"] = bool(result.get("plus_trial_eligible"))
                 row["plus_trial_campaign_id"] = result.get("plus_trial_campaign_id")
                 row["plus_trial_title"] = result.get("plus_trial_title")
+                row["plus_trial_summary"] = result.get("plus_trial_summary")
                 row["plus_trial_discount_percentage"] = result.get("plus_trial_discount_percentage")
                 row["plus_trial_duration_num_periods"] = result.get("plus_trial_duration_num_periods")
                 row["plus_trial_duration_period"] = result.get("plus_trial_duration_period")
+                row["plus_trial_promotion_type_label"] = result.get("plus_trial_promotion_type_label")
+                row["plus_trial_offer_kind"] = result.get("plus_trial_offer_kind") or "none"
+                row["plus_trial_offer_label"] = result.get("plus_trial_offer_label")
+                row["plus_trial_offer_percentage"] = result.get("plus_trial_offer_percentage")
+                row["plus_trial_offer_evidence"] = result.get("plus_trial_offer_evidence")
                 row["eligible_offer_ids"] = result.get("eligible_offer_ids") or []
             row["plan_last_success_at"] = result.get("checked_at") or _now()
             row["plan_last_success_result_json"] = json.dumps(result, ensure_ascii=False)
@@ -1965,6 +1998,11 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "id", "email", "archived",
         "plan_type", "current_plan_type", "subscription_plan", "has_active_subscription",
         "has_active_plus_subscription", "is_free_plan", "plus_trial_eligible",
+        "plus_trial_offer_kind", "plus_trial_offer_label", "plus_trial_offer_percentage",
+        "plus_trial_offer_evidence", "plus_trial_campaign_id", "plus_trial_title",
+        "plus_trial_summary", "plus_trial_discount_percentage",
+        "plus_trial_duration_num_periods", "plus_trial_duration_period",
+        "plus_trial_promotion_type_label",
         "plan_check_status", "plan_check_ok", "plan_check_error",
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",

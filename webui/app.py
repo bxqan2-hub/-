@@ -277,6 +277,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "email_source", "note", "archived", "created_at",
         "plan_type", "current_plan_type", "subscription_plan", "has_active_subscription",
         "has_active_plus_subscription", "is_free_plan", "plus_trial_eligible",
+        "plus_trial_offer_kind", "plus_trial_offer_label", "plus_trial_offer_percentage",
         "plan_check_status", "plan_detection_source", "plan_authority", "plan_confidence",
         "checkout_kind_status", "checkout_kind",
         "gcash_status", "gcash_eligible", "gcash_payment_method_id",
@@ -310,6 +311,10 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
+        "plus_trial_offer_evidence", "plus_trial_campaign_id", "plus_trial_title",
+        "plus_trial_summary", "plus_trial_discount_percentage",
+        "plus_trial_duration_num_periods", "plus_trial_duration_period",
+        "plus_trial_promotion_type_label",
         "token_expired", "token_expires_at",
         # Checkout 类型检测；不包含 AT 或完整 Checkout URL。
         "checkout_kind_ok", "checkout_kind_provider", "checkout_kind_processor",

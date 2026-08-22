@@ -766,6 +766,72 @@ def _format_plan_probe_errors(errors: list[dict] | None) -> str:
     return "；".join(parts) or "套餐检测失败，接口未返回具体错误"
 
 
+def _normalize_offer_percentage(value: Any) -> float | None:
+    """Normalize a campaign discount percentage without guessing missing data."""
+    if value is None or isinstance(value, bool):
+        return None
+    raw = str(value).strip().replace("%", "").replace(",", "")
+    if not raw:
+        return None
+    try:
+        percentage = float(raw)
+    except (TypeError, ValueError):
+        return None
+    # Some APIs serialize ratios (0.5) while accounts/check normally returns 50.
+    if 0 < percentage < 1:
+        percentage *= 100
+    if percentage < 0 or percentage > 100:
+        return None
+    return round(percentage, 4)
+
+
+def classify_plus_trial_offer(plus_campaign: Any) -> dict:
+    """Classify an eligible Plus campaign as zero-price, half-price or other.
+
+    The accounts/check campaign metadata is the source of truth. Text markers are
+    only used when the response omits an explicit discount percentage.
+    """
+    if not isinstance(plus_campaign, dict) or not plus_campaign:
+        return {
+            "kind": "none",
+            "label": "无试用资格",
+            "percentage": None,
+            "evidence": "eligible_promo_campaigns.plus absent",
+        }
+
+    metadata = plus_campaign.get("metadata") if isinstance(plus_campaign.get("metadata"), dict) else {}
+    discount = metadata.get("discount") if isinstance(metadata.get("discount"), dict) else {}
+    percentage = _normalize_offer_percentage(
+        discount.get("percentage", plus_campaign.get("discount_percentage"))
+    )
+    searchable = " ".join(str(value or "") for value in (
+        plus_campaign.get("id"),
+        metadata.get("title"),
+        metadata.get("summary"),
+        metadata.get("promotion_type_label"),
+    )).casefold()
+    compact = re.sub(r"[\s_]+", "-", searchable)
+
+    zero_markers = (
+        "1-month-free", "one-month-free", "one month free", "month-free",
+        "free-trial", "free trial", "100%-off", "100% off", "$0", "€0", "¥0",
+        "0元", "零元", "免费试用", "無料", "一か月無料", "1か月無料",
+    )
+    half_markers = (
+        "half-price", "half price", "50%-off", "50% off", "半价", "半價", "半額",
+    )
+    evidence = "metadata.discount.percentage" if percentage is not None else "campaign metadata"
+
+    if percentage is not None and percentage >= 99.5 or any(marker in compact for marker in zero_markers):
+        return {"kind": "free_trial", "label": "0元试用", "percentage": percentage, "evidence": evidence}
+    if percentage is not None and 49.5 <= percentage <= 50.5 or any(marker in compact for marker in half_markers):
+        return {"kind": "half_price", "label": "半价试用", "percentage": percentage, "evidence": evidence}
+    if percentage is not None and percentage > 0:
+        display = int(percentage) if percentage.is_integer() else percentage
+        return {"kind": "discount", "label": f"{display}%优惠", "percentage": percentage, "evidence": evidence}
+    return {"kind": "trial", "label": "可试用（优惠未知）", "percentage": percentage, "evidence": evidence}
+
+
 def parse_accounts_check(data: dict, *, token: str = "") -> dict:
     """从 accounts/check 响应提取套餐和 Plus 试用资格。"""
     claims = token_claims(token) if token else {}
@@ -798,10 +864,11 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
     entitlement = item.get("entitlement") or {}
     last_sub = item.get("last_active_subscription") or {}
     eligible_promo_campaigns = item.get("eligible_promo_campaigns") or {}
-    plus_campaign = eligible_promo_campaigns.get("plus") if isinstance(eligible_promo_campaigns, dict) else None
-    plus_meta = (plus_campaign or {}).get("metadata") or {}
-    discount = plus_meta.get("discount") or {}
-    duration = plus_meta.get("duration") or {}
+    raw_plus_campaign = eligible_promo_campaigns.get("plus") if isinstance(eligible_promo_campaigns, dict) else None
+    plus_campaign = raw_plus_campaign if isinstance(raw_plus_campaign, dict) else None
+    plus_meta = plus_campaign.get("metadata") if isinstance((plus_campaign or {}).get("metadata"), dict) else {}
+    discount = plus_meta.get("discount") if isinstance(plus_meta.get("discount"), dict) else {}
+    duration = plus_meta.get("duration") if isinstance(plus_meta.get("duration"), dict) else {}
 
     plan_type = account.get("plan_type") or claims.get("claim_plan_type") or ""
     subscription_plan = entitlement.get("subscription_plan") or ""
@@ -831,6 +898,7 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
         )
     )
     plus_trial_eligible = bool(is_free and plus_campaign)
+    plus_trial_offer = classify_plus_trial_offer(plus_campaign if plus_trial_eligible else None)
 
     offers = ((item.get("eligible_offers") or {}).get("offers") or [])
     eligible_offer_ids = [o.get("id") for o in offers if isinstance(o, dict) and o.get("id")]
@@ -879,6 +947,10 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
         "plus_trial_duration_num_periods": duration.get("num_periods"),
         "plus_trial_duration_period": duration.get("period"),
         "plus_trial_promotion_type_label": plus_meta.get("promotion_type_label"),
+        "plus_trial_offer_kind": plus_trial_offer["kind"],
+        "plus_trial_offer_label": plus_trial_offer["label"],
+        "plus_trial_offer_percentage": plus_trial_offer["percentage"],
+        "plus_trial_offer_evidence": plus_trial_offer["evidence"],
         "eligible_offer_ids": eligible_offer_ids,
         "features_count": len(item.get("features") or []),
         "can_access_with_session": bool(item.get("can_access_with_session")),
@@ -1105,6 +1177,10 @@ def check_account_plan(
                             "plus_trial_duration_num_periods": parsed.get("plus_trial_duration_num_periods"),
                             "plus_trial_duration_period": parsed.get("plus_trial_duration_period"),
                             "plus_trial_promotion_type_label": parsed.get("plus_trial_promotion_type_label"),
+                            "plus_trial_offer_kind": parsed.get("plus_trial_offer_kind"),
+                            "plus_trial_offer_label": parsed.get("plus_trial_offer_label"),
+                            "plus_trial_offer_percentage": parsed.get("plus_trial_offer_percentage"),
+                            "plus_trial_offer_evidence": parsed.get("plus_trial_offer_evidence"),
                             "eligible_offer_ids": parsed.get("eligible_offer_ids") or [],
                             "plan_detection_capability": "promo_only",
                             "plan_detection_source": "backend-api/accounts/check",
