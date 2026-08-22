@@ -12,6 +12,9 @@
 注册成功的邮箱.json
 注册成功的邮箱.txt
 注册成功的token.txt
+注册安全凭据待完成.json
+注册安全凭据待完成.json.*.tmp
+注册安全凭据待完成.lock
 accounts/
 H_API.md
 

@@ -371,13 +371,14 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
 
     def test_password_rejection_stops_before_otp_polling(self):
         driver = MagicMock()
+        checkpoints = []
         driver.execute_script.return_value = {
             "ok": True,
             "input": MagicMock(),
             "button": MagicMock(),
         }
         with patch("core.roxy_registration._is_email_verification_page", return_value=False), \
-             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._has_access_token", side_effect=[False, True]), \
              patch("core.roxy_registration._is_signup_password_page", return_value=True), \
              patch("core.roxy_registration._is_login_password_page", return_value=False), \
              patch("core.roxy_registration._password_page_state", side_effect=[
@@ -395,14 +396,17 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
                     "mail@example.test",
                     timeout=1,
                     allow_passwordless=False,
+                    on_confirmed=lambda *args: checkpoints.append(args),
                 )
         password_target_script = driver.execute_script.call_args.args[0]
         self.assertIn("isSubmit ? 1000", password_target_script)
         self.assertIn("b.score - a.score", password_target_script)
+        self.assertEqual(checkpoints, [])
 
     def test_password_form_noop_is_relocated_and_submitted_once_more(self):
         driver = MagicMock()
         target = {"ok": True, "input": MagicMock(), "button": MagicMock()}
+        checkpoints = []
         clock = iter(range(100))
         with patch("core.roxy_registration.time.time", side_effect=lambda: float(next(clock))), \
              patch("core.roxy_registration.time.sleep"), \
@@ -427,11 +431,13 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
                 "mail@example.test",
                 timeout=10,
                 allow_passwordless=False,
+                on_confirmed=lambda *args: checkpoints.append(args),
             )
 
         self.assertEqual(password, "Password1!")
         self.assertEqual(click.call_count, 2)
         self.assertEqual(targets.call_count, 2)
+        self.assertEqual(checkpoints, [("mail@example.test", "Password1!")])
 
     def test_email_already_verified_page_is_success_not_invalid_otp(self):
         driver = MagicMock()
@@ -650,6 +656,7 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             timeout=25,
             allow_passwordless=True,
             password=None,
+            on_confirmed=roxy_registration.persist_confirmed_registration_password,
         )
         wait_input.assert_called_once_with(driver, timeout=30)
         resend.assert_not_called()
@@ -693,6 +700,7 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             timeout=25,
             allow_passwordless=False,
             password="Stable-pass-1!",
+            on_confirmed=roxy_registration.persist_confirmed_registration_password,
         )
 
     def test_try_again_redirect_resubmits_email_instead_of_waiting_on_login_page(self):

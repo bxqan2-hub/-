@@ -613,6 +613,10 @@ REGISTER_PASSWORD = "你的固定密码"
 - 账号 `extra_json.registration_password`
 - 批次归档 `accounts/YYYYMMDD-.../注册成功账号.json` 的 `extra.registration_password`
 
+密码提交确认成功、TOTP `activate` 明确成功后会先原子写入 Git 忽略的
+`注册安全凭据待完成.json`；正式账号落库会在同一跨进程锁内合并并清理该检查点，
+避免后续 OTP、资料页、Codex 或进程中断导致已生效的密码/一次性 TOTP Secret 丢失。
+
 账号页只返回“密码已设置”状态；点击“复制密码”才通过按需 Secret 接口读取明文，
 与 TOTP Secret 的显示/复制策略一致。
 

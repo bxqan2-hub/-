@@ -11,9 +11,13 @@
 """
 import hashlib
 import json
+import logging
+import os
 import sqlite3
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import escape
@@ -39,6 +43,10 @@ _OUTLOOK_TXT = _PROJECT_ROOT / "用于注册的邮箱.txt"
 _GENERIC_API_EMAIL_JSON = _PROJECT_ROOT / "用于注册的API邮箱.json"
 _GENERIC_API_EMAIL_TXT = _PROJECT_ROOT / "用于注册的API邮箱.txt"
 _ACCOUNTS_JSON = _PROJECT_ROOT / "注册成功的邮箱.json"
+# 密码/TOTP 在服务端确认生效后、完整注册结果落库前的独立检查点。
+# 该文件只保存安全凭据，不进入正式账号列表，也不会改变邮箱池完成状态。
+_SECURITY_CHECKPOINTS_JSON = _PROJECT_ROOT / "注册安全凭据待完成.json"
+_SECURITY_CHECKPOINTS_LOCK = _PROJECT_ROOT / "注册安全凭据待完成.lock"
 _ACCOUNT_GROUPS_JSON = _PROJECT_ROOT / "账号分组.json"
 _ACCOUNTS_TXT = _PROJECT_ROOT / "注册成功的邮箱.txt"
 _TOKENS_TXT = _PROJECT_ROOT / "注册成功的token.txt"
@@ -55,6 +63,7 @@ _LEGACY_OUTLOOK_JSON = _LEGACY_DATA_DIR / "outlook_accounts.json"
 _LEGACY_ACCOUNTS_JSON = _LEGACY_DATA_DIR / "registered_accounts.json"
 _LEGACY_JOBS_JSON = _LEGACY_DATA_DIR / "registration_jobs.json"
 _LOCK = threading.RLock()
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -516,6 +525,90 @@ def _save_accounts(rows: list[dict]) -> None:
     _sync_accounts_txt(rows)
     _sync_tokens_txt(rows)
     _render_static_viewer(account_rows=rows)
+
+
+@contextmanager
+def _security_checkpoint_file_lock(timeout: float = 30.0):
+    """跨进程串行化 checkpoint 的 read-modify-replace/consume。"""
+    _ensure_storage()
+    _SECURITY_CHECKPOINTS_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    handle = _SECURITY_CHECKPOINTS_LOCK.open("a+b")
+    locked = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        deadline = time.monotonic() + max(0.1, float(timeout or 30.0))
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("安全凭据 checkpoint 跨进程锁超时") from exc
+                time.sleep(0.05)
+        yield
+    finally:
+        if locked:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                logger.warning("安全凭据 checkpoint 跨进程锁释放异常")
+        handle.close()
+
+
+def _load_security_checkpoints() -> list[dict]:
+    """严格读取敏感 checkpoint；损坏或不可读时拒绝覆盖原文件。"""
+    try:
+        raw = _SECURITY_CHECKPOINTS_JSON.read_text(encoding="utf-8")
+        decoded = json.loads(raw)
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        raise RuntimeError("安全凭据 checkpoint 不可读或 JSON 已损坏；已保留原文件") from exc
+    if not isinstance(decoded, list):
+        raise RuntimeError("安全凭据 checkpoint 顶层结构无效；已保留原文件")
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for item in decoded:
+        if not isinstance(item, dict):
+            raise RuntimeError("安全凭据 checkpoint 包含无效记录；已保留原文件")
+        normalized_email = str(item.get("email") or "").strip().lower()
+        if not normalized_email or normalized_email in seen:
+            raise RuntimeError("安全凭据 checkpoint 包含空邮箱或重复记录；已保留原文件")
+        seen.add(normalized_email)
+        row = dict(item)
+        row["email"] = normalized_email
+        rows.append(row)
+    return rows
+
+
+def _save_security_checkpoints(rows: list[dict]) -> None:
+    """原子写入 pending 安全凭据；空集合直接删除敏感运行时文件。"""
+    if rows:
+        _write_json(_SECURITY_CHECKPOINTS_JSON, rows)
+    else:
+        _SECURITY_CHECKPOINTS_JSON.unlink(missing_ok=True)
 
 
 def _load_account_groups() -> list[dict]:
@@ -990,6 +1083,94 @@ def _row_to_dict(row: dict | None) -> dict | None:
 # registered_accounts
 # ============================================================
 
+
+def save_security_checkpoint(
+    email: str,
+    *,
+    registration_password: str | None = None,
+    totp_secret: str | None = None,
+    access_token: str | None = None,
+) -> dict | None:
+    """幂等保存已被服务端确认的密码/TOTP 中间态。
+
+    这里刻意只写独立 checkpoint 文件：不会创建正式账号、不会标记邮箱池
+    ``used/completed``，也不会触发批次归档或套餐查询。空值不覆盖已有值。
+    """
+    normalized_email = str(email or "").strip().lower()
+    password_value = str(registration_password or "").strip()
+    secret_value = str(totp_secret or "").strip()
+    token_value = str(access_token or "").strip()
+    if not normalized_email or not (password_value or secret_value or token_value):
+        return None
+
+    with _LOCK, _security_checkpoint_file_lock():
+        rows = _load_security_checkpoints()
+        row = _find_by_email(rows, normalized_email)
+        now = _now()
+        if row is None:
+            row = {
+                "email": normalized_email,
+                "pending": True,
+                "created_at": now,
+            }
+            rows.append(row)
+        if password_value:
+            row["registration_password"] = password_value
+            row["password_confirmed_at"] = now
+        if secret_value:
+            row["totp_secret"] = secret_value
+            row["totp_activated_at"] = now
+        if token_value:
+            row["access_token"] = token_value
+        row["updated_at"] = now
+        _save_security_checkpoints(rows)
+        return dict(row)
+
+
+def get_security_checkpoint(email: str) -> dict | None:
+    """读取某邮箱尚未并入正式账号的安全凭据检查点。"""
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_email:
+        return None
+    with _LOCK, _security_checkpoint_file_lock():
+        row = _find_by_email(_load_security_checkpoints(), normalized_email)
+        return dict(row) if row is not None else None
+
+
+def _checkpoint_extra(
+    extra: dict | None,
+    checkpoint: dict | None,
+    existing_extra_json: object = None,
+) -> dict | None:
+    """合并既有元数据、checkpoint 与本次终态，避免局部更新抹掉旧字段。
+
+    优先级为 ``existing < checkpoint < explicit extra``；但显式空密码不覆盖
+    checkpoint 中已由服务端确认的密码。
+    """
+    existing_extra: dict = {}
+    if isinstance(existing_extra_json, dict):
+        existing_extra = dict(existing_extra_json)
+    elif isinstance(existing_extra_json, str) and existing_extra_json.strip():
+        try:
+            decoded = json.loads(existing_extra_json)
+            if isinstance(decoded, dict):
+                existing_extra = decoded
+        except (TypeError, ValueError, json.JSONDecodeError):
+            existing_extra = {}
+
+    merged = dict(existing_extra)
+    checkpoint_password = str((checkpoint or {}).get("registration_password") or "").strip()
+    if checkpoint_password:
+        merged["registration_password"] = checkpoint_password
+
+    explicit = dict(extra or {})
+    explicit_password = str(explicit.get("registration_password") or "").strip()
+    merged.update(explicit)
+    if checkpoint_password and not explicit_password:
+        merged["registration_password"] = checkpoint_password
+    return merged or None
+
+
 def insert_account(
     *,
     email: str,
@@ -1012,22 +1193,39 @@ def insert_account(
     codex_error: str | None = None,    # 失败原因（仅 codex_status=failed 时有意义）
 ) -> int:
     """插入或更新注册成功账号，返回本地文件中的 id。"""
-    with _LOCK:
+    normalized_email = str(email or "").strip()
+    if not normalized_email:
+        raise ValueError("email 不能为空")
+    with _LOCK, _security_checkpoint_file_lock():
         accounts = _load_accounts()
         outlook_rows = _load_outlook()
         generic_rows = _load_generic_api_emails()
         domain_rows = _load_domain_pool()
-        existing = _find_by_email(accounts, email)
-        outlook_row = _find_by_email(outlook_rows, email)
-        generic_row = _find_by_email(generic_rows, email)
-        domain_row = _find_domain_email(domain_rows, email)
-        extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
+        existing = _find_by_email(accounts, normalized_email)
+        outlook_row = _find_by_email(outlook_rows, normalized_email)
+        generic_row = _find_by_email(generic_rows, normalized_email)
+        domain_row = _find_domain_email(domain_rows, normalized_email)
+        checkpoints = _load_security_checkpoints()
+        checkpoint = _find_by_email(checkpoints, normalized_email)
+        merged_extra = _checkpoint_extra(
+            extra,
+            checkpoint,
+            existing.get("extra_json") if existing is not None else None,
+        )
+        extra_json = json.dumps(merged_extra, ensure_ascii=False) if merged_extra else None
+        checkpoint_token = str((checkpoint or {}).get("access_token") or "").strip()
+        effective_access_token = str(access_token or "").strip() or checkpoint_token
+        checkpoint_secret = str((checkpoint or {}).get("totp_secret") or "").strip()
+        explicit_secret = str(totp_secret or "").strip()
+        # 空字符串与 None 都表示“本次未提供”，不能覆盖已确认的 checkpoint Secret。
+        # 真正清除 TOTP 应走专用账号编辑/解绑流程，而不是注册终态 upsert。
+        effective_totp_secret = explicit_secret or checkpoint_secret or None
 
         if existing is None:
             row_id = _next_id(accounts)
             row = {
                 "id": row_id,
-                "email": email,
+                "email": normalized_email,
                 "created_at": _now(),
             }
             accounts.append(row)
@@ -1040,8 +1238,12 @@ def insert_account(
         )
         stored_user_name = user_name or row.get("user_name") or stored_registration_name
         row.update({
-            "access_token": access_token,
-            "totp_secret": totp_secret if totp_secret is not None else row.get("totp_secret"),
+            "access_token": effective_access_token,
+            "totp_secret": (
+                effective_totp_secret
+                if effective_totp_secret is not None
+                else row.get("totp_secret")
+            ),
             "user_id": user_id if user_id is not None else row.get("user_id"),
             "user_name": stored_user_name,
             "registration_name": stored_registration_name,
@@ -1068,10 +1270,10 @@ def insert_account(
             outlook_row["status"] = "used"
             outlook_row["used_at"] = outlook_row.get("used_at") or _now()
             outlook_row["registered_account_id"] = row_id
-            outlook_row["access_token"] = access_token
+            outlook_row["access_token"] = effective_access_token
             outlook_row["completed_at"] = _now()
-            if totp_secret:
-                outlook_row["totp_secret"] = totp_secret
+            if effective_totp_secret:
+                outlook_row["totp_secret"] = effective_totp_secret
 
         for pool_row in (generic_row, domain_row):
             if not pool_row:
@@ -1079,16 +1281,28 @@ def insert_account(
             pool_row["status"] = "used"
             pool_row["used_at"] = pool_row.get("used_at") or _now()
             pool_row["registered_account_id"] = row_id
-            pool_row["access_token"] = access_token
+            pool_row["access_token"] = effective_access_token
             pool_row["completed_at"] = _now()
-            if totp_secret:
-                pool_row["totp_secret"] = totp_secret
+            if effective_totp_secret:
+                pool_row["totp_secret"] = effective_totp_secret
 
         row["copy_line"] = _account_line(row)
         _save_accounts(accounts)
         _save_outlook(outlook_rows)
         _save_generic_api_emails(generic_rows)
         _save_domain_pool(domain_rows)
+        if checkpoint is not None:
+            target = str(email or "").strip().lower()
+            try:
+                _save_security_checkpoints([
+                    item
+                    for item in checkpoints
+                    if str(item.get("email") or "").strip().lower() != target
+                ])
+            except Exception as exc:
+                # 正式账号及邮箱池已经 durable save；清理失败只会留下可幂等消费的
+                # pending checkpoint，不能把已成功的注册反报为失败。
+                logger.warning("安全凭据 checkpoint 清理失败，将保留待下次合并：%s", type(exc).__name__)
         return row_id
 
 

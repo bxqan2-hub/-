@@ -60,6 +60,8 @@ class TwoFASetupResult:
     password: str | None = None
     # 补密码结果状态（供 WebUI/日志读取）
     password_setup: dict | None = None
+    # TOTP activate 成功后的一次性 Secret 是否已提前 durable checkpoint。
+    totp_checkpoint_persisted: bool = False
 
     @property
     def validation(self) -> dict[str, object]:
@@ -91,6 +93,16 @@ class TwoFASetupResult:
     def security_ok(self) -> bool:
         """TOTP 健康检查与密码设置是否都通过。"""
         return bool(self.secret and self.validation_ok and self.password_configured)
+
+    @property
+    def checkpoint(self) -> dict[str, bool]:
+        """暴露早持久化结果；最终正式账号落库仍由调用方完成。"""
+        return {
+            "totp_persisted": bool(self.totp_checkpoint_persisted),
+            "password_persisted": bool(
+                self.password_setup and self.password_setup.get("checkpoint_persisted")
+            ),
+        }
 
 
 def normalize_totp_secret(value: str) -> str:
@@ -530,6 +542,32 @@ def _activate_totp(
     if data.get("success") is not True:
         raise TwoFASetupError("totp_activate", "totp_activate_failed", "2FA 激活返回 success=false")
     return True
+
+
+def _persist_activated_totp_checkpoint(email: str, secret: str, access_token: str) -> bool:
+    """activate 明确 success=true 后立即保存不可回取的 TOTP Secret。"""
+    from core import db
+
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            db.save_security_checkpoint(
+                email,
+                totp_secret=normalize_totp_secret(secret),
+                access_token=str(access_token or "").strip(),
+            )
+            logger.info("[2FA] 已保存激活 TOTP 的安全凭据检查点：%s", email)
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(0.05 * attempt)
+    # TOTP 已在服务端生效，落盘失败不能让调用方丢掉仍在内存中的 Secret。
+    logger.error(
+        "[2FA] 安全凭据检查点连续 3 次写入失败：%s",
+        type(last_error).__name__ if last_error else "UnknownError",
+    )
+    return False
 
 
 def _wait_for_totp_window(min_remaining: float = 4.0) -> None:
@@ -1259,6 +1297,7 @@ def _setup_2fa_result(
     _wait_for_totp_window()
     if _activate_totp(session, new_token, secret, session_id) is not True:
         raise TwoFASetupError("totp_activate", "totp_activate_failed", "2FA TOTP 激活未确认成功")
+    totp_checkpoint_persisted = _persist_activated_totp_checkpoint(email, secret, new_token)
 
     # 激活成功后 secret 必须保留。models 只是只读健康检查，可能因 401/429
     # 或瞬时网络错误失败；把失败编码到结果中而不是抛出并让调用方丢 secret。
@@ -1311,6 +1350,11 @@ def _setup_2fa_result(
             "message": "注册密码页已完成，无需重复设置",
             "http_status": None,
         }
+        from core.registration_password import persist_confirmed_registration_password
+        password_setup["checkpoint_persisted"] = persist_confirmed_registration_password(
+            email,
+            configured_password,
+        )
     elif driver is None:
         password_setup = {
             "ok": False,
@@ -1339,6 +1383,11 @@ def _setup_2fa_result(
             )
             if bool(password_setup.get("ok")):
                 logger.info("[2FA] 账号密码已补设成功")
+                from core.registration_password import persist_confirmed_registration_password
+                password_setup["checkpoint_persisted"] = persist_confirmed_registration_password(
+                    email,
+                    configured_password,
+                )
         except TwoFASetupError as exc:
             password_setup = {
                 "ok": False,
@@ -1378,6 +1427,7 @@ def _setup_2fa_result(
         expires=getattr(session, "_twofa_session_expires", None),
         password=configured_password,
         password_setup=password_setup,
+        totp_checkpoint_persisted=totp_checkpoint_persisted,
     )
 
 
@@ -1631,8 +1681,9 @@ def save_account_data(
     将账号信息保存到本地 JSON/TXT 文件存储。
     返回新插入/更新的 row id。
     """
-    from core.db import insert_account
-    extra = extra or {}
+    from core import db
+
+    extra = dict(extra or {})
     user = extra.get("user") or {}
     account = extra.get("account") or {}
     created_value = openai_created_at if openai_created_at is not None else account.get("createdTime")
@@ -1655,7 +1706,7 @@ def save_account_data(
     if codex_status == "failed":
         codex_error = codex.get("message")
 
-    row_id = insert_account(
+    row_id = db.insert_account(
         email=email,
         access_token=access_token,
         totp_secret=totp_secret,
@@ -1675,14 +1726,30 @@ def save_account_data(
         codex_status=codex_status,
         codex_error=codex_error,
     )
+    # checkpoint 的 merge + consume 在 db.insert_account 的同一临界区完成。
+    # 归档和后续任务必须读取 durable row，不能复用锁外的旧快照。
+    durable_row = db.get_account(row_id) or {}
+    durable_access_token = str(durable_row.get("access_token") or access_token or "").strip()
+    durable_totp_secret = str(durable_row.get("totp_secret") or totp_secret or "").strip() or None
+    durable_extra = dict(extra)
+    raw_extra = durable_row.get("extra_json")
+    if isinstance(raw_extra, dict):
+        durable_extra = dict(raw_extra)
+    elif isinstance(raw_extra, str) and raw_extra.strip():
+        try:
+            decoded_extra = json.loads(raw_extra)
+            if isinstance(decoded_extra, dict):
+                durable_extra = decoded_extra
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("[Save] durable extra_json 解析失败，批次归档使用本次终态：id=%s", row_id)
     batch_folder = _append_batch_archive(
         row_id=row_id,
         email=email,
-        access_token=access_token,
-        totp_secret=totp_secret,
+        access_token=durable_access_token,
+        totp_secret=durable_totp_secret,
         email_source=email_source,
         proxy_used=proxy_used,
-        extra=extra,
+        extra=durable_extra,
         batch_dir=batch_dir,
     )
     logger.info(f"[Save] 账号已写入 DB, id={row_id}, email={email}")
@@ -1708,7 +1775,7 @@ def save_account_data(
         queued = enqueue_account_plan_check(
             account_id=row_id,
             email=email,
-            access_token=access_token,
+            access_token=durable_access_token,
             trigger="registration_auto",
         )
         if queued.get("accepted"):

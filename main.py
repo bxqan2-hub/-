@@ -595,6 +595,7 @@ def run_registration(
                     "validation": twofa_result.validation if twofa_result else None,
                     "error": twofa_error,
                     "password_setup": password_setup,
+                    "checkpoint": (getattr(twofa_result, "checkpoint", None) if twofa_result else None),
                 },
                 "registration_password": (twofa_result.password if twofa_result else None),
                 "codex": codex_result,

@@ -6,13 +6,16 @@
 """
 from __future__ import annotations
 
+import logging
 import secrets
 import string
+import time
 
 
 PASSWORD_MIN_LENGTH = 12
 PASSWORD_DEFAULT_LENGTH = 14
 PASSWORD_SYMBOLS = "!@#$%^&*?_-+="
+logger = logging.getLogger(__name__)
 
 
 def registration_password_required() -> bool:
@@ -55,6 +58,35 @@ def registration_password() -> str:
     return configured_registration_password() or generate_registration_password()
 
 
+def persist_confirmed_registration_password(email: str, password: str) -> bool:
+    """密码页明确进入成功终态后，立即写入独立 pending checkpoint。"""
+    normalized_email = str(email or "").strip().lower()
+    confirmed_password = str(password or "").strip()
+    if not normalized_email or not confirmed_password:
+        return False
+    from core import db
+
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            db.save_security_checkpoint(
+                normalized_email,
+                registration_password=confirmed_password,
+            )
+            logger.info("[Password] 已保存确认密码的安全凭据检查点：%s", normalized_email)
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(0.05 * attempt)
+    # 服务端密码已经生效；本地写盘异常不能把远端状态误判成“未设置密码”。
+    logger.error(
+        "[Password] 安全凭据检查点连续 3 次写入失败：%s",
+        type(last_error).__name__ if last_error else "UnknownError",
+    )
+    return False
+
+
 def validate_registration_password(password: str) -> tuple[bool, str | None]:
     """校验固定/生成密码，返回 ``(ok, reason)``，不回显密码内容。"""
     value = str(password or "")
@@ -79,5 +111,6 @@ __all__ = [
     "configured_registration_password",
     "generate_registration_password",
     "registration_password",
+    "persist_confirmed_registration_password",
     "validate_registration_password",
 ]

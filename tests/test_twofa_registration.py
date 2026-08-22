@@ -8,6 +8,19 @@ import pytest
 from core import account_export
 
 
+@pytest.fixture(autouse=True)
+def _disable_real_security_checkpoint_writes(monkeypatch):
+    """本模块使用伪账号验证状态机，禁止测试凭据写进工作区运行时文件。"""
+    from core import registration_password
+
+    monkeypatch.setattr(account_export, "_persist_activated_totp_checkpoint", lambda *args: True)
+    monkeypatch.setattr(
+        registration_password,
+        "persist_confirmed_registration_password",
+        lambda *args: True,
+    )
+
+
 def test_normalize_totp_secret_validates_base32() -> None:
     assert account_export.normalize_totp_secret(" jbsw y3dp ehpk 3pxp ") == "JBSWY3DPEHPK3PXP"
     with pytest.raises(account_export.TwoFASetupError) as exc_info:
@@ -45,6 +58,11 @@ def test_setup_2fa_result_returns_fresh_token_and_validates_models(monkeypatch) 
     monkeypatch.setattr(account_export, "_enroll_totp", lambda session, token: calls.append("enroll") or ("JBSWY3DPEHPK3PXP", "sid"))
     monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: calls.append("window"))
     monkeypatch.setattr(account_export, "_activate_totp", lambda session, token, secret, sid: calls.append("activate") or True)
+    monkeypatch.setattr(
+        account_export,
+        "_persist_activated_totp_checkpoint",
+        lambda email, secret, token: calls.append("checkpoint") or True,
+    )
     monkeypatch.setattr(account_export, "_validate_2fa_token", lambda session, token: calls.append("validate") or 200)
 
     import core.email_provider
@@ -61,9 +79,13 @@ def test_setup_2fa_result_returns_fresh_token_and_validates_models(monkeypatch) 
     assert result.validation_status == 200
     assert result.validation_ok is True
     assert result.validation["status"] == "passed"
+    assert result.totp_checkpoint_persisted is True
     assert mail_kwargs["settle_seconds"] == 1
     assert mail_kwargs["exclude_codes"] == set()
-    assert calls == ["reauth", "follow", "mail", "otp", "token", "enroll", "window", "activate", "validate"]
+    assert calls == [
+        "reauth", "follow", "mail", "otp", "token", "enroll", "window",
+        "activate", "checkpoint", "validate",
+    ]
 
 
 def test_setup_2fa_keeps_secret_when_models_validation_fails(monkeypatch) -> None:
@@ -121,12 +143,19 @@ def test_setup_2fa_does_not_treat_false_activation_as_success(monkeypatch) -> No
     monkeypatch.setattr(account_export, "_enroll_totp", lambda *args: ("JBSWY3DPEHPK3PXP", "sid"))
     monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
     monkeypatch.setattr(account_export, "_activate_totp", lambda *args: False)
+    checkpoints = []
+    monkeypatch.setattr(
+        account_export,
+        "_persist_activated_totp_checkpoint",
+        lambda *args: checkpoints.append(args) or True,
+    )
     import core.email_provider
 
     monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
     with pytest.raises(account_export.TwoFASetupError) as exc_info:
         account_export.setup_2fa_result(fake_session, "user@example.com")
     assert exc_info.value.code == "totp_activate_failed"
+    assert checkpoints == []
 
 
 def test_setup_2fa_forwards_historical_otp_exclusion(monkeypatch) -> None:
@@ -445,6 +474,7 @@ def test_browser_use_password_is_returned_only_after_confirmed_transition(monkey
     monkeypatch.setattr(browser_use, "_fill_first", lambda *args, **kwargs: True)
     monkeypatch.setattr(browser_use, "_click_first", lambda *args, **kwargs: True)
     monkeypatch.setattr(browser_use, "_bu_delay", lambda *args, **kwargs: None)
+    checkpoints = []
 
     assert browser_use._fill_password_if_present(
         page,
@@ -452,7 +482,9 @@ def test_browser_use_password_is_returned_only_after_confirmed_transition(monkey
         timeout=5,
         allow_passwordless=False,
         password="Stable-pass-1!",
+        on_confirmed=lambda *args: checkpoints.append(args),
     ) == "Stable-pass-1!"
+    assert checkpoints == [("user@example.com", "Stable-pass-1!")]
 
 
 def test_browser_use_password_rejection_is_not_persisted(monkeypatch) -> None:
@@ -472,6 +504,7 @@ def test_browser_use_password_rejection_is_not_persisted(monkeypatch) -> None:
     monkeypatch.setattr(browser_use, "_fill_first", lambda *args, **kwargs: True)
     monkeypatch.setattr(browser_use, "_click_first", lambda *args, **kwargs: True)
     monkeypatch.setattr(browser_use, "_bu_delay", lambda *args, **kwargs: None)
+    checkpoints = []
 
     with pytest.raises(RuntimeError, match="registration_password_rejected"):
         browser_use._fill_password_if_present(
@@ -480,7 +513,54 @@ def test_browser_use_password_rejection_is_not_persisted(monkeypatch) -> None:
             timeout=5,
             allow_passwordless=False,
             password="Stable-pass-1!",
+            on_confirmed=lambda *args: checkpoints.append(args),
         )
+    assert checkpoints == []
+
+
+def test_browser_use_anonymous_chatgpt_landing_does_not_confirm_password(monkeypatch) -> None:
+    from core import browser_use_registration as browser_use
+
+    page = SimpleNamespace()
+    clock = {"value": 0.0}
+
+    def now():
+        clock["value"] += 1.0
+        return clock["value"]
+
+    monkeypatch.setattr(browser_use.time, "time", now)
+    monkeypatch.setattr(browser_use.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(browser_use, "_check_manual_stop", lambda: None)
+    monkeypatch.setattr(browser_use, "_browser_use_heartbeat", lambda page, **kwargs: page)
+    monkeypatch.setattr(
+        browser_use,
+        "_quick_auth_state",
+        lambda page: {"state": "chatgpt", "url": "https://chatgpt.com/", "textPreview": "Welcome"},
+    )
+    monkeypatch.setattr(browser_use, "_has_chatgpt_access_token", lambda page, expected_email=None: False)
+
+    with pytest.raises(RuntimeError, match="registration_password_submit_timeout"):
+        browser_use._wait_after_password_submit(
+            page,
+            email="user@example.com",
+            timeout=3,
+        )
+
+
+def test_browser_use_chatgpt_session_must_match_expected_email(monkeypatch) -> None:
+    from core import browser_use_registration as browser_use
+
+    page = SimpleNamespace(
+        url="https://chatgpt.com/",
+        evaluate=lambda _script: {
+            "accessToken": "token",
+            "user": {"email": "other@example.com"},
+        },
+    )
+
+    assert browser_use._has_chatgpt_access_token(page) is True
+    assert browser_use._has_chatgpt_access_token(page, expected_email="other@example.com") is True
+    assert browser_use._has_chatgpt_access_token(page, expected_email="user@example.com") is False
 
 
 def test_browser_use_disabled_twofa_does_not_generate_password(monkeypatch) -> None:
@@ -628,10 +708,17 @@ def test_setup_2fa_result_adds_password_when_enable_2fa_with_driver(monkeypatch)
     monkeypatch.setattr(account_export, "_setup_password_with_driver", fake_setup_password)
 
     from core import roxy_registration
+    from core import registration_password
     monkeypatch.setattr(
         roxy_registration,
         "_registration_password",
         lambda: pytest.fail("task desired_password must be reused"),
+    )
+    password_checkpoints = []
+    monkeypatch.setattr(
+        registration_password,
+        "persist_confirmed_registration_password",
+        lambda email, password: password_checkpoints.append((email, password)) or True,
     )
 
     fake_driver = object()
@@ -646,10 +733,13 @@ def test_setup_2fa_result_adds_password_when_enable_2fa_with_driver(monkeypatch)
     assert result.password == "Ab3!cdefgh123"
     assert result.password_setup is not None
     assert result.password_setup["ok"] is True
+    assert result.password_setup["checkpoint_persisted"] is True
+    assert result.checkpoint == {"totp_persisted": True, "password_persisted": True}
     assert len(password_setup_calls) == 1
     assert password_setup_calls[0]["driver"] is fake_driver
     assert password_setup_calls[0]["password"] == "Ab3!cdefgh123"
     assert password_setup_calls[0]["totp_secret"] == "JBSWY3DPEHPK3PXP"
+    assert password_checkpoints == [("user@example.com", "Ab3!cdefgh123")]
 
 
 def test_setup_2fa_result_keeps_secret_when_password_setup_fails(monkeypatch) -> None:
@@ -677,8 +767,14 @@ def test_setup_2fa_result_keeps_secret_when_password_setup_fails(monkeypatch) ->
 
     monkeypatch.setattr(account_export, "_setup_password_with_driver", fake_setup_password_fail)
 
-    from core import roxy_registration
+    from core import registration_password, roxy_registration
     monkeypatch.setattr(roxy_registration, "_registration_password", lambda: "Ab3!cdefgh123")
+    password_checkpoints = []
+    monkeypatch.setattr(
+        registration_password,
+        "persist_confirmed_registration_password",
+        lambda *args: password_checkpoints.append(args) or True,
+    )
 
     result = account_export.setup_2fa_result(object(), "user@example.com", driver=object())
 
@@ -688,6 +784,7 @@ def test_setup_2fa_result_keeps_secret_when_password_setup_fails(monkeypatch) ->
     assert result.password_setup is not None
     assert result.password_setup["ok"] is False
     assert result.password_setup["code"] == "password_setup_failed"
+    assert password_checkpoints == []
 
 
 def test_password_setup_uses_selenium_async_callback_and_skips_totp_when_password_page_is_ready(monkeypatch) -> None:
@@ -979,6 +1076,13 @@ def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypat
     monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
     called = []
     monkeypatch.setattr(account_export, "_setup_password_with_driver", lambda **kwargs: called.append(kwargs) or {"ok": True})
+    from core import registration_password
+    password_checkpoints = []
+    monkeypatch.setattr(
+        registration_password,
+        "persist_confirmed_registration_password",
+        lambda email, password: password_checkpoints.append((email, password)) or True,
+    )
 
     result = account_export.setup_2fa_result(
         object(),
@@ -990,3 +1094,4 @@ def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypat
     assert result.password == "Existing-pass-1!"
     assert result.password_setup["code"] == "password_already_configured"
     assert called == []
+    assert password_checkpoints == [("user@example.com", "Existing-pass-1!")]

@@ -24,6 +24,7 @@ from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
 from core.registration_password import (
     generate_registration_password,
+    persist_confirmed_registration_password,
     registration_password as _shared_registration_password,
     registration_password_required,
 )
@@ -1359,6 +1360,7 @@ def _restart_email_otp_from_login(
             timeout=25,
             allow_passwordless=(not registration_password_required()),
             password=(password_state or {}).get("desired"),
+            on_confirmed=persist_confirmed_registration_password,
         )
         if confirmed_password and password_state is not None:
             password_state["configured"] = confirmed_password
@@ -1834,6 +1836,7 @@ def _prepare_next_email_otp_attempt(
             timeout=25,
             allow_passwordless=(not registration_password_required()),
             password=(password_state or {}).get("desired"),
+            on_confirmed=persist_confirmed_registration_password,
         )
         if confirmed_password and password_state is not None:
             password_state["configured"] = confirmed_password
@@ -2505,6 +2508,7 @@ def _fill_password_page_if_present(
     *,
     allow_passwordless: bool = True,
     password: str | None = None,
+    on_confirmed=None,
 ) -> str | None:
     """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。
 
@@ -2512,6 +2516,16 @@ def _fill_password_page_if_present(
     （适用于默认 OTP-only 注册和忘密码的既有账号登录）。开启 ENABLE_2FA 后调用方传
     allow_passwordless=False，强制在密码页填写并提交密码。
     """
+    def confirmed(value: str) -> str:
+        if on_confirmed is not None:
+            try:
+                persisted = on_confirmed(email, value)
+                if persisted is False:
+                    logger.error("%s 确认密码已生效，但安全凭据 checkpoint 未持久化", _log_prefix(driver))
+            except Exception as exc:
+                logger.warning("%s 确认密码 checkpoint 回调失败：%s", _log_prefix(driver), type(exc).__name__)
+        return value
+
     end = time.time() + timeout
     last = {}
     while time.time() < end:
@@ -2576,26 +2590,25 @@ def _fill_password_page_if_present(
             while time.time() < wait_end:
                 if _is_email_verification_page(driver):
                     logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
-                    return selected_password
-                if _has_access_token(driver):
-                    logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
-                    return selected_password
-                if not _is_signup_password_page(driver):
-                    if _is_login_password_page(driver):
-                        raise RuntimeError("创建账号密码提交后跳转到登录密码页，未确认密码设置成功")
-                    advanced = _otp_flow_advanced_state(driver)
-                    if advanced in ("profile", "logged_in", "email_verified"):
-                        return selected_password
-                    last = _password_page_state(driver)
-                    errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
-                    if errors:
-                        raise RuntimeError(f"创建账号密码提交被拒绝: errors={errors} state={last}")
-                    time.sleep(0.35)
-                    continue
+                    return confirmed(selected_password)
+                is_signup_password = _is_signup_password_page(driver)
+                is_login_password = _is_login_password_page(driver)
                 last = _password_page_state(driver)
                 errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
+                # 服务端拒绝优先于旧 token/迟到 token；有错误时绝不落 checkpoint。
                 if errors:
                     raise RuntimeError(f"创建账号密码提交被拒绝: errors={errors} state={last}")
+                if is_login_password:
+                    raise RuntimeError("创建账号密码提交后跳转到登录密码页，未确认密码设置成功")
+                if not is_signup_password:
+                    advanced = _otp_flow_advanced_state(driver)
+                    if advanced in ("profile", "logged_in", "email_verified"):
+                        return confirmed(selected_password)
+                    if _has_access_token(driver):
+                        logger.info("%s 密码提交后离开密码页并检测到登录态", _log_prefix(driver))
+                        return confirmed(selected_password)
+                    time.sleep(0.35)
+                    continue
                 time.sleep(0.35)
         raise RuntimeError(f"创建账号密码提交后仍停留在密码页: state={last}")
     logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
@@ -3296,6 +3309,7 @@ def run_roxy_registration(
             timeout=25,
             allow_passwordless=(not registration_password_required()),
             password=password_state["desired"],
+            on_confirmed=persist_confirmed_registration_password,
         )
         if openai_password:
             password_state["configured"] = openai_password
@@ -3657,6 +3671,7 @@ def run_roxy_registration(
                     "proxy_source": twofa_proxy_source,
                     "error": twofa_error,
                     "password_setup": (getattr(twofa_result, "password_setup", None) if twofa_result else None),
+                    "checkpoint": (getattr(twofa_result, "checkpoint", None) if twofa_result else None),
                 },
             },
         )

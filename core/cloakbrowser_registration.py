@@ -15,7 +15,10 @@ from core.email_provider import wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_failure_payload
 from core.otp_utils import mask_otp, redact_otp_text
-from core.registration_password import registration_password_required
+from core.registration_password import (
+    persist_confirmed_registration_password,
+    registration_password_required,
+)
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
 from core.roxy_registration import (  # noqa: F401
@@ -62,6 +65,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             timeout=25,
             allow_passwordless=(not registration_password_required()),
             password=desired_password,
+            on_confirmed=persist_confirmed_registration_password,
         )
         _check_manual_stop()
 
@@ -226,6 +230,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                     "proxy_source": twofa_proxy_source,
                     "error": twofa_error,
                     "password_setup": (getattr(twofa_result, "password_setup", None) if twofa_result else None),
+                    "checkpoint": (getattr(twofa_result, "checkpoint", None) if twofa_result else None),
                 },
                 "codex": codex_result,
             },

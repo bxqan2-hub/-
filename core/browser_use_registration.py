@@ -29,6 +29,7 @@ from core.twofa_proxy import build_twofa_session, resolve_twofa_proxy, twofa_fai
 from core.otp_utils import mask_otp, redact_otp_text
 from core.registration_password import (
     generate_registration_password,
+    persist_confirmed_registration_password,
     registration_password as _shared_registration_password,
     registration_password_required,
 )
@@ -573,6 +574,7 @@ def _fill_password_if_present(
     *,
     allow_passwordless: bool | None = None,
     password: str | None = None,
+    on_confirmed=None,
 ) -> str | None:
     """处理注册密码页；是否允许 passwordless 由 ENABLE_2FA 联动决定。"""
     if allow_passwordless is None:
@@ -663,7 +665,14 @@ def _fill_password_if_present(
         ):
             page.keyboard.press("Enter")
         _bu_delay("form")
-        _wait_after_password_submit(page, context=context, timeout=20)
+        _wait_after_password_submit(page, email=email, context=context, timeout=20)
+        if on_confirmed is not None:
+            try:
+                persisted = on_confirmed(email, selected_password)
+                if persisted is False:
+                    logger.error("[BrowserUse] 确认密码已生效，但安全凭据 checkpoint 未持久化")
+            except Exception as exc:
+                logger.warning("[BrowserUse] 确认密码 checkpoint 回调失败：%s", type(exc).__name__)
         return selected_password
     return None
 
@@ -675,7 +684,13 @@ _PASSWORD_SUBMIT_ERROR_RE = re.compile(
 )
 
 
-def _wait_after_password_submit(page, *, context=None, timeout: int = 20) -> str:
+def _wait_after_password_submit(
+    page,
+    *,
+    email: str,
+    context=None,
+    timeout: int = 20,
+) -> str:
     """确认注册密码被接受后才把它作为已配置密码返回。"""
     end = time.time() + max(3, int(timeout or 20))
     last = {"state": "other", "url": _page_url(page)}
@@ -684,7 +699,9 @@ def _wait_after_password_submit(page, *, context=None, timeout: int = 20) -> str
         page = _browser_use_heartbeat(page, context=context, label="password-submit")
         last = _quick_auth_state(page)
         state = str(last.get("state") or "other")
-        if state in ("email_verification", "profile", "chatgpt"):
+        if state in ("email_verification", "profile"):
+            return state
+        if state == "chatgpt" and _has_chatgpt_access_token(page, expected_email=email):
             return state
         if state == "login_password":
             raise RuntimeError("registration_password_submit_redirected_to_login: 密码提交后进入登录密码页")
@@ -999,7 +1016,7 @@ def _profile_diagnostics(page) -> dict:
         return {"url": _page_url(page), "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _has_chatgpt_access_token(page) -> bool:
+def _has_chatgpt_access_token(page, expected_email: str | None = None) -> bool:
     try:
         if "chatgpt.com" not in _page_url(page).lower():
             return False
@@ -1009,7 +1026,19 @@ def _has_chatgpt_access_token(page) -> bool:
               return await r.json();
             }"""
         )
-        return bool(isinstance(data, dict) and data.get("accessToken"))
+        if not isinstance(data, dict) or not data.get("accessToken"):
+            return False
+        normalized_expected = str(expected_email or "").strip().lower()
+        if not normalized_expected:
+            return True
+        user = data.get("user") if isinstance(data.get("user"), dict) else {}
+        account = data.get("account") if isinstance(data.get("account"), dict) else {}
+        session_emails = {
+            str(value or "").strip().lower()
+            for value in (user.get("email"), account.get("email"), data.get("email"))
+            if str(value or "").strip()
+        }
+        return normalized_expected in session_emails
     except Exception:
         return False
 
@@ -1775,6 +1804,7 @@ def run_browser_use_registration(
                     context=context,
                     allow_passwordless=(not registration_password_required()),
                     password=desired_password,
+                    on_confirmed=persist_confirmed_registration_password,
                 )
                 _t_pwd.done("password_set=yes" if openai_password else "password_set=no")
             except Exception as exc:
@@ -1816,6 +1846,7 @@ def run_browser_use_registration(
                             context=context,
                             allow_passwordless=(not registration_password_required()),
                             password=desired_password,
+                            on_confirmed=persist_confirmed_registration_password,
                         )
                         _check_manual_stop()
                         if pwd:
@@ -2063,6 +2094,7 @@ def run_browser_use_registration(
                         "proxy_source": twofa_proxy_source,
                         "error": twofa_error,
                         "password_setup": (getattr(twofa_result, "password_setup", None) if twofa_result else None),
+                        "checkpoint": (getattr(twofa_result, "checkpoint", None) if twofa_result else None),
                     },
                     "codex": codex_result,
                 },
