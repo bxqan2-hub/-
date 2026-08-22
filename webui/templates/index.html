@@ -913,6 +913,9 @@
     .accounts-table-v2 .pill.status-used {
       color: #9e9ea8; background: #fafafa; border-color: #ebebef;
     }
+    .accounts-table-v2 .pill.status-muted {
+      color: #c0c4cc; background: #f6f7f9; border-color: #e4e7ed;
+    }
     .accounts-table-v2 .pill.status-success {
       color: #2bb8a6; background: #E7FCF8; border-color: #9ee0d6;
     }
@@ -4104,7 +4107,10 @@ function _gcashBadge(r) {
   const status = String(r.gcash_status || '').toLowerCase();
   if (status === 'queued') return '<span class="pill status-running" title="已排队；通过 PH 代理创建 Checkout 只读 GCash，不会 confirm">待检测</span>';
   if (status === 'running') return '<span class="pill status-running" title="正在通过 PH 代理创建 Checkout 读取 GCash 支付方式；不会 confirm">检测中</span>';
-  // 只关心“有没有 GCash”；失败/无资格统一显示“无 GC”，不再显示失败红标。
+  // 没查询过就不显示“无GC”，保持“未检测”，方便区分哪些账号还没查。
+  if (status !== 'success' && status !== 'failed') {
+    return '<span class="pill status-muted" title="尚未检测 GCash 资格；选中后点击上方“查询GC”">未检测</span>';
+  }
   if (r.gcash_eligible === true) {
     const title = [
       r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '',
@@ -4114,9 +4120,10 @@ function _gcashBadge(r) {
     ].filter(Boolean).join('；');
     return `<span class="pill status-available" title="${esc(title)}">有GC</span>`;
   }
+  // 查询过但没资格：显示“无GC”，失败也归为无GC（失败原因放悬停）。
   const reason = (status === 'failed' && r.gcash_error) ? r.gcash_error : '未发现 cpmt_ GCash 支付方式';
   const title = [
-    status === 'success' || status === 'failed' ? `检测: ${r.gcash_checked_at || ''}` : '',
+    `检测: ${r.gcash_checked_at || ''}`,
     `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
     reason,
     '未执行 confirm',
