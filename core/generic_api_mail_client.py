@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import base64
+import ast
 import html as html_lib
 from datetime import datetime
 from dataclasses import dataclass
@@ -97,13 +98,48 @@ def _decode_data_uri(text: str) -> str:
         return text
 
 
+def _extract_script_embedded_html(text: str) -> list[str]:
+    """提取取码页脚本字符串中的邮件 HTML。
+
+    api798 等取码页把真实邮件放在 ``htmlContent = "..."`` 的 JavaScript
+    字符串里，再通过 iframe ``srcdoc`` 渲染。直接删除 ``<script>`` 会把
+    邮件正文连同验证码一起删掉，所以先解码这些常见的 HTML 变量。
+    """
+    if not isinstance(text, str) or not text:
+        return []
+
+    values: list[str] = []
+    assignment = r"(?:htmlContent|emailHtml|mailHtml|bodyHtml|srcdoc)\s*=\s*"
+    patterns = (
+        re.compile(assignment + r'"((?:\\.|[^"\\])*)"', flags=re.DOTALL | re.IGNORECASE),
+        re.compile(assignment + r"'((?:\\.|[^'\\])*)'", flags=re.DOTALL | re.IGNORECASE),
+    )
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            raw = match.group(1)
+            try:
+                # JSON decoding handles the JavaScript escapes used by the
+                # endpoint (``\\r\\n``, ``\\uXXXX``, escaped quotes, etc.).
+                decoded = json.loads('"' + raw + '"')
+            except (TypeError, ValueError, json.JSONDecodeError):
+                try:
+                    decoded = ast.literal_eval("'" + raw.replace("'", "\\'") + "'")
+                except (SyntaxError, ValueError):
+                    continue
+            if isinstance(decoded, str) and decoded.strip():
+                values.append(decoded)
+    return values
+
+
 def _extract_code(text: str) -> str | None:
     """从纯文本/HTML/JSON 文本中提取 6 位 OTP。"""
     if not text:
         return None
 
-    # 兼容 JSON：优先把所有 value 拉平再抽取。
-    candidates_text = [_decode_data_uri(text), text]
+    # 兼容 JSON：优先把所有 value 拉平再抽取。部分取码页把邮件正文
+    # 放进 JavaScript 的 htmlContent/srcdoc 字符串，必须在移除 script
+    # 标签前先恢复正文，否则 HTTP 200 页面里虽然有验证码也会取不到。
+    candidates_text = [*_extract_script_embedded_html(text), _decode_data_uri(text), text]
     try:
         parsed = json.loads(text)
         candidates_text.insert(0, _decode_data_uri(_flatten_json(parsed)))

@@ -82,6 +82,18 @@ class FlysmsPickupTests(unittest.TestCase):
         """
         self.assertEqual(_extract_code(html), "742390")
 
+    def test_extracts_code_from_iframe_srcdoc_javascript(self):
+        # api798 返回的页面把邮件正文放进 JS 字符串，再赋给 iframe.srcdoc；
+        # 正文中的验证码不在页面可见 HTML 节点里。
+        html = r'''
+        <style>body { background: #667eea; }</style>
+        <script>
+          var htmlContent = "<html>\\r\\n<title>ChatGPT \\u306e\\u8a8d\\u8a3c\\u30b3\\u30fc\\u30c9</title>\\r\\n<p>この一時検証コードを入力してください:</p>\\r\\n<p>588969</p></html>";
+          frame.srcdoc = htmlContent;
+        </script>
+        '''
+        self.assertEqual(_extract_code(html), "588969")
+
     def test_parse_hash_url(self):
         url = "https://flysms.xyz/icloud/pickup#email=a%40icloud.com&key=tok_abc"
         self.assertEqual(
