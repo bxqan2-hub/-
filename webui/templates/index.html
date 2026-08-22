@@ -2323,6 +2323,7 @@
           <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测已确认是 Free，且确认可试用 Plus 的账号">可试用 Free</button>
           <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测已确认是 Free，且明确没有 Plus 试用资格的账号">Free 无试用资格</button>
           <button type="button" class="acc-v2-toggle" id="showOaicsAccountsOnlyV2" aria-pressed="false" title="只显示 Checkout 类型已检测为 OAICS 的账号">OAICS</button>
+          <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">GC资格</button>
           <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnExtractSelectedOaicsV2" disabled title="调用 PayPal OAICS 提链核心并发提取选中账号">OAICS提链</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopyAllOaicsLinksV2" title="复制当前已完成 OAICS 提链的全部链接">复制全部OAICS链</button>
@@ -2823,6 +2824,7 @@ let MAIL_STATUS_TOTAL = 0;
 let SHOW_ARCHIVED_ACCOUNTS = false;
 let ACCOUNT_PLAN_FILTER = '';
 let ACCOUNT_CHECKOUT_KIND_FILTER = '';
+let ACCOUNT_GCASH_FILTER = '';
 let ACCOUNT_GROUPS = [];
 let ACTIVE_ACCOUNT_GROUP_ID = 'default';
 let TARGET_ACCOUNT_GROUP_ID = '';
@@ -3961,14 +3963,15 @@ async function loadAccounts() {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = ACCOUNT_PLAN_FILTER;
     const checkoutKind = ACCOUNT_CHECKOUT_KIND_FILTER;
+    const gcash = ACCOUNT_GCASH_FILTER;
     const q = getAccountsQuery();
     const p = PAGERS.accounts;
     const res = ACCOUNT_EMAIL_FILTER.length
       ? await api('/api/accounts/filter-emails', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page:p.page,page_size:p.size,archived:'all',plan,q,checkout_kind:checkoutKind}),
+          body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page:p.page,page_size:p.size,archived:'all',plan,q,checkout_kind:checkoutKind,gcash}),
         })
-      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID)}`);
+      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&gcash=${encodeURIComponent(gcash)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -3980,7 +3983,7 @@ async function loadAccounts() {
 async function pollAccountPlanStatuses() {
   if (planStatusLoading || accountsLoading) return;
   if (document.activeElement?.id?.startsWith('pagerSizeInput-')) return;
-  if (ACCOUNT_CHECKOUT_KIND_FILTER) return;
+  if (ACCOUNT_CHECKOUT_KIND_FILTER || ACCOUNT_GCASH_FILTER) return;
   if (ACCOUNT_EMAIL_FILTER.length || ACTIVE_ACCOUNT_GROUP_ID !== 'default') { await loadAccounts(); return; }
   planStatusLoading = true;
   try {
@@ -4120,12 +4123,21 @@ function _gcashBadge(r) {
     ].filter(Boolean).join('；');
     return `<span class="pill status-available" title="${esc(title)}">有GC</span>`;
   }
-  // 查询过但没资格：显示“无GC”，失败也归为无GC（失败原因放悬停）。
-  const reason = (status === 'failed' && r.gcash_error) ? r.gcash_error : '未发现 cpmt_ GCash 支付方式';
+  // 探测失败（风控/代理/非OAICS/网络）绝不归为“无GC”，要明确显示原因。
+  if (status === 'failed') {
+    const title = [
+      `检测: ${r.gcash_checked_at || ''}`,
+      `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
+      r.gcash_error || 'GCash 检测失败',
+      '未执行 confirm',
+    ].filter(Boolean).join('；');
+    return `<span class="pill status-failed" title="${esc(title)}">失败</span>`;
+  }
+  // 只有完成完整成功探测仍未发现 cpmt_ 才算“无GC”。
   const title = [
     `检测: ${r.gcash_checked_at || ''}`,
     `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-    reason,
+    '未发现 cpmt_ GCash 支付方式',
     '未执行 confirm',
   ].filter(Boolean).join('；');
   return `<span class="pill status-used" title="${esc(title)}">无GC</span>`;
@@ -5074,6 +5086,14 @@ async function applyAccountsCheckoutKindFilter() {
   await loadAccounts();
   await pollAccountPlanStatuses();
 }
+async function applyAccountsGcashFilter() {
+  ACCOUNT_GCASH_FILTER = ACCOUNT_GCASH_FILTER === '1' ? '' : '1';
+  setAccountsFilterToggle($('#showGcashAccountsOnlyV2'), ACCOUNT_GCASH_FILTER === '1');
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+}
 async function refreshAccountsList(btn) {
   if (!btn) return;
   const old = btn.textContent;
@@ -5127,6 +5147,8 @@ async function refreshAccountsList(btn) {
   });
   const oaicsV2 = $('#showOaicsAccountsOnlyV2');
   if (oaicsV2) oaicsV2.addEventListener('click', applyAccountsCheckoutKindFilter);
+  const gcashV2 = $('#showGcashAccountsOnlyV2');
+  if (gcashV2) gcashV2.addEventListener('click', applyAccountsGcashFilter);
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));
 })();

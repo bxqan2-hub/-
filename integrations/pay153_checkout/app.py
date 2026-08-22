@@ -3337,7 +3337,7 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
                 "error": "当前账号未返回 OAICS 自定义 Checkout，无法读取 GCash 支付方式"
                         if session_id else "创建 Checkout 失败：未返回 Session",
                 "session_prefix": session_id[:16],
-            }, 422
+            }, 502
         http = created.get("http")
         if http is None:
             return {"ok": False, "gcash": False, "error": "创建 Checkout 未提供会话"}, 502
@@ -3359,15 +3359,14 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
             )
         if not custom_method_id:
             # Submit PH billing first; some accounts only surface GCash after the
-            # tax address is set (matches the extraction flow).
+            # tax address is set (matches the extraction flow). Any failure here
+            # (risk-control, proxy, network) means the probe is incomplete —
+            # never report a definitive "no GCash" from stale data.
             billing = default_billing("PH", meta.get("email") or "", real_random=True)
-            try:
-                tax_checkout = submit_custom_checkout_taxes(
-                    http, token, session_id, processor, billing,
-                    custom_checkout_currency(custom_state) or "PHP", device_id,
-                )
-            except Exception:
-                tax_checkout = {}
+            tax_checkout = submit_custom_checkout_taxes(
+                http, token, session_id, processor, billing,
+                custom_checkout_currency(custom_state) or "PHP", device_id,
+            )
             if tax_checkout:
                 custom_state = tax_checkout
             custom_method_id = next(
@@ -3375,9 +3374,14 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
                  if str(item.get("id") or "").startswith("cpmt_")), "",
             )
         gcash = bool(custom_method_id)
+        # 只有走完完整成功探测（OAICS 读取方法列表 + 提交 PH 账单均 200）仍未
+        # 发现 cpmt_ 时，才算是"确定无 GCash 资格"，返回 200；其余任何分支
+        # （风控、非 OAICS、SSL/代理失败、网络错误）都已在上面以失败返回，
+        # 绝对不把探测失败归为"无 GC"。
         return {
-            "ok": gcash,
+            "ok": True,
             "gcash": gcash,
+            "detection_outcome": "qualified" if gcash else "no_cpmt_after_full_probe",
             "custom_payment_method_id": custom_method_id,
             "checkout_provider": str(checkout.get("checkout_provider") or ""),
             "processor_entity": processor,
@@ -3388,8 +3392,8 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
             "checkout_country": "PH",
             "checkout_currency": custom_checkout_currency(custom_state) or "PHP",
             "checked_at": int(time.time()),
-            "error": None if gcash else "当前 PH Checkout 未返回 GCash 支付方式",
-        }, (200 if gcash else 422)
+            "error": None if gcash else "当前 PH Checkout 完成完整探测后仍无 GCash 支付方式",
+        }, 200
     except Exception as exc:
         return {
             "ok": False,
