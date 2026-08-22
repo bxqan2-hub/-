@@ -118,6 +118,28 @@ def normalize_totp_secret(value: str) -> str:
     return normalized
 
 
+def _assert_authenticated_account(email: str, authenticated_email: str = "") -> None:
+    """在密码/MFA 写操作前绑定注册目标与浏览器登录账号。
+
+    参考项目会在浏览器 MFA 请求前比较目标邮箱和当前 session 邮箱；这里把
+    同一边界提升到完整 2FA 流程入口，避免复用浏览器时把凭据写到别的账号。
+    """
+    expected = str(email or "").strip().casefold()
+    authenticated = str(authenticated_email or "").strip().casefold()
+    if not expected:
+        raise TwoFASetupError(
+            "totp_session",
+            "totp_session_email_missing",
+            "2FA 设置缺少目标账号邮箱",
+        )
+    if authenticated and authenticated != expected:
+        raise TwoFASetupError(
+            "totp_session",
+            "totp_session_account_mismatch",
+            "当前浏览器登录账号与注册目标不一致",
+        )
+
+
 def _validate_trusted_openai_url(value: str, *, stage: str, code: str, message: str) -> str:
     """只允许 OpenAI/ChatGPT HTTPS 回调，避免把重认证结果当成任意跳转地址。"""
     raw = str(value or "").strip()
@@ -1382,6 +1404,7 @@ def _setup_2fa_result(
     driver=None,
     existing_password: str | None = None,
     desired_password: str | None = None,
+    authenticated_email: str = "",
 ) -> TwoFASetupResult:
     """
     完整的 2FA 设置流程。
@@ -1407,6 +1430,7 @@ def _setup_2fa_result(
     logger.info("=" * 60)
     logger.info("开始设置 2FA")
     logger.info("=" * 60)
+    _assert_authenticated_account(email, authenticated_email)
 
     # 阶段一：开启安全设置后必须先确认密码，再进行 MFA 重认证。
     # OTP-only 注册不会出现 create-account/password；旧顺序把补设密码放在
@@ -1622,6 +1646,7 @@ def setup_2fa_result(
     driver=None,
     existing_password: str | None = None,
     desired_password: str | None = None,
+    authenticated_email: str = "",
 ) -> TwoFASetupResult:
     """执行完整 2FA 流程并返回可落库的 Secret 与刷新后 Token。"""
     try:
@@ -1632,6 +1657,7 @@ def setup_2fa_result(
             driver=driver,
             existing_password=existing_password,
             desired_password=desired_password,
+            authenticated_email=authenticated_email,
         )
         try:
             setup_status = result.password_setup or {}
@@ -1672,6 +1698,7 @@ def setup_2fa(
     driver=None,
     existing_password: str | None = None,
     desired_password: str | None = None,
+    authenticated_email: str = "",
 ) -> str:
     """兼容旧调用方：执行完整流程并只返回规范化 Secret。"""
     return setup_2fa_result(
@@ -1681,6 +1708,7 @@ def setup_2fa(
         driver=driver,
         existing_password=existing_password,
         desired_password=desired_password,
+        authenticated_email=authenticated_email,
     ).secret
 
 
@@ -1795,6 +1823,7 @@ def maybe_setup_2fa_result(
     driver=None,
     existing_password: str | None = None,
     desired_password: str | None = None,
+    authenticated_email: str = "",
 ) -> TwoFASetupResult | None:
     """按开关执行 2FA；失败只降级为 None，保留已注册账号。"""
     try:
@@ -1817,6 +1846,7 @@ def maybe_setup_2fa_result(
             driver=driver,
             existing_password=existing_password,
             desired_password=desired_password,
+            authenticated_email=authenticated_email,
         )
     except TwoFASetupError as exc:
         _set_twofa_error(session, exc)
@@ -1834,6 +1864,7 @@ def maybe_setup_2fa(
     driver=None,
     existing_password: str | None = None,
     desired_password: str | None = None,
+    authenticated_email: str = "",
 ) -> str | None:
     """兼容旧调用方：返回 Secret 或 None。"""
     result = maybe_setup_2fa_result(
@@ -1842,6 +1873,7 @@ def maybe_setup_2fa(
         driver=driver,
         existing_password=existing_password,
         desired_password=desired_password,
+        authenticated_email=authenticated_email,
     )
     return result.secret if result else None
 

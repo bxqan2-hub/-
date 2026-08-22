@@ -3630,6 +3630,7 @@ def run_roxy_registration(
                     driver=driver,
                     existing_password=openai_password,
                     desired_password=password_state.get("desired"),
+                    authenticated_email=str((session_info.get("user") or {}).get("email") or ""),
                 )
                 twofa_error = getattr(twofa_session, "_twofa_last_error", None)
                 if twofa_result:

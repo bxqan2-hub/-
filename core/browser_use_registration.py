@@ -1986,6 +1986,7 @@ def run_browser_use_registration(
                         driver=page,
                         existing_password=openai_password,
                         desired_password=desired_password,
+                        authenticated_email=str((session_info.get("user") or {}).get("email") or ""),
                     )
                     twofa_error = getattr(twofa_session, "_twofa_last_error", None)
                     if twofa_result:

@@ -30,6 +30,58 @@ def test_normalize_totp_secret_validates_base32() -> None:
     assert exc_info.value.code == "totp_enroll_response_invalid"
 
 
+def test_twofa_rejects_authenticated_account_mismatch_before_writes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_export,
+        "_trigger_reauth",
+        lambda *args, **kwargs: pytest.fail("账号绑定失败后不得开始 MFA 重认证"),
+    )
+
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export.setup_2fa_result(
+            object(),
+            "target@example.com",
+            existing_password="Stable-pass-1!",
+            authenticated_email="other@example.com",
+        )
+
+    assert exc_info.value.stage == "totp_session"
+    assert exc_info.value.code == "totp_session_account_mismatch"
+
+
+def test_twofa_authenticated_account_match_is_case_insensitive(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    monkeypatch.setattr(account_export, "_snapshot_otp_message_ids", lambda *args, **kwargs: set())
+    monkeypatch.setattr(
+        account_export,
+        "_trigger_reauth",
+        lambda *args: calls.append("reauth") or "https://auth.openai.com/authorize/x",
+    )
+    monkeypatch.setattr(
+        account_export,
+        "_follow_reauth",
+        lambda *args: (_ for _ in ()).throw(
+            account_export.TwoFASetupError(
+                "totp_reauth",
+                "totp_reauth_navigation_failed",
+                "stop after identity assertion",
+                http_status=500,
+            )
+        ),
+    )
+
+    with pytest.raises(account_export.TwoFASetupError):
+        account_export.setup_2fa_result(
+            object(),
+            "Target@Example.com",
+            existing_password="Stable-pass-1!",
+            authenticated_email="target@example.COM",
+        )
+
+    assert calls == ["reauth"]
+
+
 def test_reauth_urls_are_limited_to_https_openai_hosts() -> None:
     assert account_export._validate_trusted_openai_url(
         "https://auth.openai.com/authorize/x",

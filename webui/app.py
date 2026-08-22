@@ -379,6 +379,16 @@ def _account_registration_password(row: dict) -> str:
     return str(extra.get("registration_password") or extra.get("chatgpt_password") or "").strip()
 
 
+def _account_password_2fa_line(row: dict) -> str:
+    """返回 ``账号----密码----MFA Secret``；任一字段缺失时不生成半成品。"""
+    email = str(row.get("email") or "").strip()
+    password = _account_registration_password(row)
+    totp_secret = str(row.get("totp_secret") or "").strip()
+    if not (email and password and totp_secret):
+        return ""
+    return f"{email}----{password}----{totp_secret}"
+
+
 def _account_secret_value(row: dict, field: str) -> str:
     """Return only the explicitly allow-listed account secret requested by the UI."""
     field = str(field or "").strip()
@@ -392,9 +402,11 @@ def _account_secret_value(row: dict, field: str) -> str:
         return str(row.get("totp_secret") or "")
     if field in {"registration_password", "chatgpt_password"}:
         return _account_registration_password(row)
+    if field == "account_password_2fa":
+        return _account_password_2fa_line(row)
     if field == "oaics_link":
         return str(row.get("oaics_link") or "")
-    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/registration_password/oaics_link")
+    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/registration_password/account_password_2fa/oaics_link")
 
 
 def _compact_job_for_list(row: dict) -> dict:

@@ -102,8 +102,57 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(password_bulk.status_code, 200)
         self.assertEqual(password_bulk.get_json()["values"][0]["value"], "OpenAI-pass-7!")
 
+        credentials = self.client.get("/api/accounts/7/secret?field=account_password_2fa")
+        self.assertEqual(credentials.status_code, 200)
+        self.assertEqual(
+            credentials.get_json()["value"],
+            "user7@test.com----OpenAI-pass-7!----totp-7",
+        )
+
+        credentials_bulk = self.client.post(
+            "/api/accounts/secret-bulk",
+            json={"account_ids": [7, 8], "field": "account_password_2fa"},
+        )
+        self.assertEqual(credentials_bulk.status_code, 200)
+        self.assertEqual(
+            [item["value"] for item in credentials_bulk.get_json()["values"]],
+            [
+                "user7@test.com----OpenAI-pass-7!----totp-7",
+                "user8@test.com----OpenAI-pass-8!----totp-8",
+            ],
+        )
+
         rejected = self.client.get("/api/accounts/7/secret?field=password")
         self.assertEqual(rejected.status_code, 400)
+
+    @patch("webui.app.db.get_account")
+    def test_account_password_2fa_bulk_skips_incomplete_credentials(self, get_account):
+        rows = {
+            1: {
+                "id": 1,
+                "email": "ready@test.com",
+                "totp_secret": "MFA-READY",
+                "extra_json": json.dumps({"registration_password": "Password-1!"}),
+            },
+            2: {
+                "id": 2,
+                "email": "missing@test.com",
+                "totp_secret": "",
+                "extra_json": json.dumps({"registration_password": "Password-2!"}),
+            },
+        }
+        get_account.side_effect = rows.get
+
+        response = self.client.post(
+            "/api/accounts/secret-bulk",
+            json={"account_ids": [1, 2], "field": "account_password_2fa"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["values"][0]["value"], "ready@test.com----Password-1!----MFA-READY")
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["skipped"][0]["id"], 2)
 
     @patch("webui.app.svc.get_retry_info", return_value={})
     @patch("webui.app.db.list_jobs")
@@ -153,9 +202,15 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="btnCheckSelectedGcashV2"', html)
         self.assertIn("/api/accounts/check-gcash-bulk", html)
         self.assertIn("/api/accounts/extract-oaics-bulk", html)
-        self.assertIn('data-account-copy-secret="totp_secret"', html)
         self.assertIn('data-account-reveal-secret="totp_secret"', html)
-        self.assertIn('data-account-copy-secret="registration_password"', html)
+        self.assertNotIn('data-account-copy-secret="totp_secret"', html)
+        self.assertNotIn('data-account-copy-secret="registration_password"', html)
+        self.assertIn('data-account-copy-secret="account_password_2fa"', html)
+        self.assertIn('id="btnCopySelectedCredentialsV2"', html)
+        self.assertIn('复制所选账号密码2FA', html)
+        self.assertIn("field:'account_password_2fa'", html)
+        self.assertIn("复制为：账号----密码----MFA Secret", html)
+        self.assertIn('<th class="col-small">密码 / 2FA</th>', html)
         self.assertIn('id="btnRenameAccountGroupV2"', html)
         self.assertIn("const PAGER_DRAFT_SIZES = Object.create(null)", html)
         self.assertIn("oninput=\"pagerDraftSize('${id}',this.value)\"", html)
