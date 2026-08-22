@@ -3067,14 +3067,12 @@ def create_app(auth_code: str | None = None) -> Flask:
         selected_email_items = data.get("email_items") or []
         if selected_email_items and not isinstance(selected_email_items, list):
             return jsonify({"ok": False, "error": "email_items 必须是数组"}), 400
-        if isinstance(selected_email_items, list) and len(selected_email_items) > 200:
-            return jsonify({"ok": False, "error": "单次最多推送 200 个邮箱"}), 400
         try:
             count = int(data.get("count", 1))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "count 非法"}), 400
-        if count < 1 or count > 200:
-            return jsonify({"ok": False, "error": "count 需在 1~200 之间"}), 400
+        if count < 1:
+            return jsonify({"ok": False, "error": "count 必须大于 0"}), 400
 
         # workers 控制本次新提交任务使用的线程池；若和上次不同，服务层会为新任务切换到新池。
         try:

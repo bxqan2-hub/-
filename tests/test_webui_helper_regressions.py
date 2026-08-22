@@ -222,14 +222,24 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="btnCheckSelectedGcashV2"', html)
         self.assertIn("/api/accounts/check-gcash-bulk", html)
         self.assertIn("/api/accounts/extract-oaics-bulk", html)
-        self.assertIn('data-account-reveal-secret="totp_secret"', html)
+        self.assertNotIn('data-account-reveal-secret="totp_secret"', html)
+        self.assertNotIn('>显示2FA</button>', html)
         self.assertNotIn('data-account-copy-secret="totp_secret"', html)
         self.assertNotIn('data-account-copy-secret="registration_password"', html)
         self.assertIn('data-account-copy-secret="account_password_2fa"', html)
         self.assertIn('id="btnCopySelectedCredentialsV2"', html)
-        self.assertIn('复制所选账号密码2FA', html)
+        self.assertIn('id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制为：账号----密码----MFA Secret">复制</button>', html)
+        self.assertIn("const copyButton = `<button", html)
+        self.assertIn(">复制</button>`;", html)
         self.assertIn("field:'account_password_2fa'", html)
         self.assertIn("复制为：账号----密码----MFA Secret", html)
+        self.assertIn("const ACTIVE_TOTP_CODES = new Map()", html)
+        self.assertIn("function drawAccountTotpCode(id)", html)
+        self.assertIn("function stopAccountTotpCode(id)", html)
+        self.assertIn("async function tickAccountTotpCode(id)", html)
+        self.assertIn("const totpState = ACTIVE_TOTP_CODES.get(accountId)", html)
+        self.assertNotIn("dataset.totpRunning", html)
+        self.assertNotIn("dataset.totpTimer", html)
         self.assertIn('<th class="col-small">密码 / 2FA</th>', html)
         self.assertIn('id="btnRenameAccountGroupV2"', html)
         self.assertIn("const PAGER_DRAFT_SIZES = Object.create(null)", html)
@@ -378,6 +388,37 @@ class WebUiHelperRegressionTests(unittest.TestCase):
             second_revision = db.list_account_plan_check_statuses()["revision"]
 
         self.assertNotEqual(first_revision, second_revision)
+
+    def test_registration_count_has_no_upper_limit(self):
+        with (
+            patch("config.email.USE_EMAIL_SERVICE", True),
+            patch("config.email.EMAIL_SOURCE", "gptmail"),
+            patch("config.email.GPTMAIL_API_KEY", "test-key"),
+            patch("webui.app.svc.submit_registration", return_value=[]) as submit_registration,
+        ):
+            response = self.client.post("/api/jobs", json={"count": 501, "workers": 7})
+
+        self.assertEqual(response.status_code, 200)
+        submit_registration.assert_called_once_with(count=501, workers=7)
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="regCountV2" type="number" min="1" value="1"', html)
+        self.assertNotIn('id="regCountV2" type="number" min="1" max="200"', html)
+        self.assertIn('id="regCountHintV2">不限</span>', html)
+
+    def test_selected_email_registration_has_no_two_hundred_item_limit(self):
+        email_items = [
+            {"source": "generic_api", "email": f"user{index}@example.test"}
+            for index in range(201)
+        ]
+        with patch("webui.app.svc.submit_registration", return_value=[]) as submit_registration:
+            response = self.client.post(
+                "/api/jobs",
+                json={"count": 1, "workers": 9, "email_items": email_items},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["requested_count"], 201)
+        submit_registration.assert_called_once_with(workers=9, email_items=email_items)
 
 
 if __name__ == "__main__":
