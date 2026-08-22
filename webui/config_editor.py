@@ -725,21 +725,21 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "套餐检测代理列表", "help": "每行一个，支持 名称|直接代理 或 名称|代理API；可填写多个，例如 DE|https://...?region=de、JP|socks5h://user:pass@host:port",
+        "label": "套餐检测静态代理池", "help": "由“加入代理池”检测出口国家后自动维护；每个国家可加入多条静态代理",
         "storage": "env", "secret": True,
     },
     {
         "key": "PLAN_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐检测当前线路", "help": "从套餐检测代理列表选择；只影响套餐/Plus/试用检测，不影响 Checkout",
+        "label": "套餐检测当前国家", "help": "选择国家后，套餐/Plus/试用检测会在该国家静态池内随机洗牌取代理",
     },
     {
         "key": "CHECKOUT_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "Checkout检测代理列表", "help": "每行一个，支持 名称|直接代理 或 名称|代理API；与套餐检测列表完全独立",
+        "label": "Checkout检测静态代理池", "help": "由“加入代理池”检测出口国家后自动维护；与套餐检测静态池完全独立",
         "storage": "env", "secret": True,
     },
     {
         "key": "CHECKOUT_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "Checkout检测当前线路", "help": "从 Checkout 检测代理列表选择；只影响 OAICS/CSLIVE 检测",
+        "label": "Checkout检测当前国家", "help": "选择国家后，OAICS/CSLIVE 检测会在该国家静态池内随机洗牌取代理",
     },
     {
         "key": "GC_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",

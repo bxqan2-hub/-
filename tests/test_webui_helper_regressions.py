@@ -287,6 +287,20 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('proxyPoolEntryCountV2', html)
         self.assertNotIn('maxlength="10"', html)
 
+    def test_detection_proxy_ui_uses_add_button_and_country_selector(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('data-add-detection-proxy="${attrEsc(purpose)}"', html)
+        self.assertIn("renderDetectionProxyCountryControlV2(checkoutProfiles, checkoutActive, 'checkout')", html)
+        self.assertIn("renderDetectionProxyCountryControlV2(planProfiles, planActive, 'plan')", html)
+        self.assertIn('data-detection-country-select', html)
+        self.assertIn('id="detectionProxyImportModal"', html)
+        self.assertIn('加入代理池', html)
+        self.assertIn('/api/detection-proxy-pools/import', html)
+        self.assertIn('随机洗牌', html)
+        self.assertNotIn('${renderConfigPlainFieldV2(planProfiles)}', html)
+        self.assertNotIn('${renderConfigPlainFieldV2(checkoutProfiles)}', html)
+
     def test_settings_ui_filters_irrelevant_drivers_and_has_real_status_cards(self):
         html = self.client.get("/").get_data(as_text=True)
 

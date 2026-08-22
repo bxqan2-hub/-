@@ -887,7 +887,7 @@ MIT
 账号页面不再提供 GCash、PIX、PP、KK 提链或资格检测入口，所有提链统一在“提链中心”完成。Kakao 的 `oaics_*` 路径在 PAY.153 内部参考并署名
 [kakao_oaics_source](https://github.com/m1243808154/kakao_oaics_source)，不会作为第三个服务运行。
 
-账号页面保留独立的“检测 OAICS/CSLIVE”能力：每个账号只创建一次最小 custom Plus Checkout，按返回的 `oaics_*`、`checkout_provider=open_ai/oaics` 或 `cs_live_*` 分类后立即停止。检测不附加促销，也不会执行税区、支付方式、ConfirmationToken 或 confirm。设置页分别维护“套餐检测代理列表”和“Checkout 检测代理列表”；两边都支持保存多个 `名称|直接代理/代理API` 并选择当前线路，互不复用。
+账号页面保留独立的“检测 OAICS/CSLIVE”能力：每个账号只创建一次最小 custom Plus Checkout，按返回的 `oaics_*`、`checkout_provider=open_ai/oaics` 或 `cs_live_*` 分类后立即停止。检测不附加促销，也不会执行税区、支付方式、ConfirmationToken 或 confirm。设置页分别维护“套餐检测静态代理池”和“Checkout 检测静态代理池”：点击“加入代理池”可一次粘贴多条静态代理，系统逐条检测真实出口国家并自动归类；选择国家后，多并发任务在该国家池内随机洗牌轮转取代理。两套检测池互不复用，也不会再调用动态代理 API。
 
 “检测套餐/Plus/试用”一次读取 `accounts/check` 的当前套餐、Plus entitlement 与 `eligible_promo_campaigns.plus`。Free 账号会继续解析活动 `metadata.discount.percentage`、标题、周期和 campaign，明确显示“Free · 0元试用”“Free · 半价试用”“Free · 其他优惠”或“Free · 无试用资格”，并提供对应筛选；比例缺失时只标记“优惠未知”，不会猜成 0 元或半价。是否出现日本活动由套餐检测当前选择的日本出口决定。
 

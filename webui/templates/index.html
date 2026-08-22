@@ -1693,7 +1693,8 @@
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden),
     #reboundImportModal:not(.hidden),
-    #proxyApiImportModal:not(.hidden) {
+    #proxyApiImportModal:not(.hidden),
+    #detectionProxyImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -2048,8 +2049,20 @@
     .detection-proxy-card-v2 textarea { min-height: 92px; resize: vertical; }
     .detection-proxy-card-v2 select,
     .detection-proxy-card-v2 textarea { width: 100%; max-width: 100%; }
+    .detection-proxy-controls-v2 {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end;
+    }
+    .detection-proxy-controls-v2 .fld { margin: 0; }
+    .detection-proxy-controls-v2 .btn { min-height: 38px; white-space: nowrap; }
+    .detection-proxy-summary-v2 {
+      margin-top: 10px; min-height: 18px; color: #606266; font-size: 12px; line-height: 1.5;
+    }
+    .detection-proxy-summary-v2 strong { color: #377dff; font-weight: 700; }
     @media (max-width: 900px) {
       .detection-proxy-grid-v2 { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 520px) {
+      .detection-proxy-controls-v2 { grid-template-columns: 1fr; }
     }
     .config-section-v2-actions {
       margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px;
@@ -2942,6 +2955,29 @@
     </div>
   </div>
 </div>
+<div id="detectionProxyImportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="detectionProxyImportTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="detectionProxyImportTitle">加入静态代理池</h3>
+        <p id="detectionProxyImportHelp">每行一条静态代理。系统会逐条检测真实出口国家，自动归纳到国家代理池。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseDetectionProxyImport" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="outlook-import-result" id="detectionProxyImportResultV2"></div>
+      <label class="outlook-import-field">
+        <span>静态代理</span>
+        <textarea id="detectionProxyImportTextV2" rows="12" placeholder="host:port:username:password&#10;socks5h://username:password@host:port&#10;http://username:password@host:port" autocomplete="off" spellcheck="false"></textarea>
+        <span class="outlook-import-hint">支持一次粘贴多条；重复代理自动去重。这里只接收静态代理，不调用动态代理 API。</span>
+      </label>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelDetectionProxyImport">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitDetectionProxyImport">检测国家并加入</button>
+    </div>
+  </div>
+</div>
 <div class="body hidden" id="logPanel">
   <h3>任务 #<span id="logJobId"></span> 日志 <button class="btn" id="btnCloseLog" style="float:right;min-height:28px;">关闭</button></h3>
   <div class="log" id="logContent">加载中…</div>
@@ -3662,7 +3698,8 @@ function updateModalScrollLock() {
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden')
     || !$('#reboundImportModal').classList.contains('hidden')
-    || !$('#proxyApiImportModal').classList.contains('hidden');
+    || !$('#proxyApiImportModal').classList.contains('hidden')
+    || !$('#detectionProxyImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -5885,7 +5922,7 @@ async function checkSelectedCheckoutKinds() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
   const workers = Math.min(8, getCodexBulkWorkers());
-  if (!confirm(`确定检测选中的 ${ids.length} 个账号的 Checkout 类型吗？\n\n每个账号只创建一次最小 Plus Checkout，并在识别为 oaics 或 cs_live 后立即停止。不附加促销，也不会执行税区、PaymentMethod、ctoken 或 confirm。\n\n并发线程数：${workers}\n检测线路：设置 → Checkout 检测当前线路`)) return;
+  if (!confirm(`确定检测选中的 ${ids.length} 个账号的 Checkout 类型吗？\n\n每个账号只创建一次最小 Plus Checkout，并在识别为 oaics 或 cs_live 后立即停止。不附加促销，也不会执行税区、PaymentMethod、ctoken 或 confirm。\n\n并发线程数：${workers}\n代理池：设置 → Checkout 检测当前国家`)) return;
   const btn = $('#btnCheckSelectedCheckoutKindV2');
   if (!btn) return;
   const old = btn.textContent;
@@ -7709,6 +7746,112 @@ function bindProxyApiImportModalV2() {
   });
 }
 
+let DETECTION_PROXY_IMPORT_PURPOSE_V2 = 'plan';
+function openDetectionProxyImportModalV2(purpose) {
+  DETECTION_PROXY_IMPORT_PURPOSE_V2 = purpose === 'checkout' ? 'checkout' : 'plan';
+  const modal = $('#detectionProxyImportModal');
+  const textarea = $('#detectionProxyImportTextV2');
+  const result = $('#detectionProxyImportResultV2');
+  const title = $('#detectionProxyImportTitle');
+  const help = $('#detectionProxyImportHelp');
+  if (!modal || !textarea) return;
+  const isCheckout = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'checkout';
+  if (title) title.textContent = isCheckout ? '加入 Checkout 检测代理池' : '加入套餐检测代理池';
+  if (help) help.textContent = isCheckout
+    ? '逐条检测真实出口国家并归入 Checkout 独立池，不会加入套餐检测池。'
+    : '逐条检测真实出口国家并归入套餐独立池，不会加入 Checkout 检测池。';
+  textarea.value = '';
+  if (result) result.textContent = '';
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+  textarea.focus();
+}
+
+function closeDetectionProxyImportModalV2() {
+  const modal = $('#detectionProxyImportModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  updateModalScrollLock();
+}
+
+async function submitDetectionProxyImportV2() {
+  const textarea = $('#detectionProxyImportTextV2');
+  const result = $('#detectionProxyImportResultV2');
+  const submit = $('#btnSubmitDetectionProxyImport');
+  const proxies = String(textarea?.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  if (!proxies.length) {
+    if (result) result.innerHTML = '<span style="color:var(--red);">请至少粘贴一条静态代理</span>';
+    return;
+  }
+  if (submit) submit.disabled = true;
+  if (result) result.textContent = `正在并发检测 ${proxies.length} 条代理的出口国家…`;
+  try {
+    const response = await api('/api/detection-proxy-pools/import', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({purpose:DETECTION_PROXY_IMPORT_PURPOSE_V2, proxies}),
+    });
+    closeDetectionProxyImportModalV2();
+    await loadConfig();
+    const countryText = (response.countries || []).map(item => `${item.label} ${item.count} 条`).join('、');
+    showToast(`已加入 ${response.added_count} 条静态代理${response.failed_count ? `，${response.failed_count} 条检测失败` : ''}${countryText ? `；${countryText}` : ''}`);
+  } catch (e) {
+    if (result) result.innerHTML = `<span style="color:var(--red);">加入失败：${esc(e.message)}</span>`;
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+}
+
+async function saveDetectionProxyCountryV2(select) {
+  const purpose = select.dataset.detectionCountrySelect === 'checkout' ? 'checkout' : 'plan';
+  const activeKey = purpose === 'checkout' ? 'CHECKOUT_CHECK_PROXY_ACTIVE' : 'PLAN_CHECK_PROXY_ACTIVE';
+  const status = document.querySelector(`[data-detection-proxy-status="${purpose}"]`);
+  const country = String(select.value || '').toUpperCase();
+  if (!country) return;
+  select.disabled = true;
+  if (status) status.textContent = '正在切换国家代理池…';
+  try {
+    const response = await api('/api/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({updates:{[activeKey]:country}}),
+    });
+    const field = CONFIG.find(item => item.key === activeKey);
+    if (field) field.value = country;
+    delete CONFIG_PENDING_UPDATES[activeKey];
+    renderConfigLayoutV2();
+    showToast(`已切换到 ${proxyRegionLabelV2(country)}代理池${response.reloaded ? '' : '（重启后生效）'}`);
+  } catch (e) {
+    if (status) status.textContent = '切换失败：' + e.message;
+    showToast('切换国家代理池失败: ' + e.message);
+    select.disabled = false;
+  }
+}
+
+function bindDetectionProxyPoolToolsV2() {
+  document.querySelectorAll('[data-add-detection-proxy]').forEach(button => {
+    if (button.dataset.bound) return;
+    button.dataset.bound = '1';
+    button.addEventListener('click', () => openDetectionProxyImportModalV2(button.dataset.addDetectionProxy));
+  });
+  document.querySelectorAll('[data-detection-country-select]').forEach(select => {
+    if (select.dataset.bound) return;
+    select.dataset.bound = '1';
+    select.addEventListener('change', event => {
+      event.stopPropagation();
+      saveDetectionProxyCountryV2(select);
+    });
+  });
+  const modal = $('#detectionProxyImportModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  $('#btnCloseDetectionProxyImport')?.addEventListener('click', closeDetectionProxyImportModalV2);
+  $('#btnCancelDetectionProxyImport')?.addEventListener('click', closeDetectionProxyImportModalV2);
+  $('#btnSubmitDetectionProxyImport')?.addEventListener('click', submitDetectionProxyImportV2);
+  modal.addEventListener('click', event => { if (event.target === modal) closeDetectionProxyImportModalV2(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeDetectionProxyImportModalV2();
+  });
+}
+
 function configGroupSlug(name) {
   return 'cfg-' + String(name || '')
     .replace(/[^\w\u4e00-\u9fff]+/g, '-')
@@ -7965,17 +8108,22 @@ function detectionProxyProfileOptionsV2(profileKey) {
   const rawProfiles = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, profileKey)
     ? CONFIG_PENDING_UPDATES[profileKey]
     : (profilesField?.value || []);
-  const used = {};
-  return (Array.isArray(rawProfiles) ? rawProfiles : String(rawProfiles || '').split('\n')).map((line, index) => {
+  const groups = new Map();
+  (Array.isArray(rawProfiles) ? rawProfiles : String(rawProfiles || '').split('\n')).forEach(line => {
     const text = String(line || '').trim();
-    if (!text || text.startsWith('#')) return null;
-    let label = '';
-    if (!/^(?:https?|socks5h?):\/\//i.test(text) && text.includes('|')) label = text.slice(0, text.indexOf('|')).trim();
-    if (!label && /^https?:\/\//i.test(text)) label = proxyRegionCodeFromUrlV2(text, `线路 ${index + 1}`);
-    label = label || `线路 ${index + 1}`;
-    used[label] = (used[label] || 0) + 1;
-    return {key: used[label] === 1 ? label : `${label}-${used[label]}`, label};
-  }).filter(Boolean);
+    if (!text || text.startsWith('#') || !text.includes('|')) return;
+    const pos = text.indexOf('|');
+    const code = text.slice(0, pos).trim().toUpperCase();
+    const proxy = text.slice(pos + 1).trim();
+    if (!/^[A-Z]{2}$/.test(code) || !proxy || /^api:/i.test(proxy)) return;
+    groups.set(code, (groups.get(code) || 0) + 1);
+  });
+  return Array.from(groups.entries()).map(([code, count]) => ({
+    key: code,
+    code,
+    count,
+    label: `${proxyRegionLabelV2(code)}（${count} 条）`,
+  }));
 }
 function refreshDetectionProxySelectV2(profileKey) {
   const activeKey = profileKey === 'PLAN_CHECK_PROXY_PROFILES'
@@ -7990,8 +8138,35 @@ function refreshDetectionProxySelectV2(profileKey) {
   const active = profiles.some(item => item.key === requested) ? requested : (profiles[0]?.key || '');
   select.innerHTML = profiles.length
     ? profiles.map(item => `<option value="${attrEsc(item.key)}"${item.key === active ? ' selected' : ''}>${esc(item.label)}</option>`).join('')
-    : '<option value="">请先填写上方代理列表</option>';
+    : '<option value="">请先加入静态代理</option>';
   CONFIG_PENDING_UPDATES[activeKey] = active;
+}
+function renderDetectionProxyCountryControlV2(profileField, activeField, purpose) {
+  const profiles = detectionProxyProfileOptionsV2(profileField.key);
+  const currentValue = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, activeField.key)
+    ? String(CONFIG_PENDING_UPDATES[activeField.key] || '').toUpperCase()
+    : String(activeField.value || '').toUpperCase();
+  const active = profiles.some(item => item.key === currentValue) ? currentValue : (profiles[0]?.key || '');
+  const selected = profiles.find(item => item.key === active);
+  const total = profiles.reduce((sum, item) => sum + item.count, 0);
+  return `
+    <div class="detection-proxy-controls-v2">
+      <label class="fld">
+        选择国家
+        <span class="hint">新任务会从所选国家的静态代理池随机洗牌取用</span>
+        <select data-key="${attrEsc(activeField.key)}" data-detection-country-select="${attrEsc(purpose)}">
+          ${profiles.length
+            ? profiles.map(item => `<option value="${attrEsc(item.key)}"${item.key === active ? ' selected' : ''}>${esc(item.label)}</option>`).join('')
+            : '<option value="">尚未加入静态代理</option>'}
+        </select>
+      </label>
+      <button type="button" class="btn primary" data-add-detection-proxy="${attrEsc(purpose)}">加入代理池</button>
+    </div>
+    <div class="detection-proxy-summary-v2" data-detection-proxy-status="${attrEsc(purpose)}">
+      ${profiles.length
+        ? `已归纳 <strong>${profiles.length}</strong> 个国家、共 <strong>${total}</strong> 条；当前 ${esc(selected?.label || '')}`
+        : '当前没有静态代理；原动态 API 不会被套餐或 Checkout 检测调用。'}
+    </div>`;
 }
 function renderDetectionProxyPanelV2(fields) {
   const byKey = Object.fromEntries(fields.map(field => [field.key, field]));
@@ -8004,24 +8179,22 @@ function renderDetectionProxyPanelV2(fields) {
   const checkoutCard = (checkoutProfiles && checkoutActive) ? `
     <section class="detection-proxy-card-v2" aria-label="Checkout 检测代理">
       <h4>Checkout 检测代理</h4>
-      <p>只用于 OAICS / CSLIVE 检测，不与套餐检测共用。</p>
-      ${renderConfigPlainFieldV2(checkoutProfiles)}
-      ${renderConfigPlainFieldV2(checkoutActive)}
+      <p>只用于 OAICS / CSLIVE 检测；按国家独立归类，与套餐检测完全分离。</p>
+      ${renderDetectionProxyCountryControlV2(checkoutProfiles, checkoutActive, 'checkout')}
     </section>
   ` : '';
   const planCard = (planProfiles && planActive) ? `
     <section class="detection-proxy-card-v2" aria-label="套餐检测代理">
       <h4>套餐 / Plus / 试用检测代理</h4>
-      <p>只用于“检测套餐/Plus/试用”，不会用于 Checkout 检测。</p>
-      ${renderConfigPlainFieldV2(planProfiles)}
-      ${renderConfigPlainFieldV2(planActive)}
+      <p>只用于“检测套餐/Plus/试用”；多并发会在所选国家池内洗牌分配。</p>
+      ${renderDetectionProxyCountryControlV2(planProfiles, planActive, 'plan')}
     </section>
   ` : '';
   return `
     <div class="detection-proxy-panel-v2">
       <div class="detection-proxy-panel-v2-head">
         <div><b>检测代理（套餐与 Checkout 完全分离）</b></div>
-        <span>填写多条后，从下拉框选择当前线路；GCash 代理池为多行列表</span>
+        <span>加入静态代理后自动识别国家；选择国家即可使用该国家代理池</span>
       </div>
       <div class="detection-proxy-grid-v2">
         ${planCard}
@@ -8446,6 +8619,7 @@ function renderConfigLayoutV2() {
   bindRoxyWorkspaceToolsV2();
   bindProxyApiToolsV2();
   bindProxyApiImportModalV2();
+  bindDetectionProxyPoolToolsV2();
   bindCloudMailToolsV2();
 }
 function scrollToConfigSection(slug) {

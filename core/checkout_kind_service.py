@@ -48,7 +48,9 @@ def check_checkout_kind(access_token: str, *, proxy: str | None = None) -> dict:
         selected_proxy = proxy if proxy is not None else (
             detection_proxy.configured_detection_proxy_spec("checkout") or ""
         )
-        route = resolve_plan_check_route(detection_proxy.resolve_detection_proxy(selected_proxy))
+        route = resolve_plan_check_route(
+            detection_proxy.resolve_static_detection_proxy(selected_proxy)
+        )
     except Exception as exc:
         return {
             "ok": False,

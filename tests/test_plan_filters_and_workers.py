@@ -321,8 +321,8 @@ class PlanCheckWorkerTests(unittest.TestCase):
         self.assertEqual(session_cls.return_value.session.get.call_count, 2)
 
     @patch.object(plan_check_service, "check_account_plan", return_value={"ok": True})
-    @patch.object(plan_check_service.detection_proxy, "resolve_detection_proxy", return_value="proxy")
-    @patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", return_value="api")
+    @patch.object(plan_check_service.detection_proxy, "resolve_static_detection_proxy", return_value="proxy")
+    @patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", return_value="JP|socks5h://proxy.example:1080")
     @patch.object(plan_check_service.detection_proxy, "infer_timezone_offset_min", return_value="-540")
     @patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True)
     @patch.object(plan_check_service.db, "update_account_plan_check")
@@ -344,32 +344,18 @@ class PlanCheckWorkerTests(unittest.TestCase):
             proxy=None,
             timezone_offset_min="-",
         )
-        resolve.assert_called_once_with(
-            "api",
-            api_timeout=4.0,
-            api_max_attempts=1,
-            validation_timeout=4.0,
-            validate=False,
-        )
+        resolve.assert_called_once_with("JP|socks5h://proxy.example:1080")
         self.assertTrue(check.call_args.kwargs["fast_mode"])
         self.assertEqual(check.call_args.kwargs["max_attempts"], 0)
         self.assertTrue(callable(check.call_args.kwargs["continue_check"]))
         self.assertTrue(callable(check.call_args.kwargs["retry_proxy_provider"]))
 
-    def test_account_page_polls_proxy_api_until_it_returns_a_proxy(self):
+    def test_account_page_rejects_dynamic_proxy_api(self):
         with patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True), \
-             patch.object(plan_check_service.db, "get_account", return_value={"plan_check_status": "running"}), \
              patch.object(plan_check_service.db, "update_account_plan_check"), \
              patch.object(plan_check_service, "_wait_for_rate_slot"), \
-             patch.object(plan_check_service.detection_proxy, "resolve_detection_proxy", side_effect=[
-                 RuntimeError("first timeout"),
-                 RuntimeError("second timeout"),
-                 "socks5h://proxy.example:1080",
-             ]) as resolve, \
              patch.object(plan_check_service.detection_proxy, "infer_timezone_offset_min", return_value="-540"), \
-             patch.object(plan_check_service, "check_account_plan", return_value={"ok": True}), \
-             patch.object(plan_check_service.proxy_cfg, "PROXY_API_RETRY_DELAY", 0.25), \
-             patch.object(plan_check_service.time, "sleep") as sleep:
+             patch.object(plan_check_service, "check_account_plan", return_value={"ok": True}) as check:
             plan_check_service._QUEUE_SLOTS.acquire()
             result = plan_check_service._run_plan_check(
                 account_id=1,
@@ -380,23 +366,34 @@ class PlanCheckWorkerTests(unittest.TestCase):
                 timezone_offset_min="-",
             )
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(resolve.call_count, 3)
-        self.assertEqual(sleep.call_count, 2)
-        sleep.assert_called_with(0.25)
+        self.assertFalse(result["ok"])
+        self.assertIn("静态代理池", result["error"])
+        check.assert_not_called()
 
-    def test_proxy_api_polling_stops_when_plan_task_is_no_longer_running(self):
-        with patch.object(plan_check_service.db, "get_account", return_value={"plan_check_status": "failed"}), \
-             patch.object(plan_check_service.detection_proxy, "resolve_detection_proxy", side_effect=RuntimeError("timeout")) as resolve, \
-             patch.object(plan_check_service.time, "sleep") as sleep:
-            with self.assertRaisesRegex(RuntimeError, "套餐查询已停止"):
-                plan_check_service._resolve_plan_check_proxy(
-                    "JP|https://api.example.test/white/api?region=JP",
-                    account_id=1,
-                )
+    def test_static_proxy_resolution_does_not_poll_proxy_api(self):
+        with patch.object(
+            plan_check_service.detection_proxy,
+            "resolve_static_detection_proxy",
+            return_value="socks5h://proxy.example:1080",
+        ) as resolve, patch.object(plan_check_service.time, "sleep") as sleep:
+            result = plan_check_service._resolve_plan_check_proxy(
+                "JP|socks5h://proxy.example:1080",
+                account_id=1,
+            )
 
-        resolve.assert_called_once()
+        self.assertEqual(result, "socks5h://proxy.example:1080")
+        resolve.assert_called_once_with("JP|socks5h://proxy.example:1080")
         sleep.assert_not_called()
+
+    def test_empty_detection_pool_does_not_fall_back_to_registration_proxy_api(self):
+        with patch.object(
+            plan_check_service.detection_proxy,
+            "resolve_static_detection_proxy",
+        ) as resolve:
+            result = plan_check_service._resolve_plan_check_proxy(None, account_id=1)
+
+        self.assertEqual(result, "")
+        resolve.assert_not_called()
 
     def test_executor_switches_to_requested_worker_count(self):
         original_workers = plan_check_service.get_executor_workers()
@@ -411,8 +408,8 @@ class PlanCheckWorkerTests(unittest.TestCase):
     def test_plan_check_does_not_run_external_mailbox_detection(self):
         with patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True), \
              patch.object(plan_check_service.db, "update_account_plan_check"), \
-             patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", return_value="api"), \
-             patch.object(plan_check_service.detection_proxy, "resolve_detection_proxy", return_value="proxy"), \
+             patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", return_value="JP|socks5h://proxy.example:1080"), \
+             patch.object(plan_check_service.detection_proxy, "resolve_static_detection_proxy", return_value="proxy"), \
              patch.object(plan_check_service.detection_proxy, "infer_timezone_offset_min", return_value="-540"), \
              patch.object(plan_check_service, "check_account_plan", return_value={"ok": True, "current_plan_type": "free"}), \
              patch("core.gc_registration_service._mailbox_plus_fallback") as mailbox_fallback:

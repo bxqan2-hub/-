@@ -105,39 +105,11 @@ def _wait_for_rate_slot() -> None:
 
 
 def _resolve_plan_check_proxy(spec: str | None, account_id: int) -> str | None:
-    if not detection_proxy.is_detection_proxy_api(spec):
-        return detection_proxy.resolve_detection_proxy(
-            spec,
-            api_timeout=4.0,
-            api_max_attempts=1,
-            validation_timeout=4.0,
-            validate=False,
-        )
-
-    retry_delay = _float_setting("PROXY_API_RETRY_DELAY", 3.0, 0.1, 60.0)
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            return detection_proxy.resolve_detection_proxy(
-                spec,
-                api_timeout=4.0,
-                api_max_attempts=1,
-                validation_timeout=4.0,
-                validate=False,
-            )
-        except RuntimeError as exc:
-            account = db.get_account(account_id)
-            if not account or account.get("plan_check_status") != "running":
-                raise RuntimeError("套餐查询已停止，终止代理 API 轮询") from exc
-            logger.warning(
-                "[Plan] 代理 API 第 %s 次请求失败，%.1f 秒后继续轮询: %s: %s",
-                attempt,
-                retry_delay,
-                type(exc).__name__,
-                str(exc)[:240],
-            )
-            time.sleep(retry_delay)
+    del account_id
+    if spec is None:
+        # 显式空串让 check_account_plan 直连，避免空检测池回退到注册用动态 API。
+        return ""
+    return detection_proxy.resolve_static_detection_proxy(spec)
 
 
 def _run_plan_check(
@@ -166,7 +138,10 @@ def _run_plan_check(
             continue_check=lambda: bool(
                 (db.get_account(account_id) or {}).get("plan_check_status") == "running"
             ),
-            retry_proxy_provider=lambda: _resolve_plan_check_proxy(selected_proxy, account_id),
+            retry_proxy_provider=lambda: _resolve_plan_check_proxy(
+                detection_proxy.configured_detection_proxy_spec("plan") if proxy is None else selected_proxy,
+                account_id,
+            ),
         )
         if result.get("ok") and not result.get("plan_detection_source"):
             result["plan_detection_source"] = "account_access_token"

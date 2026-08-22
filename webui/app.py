@@ -1226,7 +1226,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
         if len(ids) > 500:
             return jsonify({"ok": False, "error": "单次最多查询 500 个账号"}), 400
-        # 与单账号查询保持一致：页面代理池可填写直接代理或返回代理的 API。
+        # 与单账号查询保持一致：每个任务从当前国家静态代理池独立取一条。
         timezone_offset_min = str(data.get("timezone_offset_min") or "-")
         try:
             workers = _positive_worker_count(data.get("workers"), plan_check_service.get_executor_workers())
@@ -3532,6 +3532,131 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     # 配置读写
     # ----------------------------------------------------------
+    @app.post("/api/detection-proxy-pools/import")
+    def api_detection_proxy_pool_import():
+        """检测静态代理出口国家，按国家合并保存到套餐或 Checkout 独立池。"""
+        data = request.get_json(silent=True) or {}
+        purpose = str(data.get("purpose") or "").strip().lower()
+        field_map = {
+            "plan": ("PLAN_CHECK_PROXY_PROFILES", "PLAN_CHECK_PROXY_ACTIVE"),
+            "checkout": ("CHECKOUT_CHECK_PROXY_PROFILES", "CHECKOUT_CHECK_PROXY_ACTIVE"),
+        }
+        if purpose not in field_map:
+            return jsonify({"ok": False, "error": "purpose 必须是 plan 或 checkout"}), 400
+
+        from config import proxy as proxy_cfg
+        from core import detection_proxy
+
+        try:
+            submitted = detection_proxy.parse_detection_proxy_pool(data.get("proxies"), limit=500)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        if not submitted:
+            return jsonify({"ok": False, "error": "请至少加入一条静态代理"}), 400
+
+        try:
+            timeout = max(2.0, min(float(data.get("timeout") or 12.0), 30.0))
+            requested_workers = int(data.get("workers") or 20)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "timeout/workers 格式错误"}), 400
+        workers = max(1, min(requested_workers, 32, len(submitted)))
+
+        candidates: list[tuple[int, str]] = []
+        failures: list[dict[str, object]] = []
+        seen_proxies: set[str] = set()
+        for line_number, raw in enumerate(submitted, 1):
+            try:
+                normalized = detection_proxy.resolve_static_detection_proxy(raw) or ""
+                if not normalized:
+                    raise ValueError("empty")
+                if normalized in seen_proxies:
+                    continue
+                seen_proxies.add(normalized)
+                candidates.append((line_number, normalized))
+            except Exception as exc:
+                failures.append({
+                    "line": line_number,
+                    "error": "动态代理 API 不受支持" if detection_proxy.is_detection_proxy_api(raw)
+                    else f"代理格式无法识别（{type(exc).__name__}）",
+                })
+
+        detected: list[tuple[int, dict[str, str]]] = []
+        if candidates:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="proxy-country") as executor:
+                futures = {
+                    executor.submit(detection_proxy.inspect_static_proxy, proxy, timeout=timeout): line_number
+                    for line_number, proxy in candidates
+                }
+                for future in as_completed(futures):
+                    line_number = futures[future]
+                    try:
+                        detected.append((line_number, future.result()))
+                    except Exception as exc:
+                        logger.info(
+                            "检测静态代理出口失败: purpose=%s line=%s error=%s",
+                            purpose,
+                            line_number,
+                            type(exc).__name__,
+                        )
+                        failures.append({"line": line_number, "error": "连接或出口国家检测失败"})
+        detected.sort(key=lambda item: item[0])
+        if not detected:
+            return jsonify({
+                "ok": False,
+                "error": "没有可保存的静态代理，请检查格式、连通性和出口",
+                "failed_count": len(failures),
+                "failures": failures,
+            }), 400
+
+        profiles_key, active_key = field_map[purpose]
+        existing = getattr(proxy_cfg, profiles_key, []) or []
+        merged: dict[str, tuple[str, str]] = {}
+        for profile in detection_proxy.detection_proxy_profiles(existing):
+            try:
+                normalized = detection_proxy.resolve_static_detection_proxy(profile["spec"]) or ""
+                if normalized:
+                    merged[normalized] = (str(profile["country"]), normalized)
+            except Exception:
+                continue
+        for _line_number, inspection in detected:
+            normalized = str(inspection["proxy"])
+            merged[normalized] = (str(inspection["country"]), normalized)
+
+        saved_profiles = [f"{country}|{proxy}" for country, proxy in merged.values()]
+        groups = detection_proxy.detection_proxy_country_groups(saved_profiles)
+        countries = [str(group["country"]) for group in groups]
+        current_active = str(getattr(proxy_cfg, active_key, "") or "").strip().upper()
+        active = current_active if current_active in countries else str(detected[0][1]["country"])
+        result = config_editor.update_config({profiles_key: saved_profiles, active_key: active})
+
+        reload_ok = True
+        try:
+            import config as _config_pkg
+            _config_pkg.reload_all()
+        except Exception:
+            reload_ok = False
+            logger.exception("检测代理池保存后热加载失败")
+
+        return jsonify({
+            "ok": True,
+            "purpose": purpose,
+            "active_country": active,
+            "added_count": len(detected),
+            "failed_count": len(failures),
+            "failures": failures,
+            "total_count": len(saved_profiles),
+            "countries": [
+                {
+                    "code": group["country"],
+                    "label": group["label"],
+                    "count": group["count"],
+                }
+                for group in groups
+            ],
+            "updated": result["updated"],
+            "reloaded": reload_ok,
+        })
+
     @app.post("/api/proxy-api/test")
     def api_proxy_api_test():
         """获取一条 API 代理并验证 SOCKS/HTTP 出口，不保存前端尚未提交的配置。"""

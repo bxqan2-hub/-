@@ -83,8 +83,9 @@ PLAN_CHECK_PROXY_MODE = "auto"
 # 代理可能包含账号密码，因此 WebUI 会把它保存到 .env。
 PLAN_CHECK_PROXY = ""
 
-# 套餐与 Checkout 检测使用两套完全独立的可选代理配置。
-# 每行可写 `名称|代理或代理API`；ACTIVE 保存当前使用的名称。
+# 套餐与 Checkout 检测使用两套完全独立的静态代理池。
+# WebUI 加入代理时会探测出口并保存为 `国家代码|静态代理`；ACTIVE 保存当前国家代码。
+# 每个国家可保存多条代理，检测任务按随机洗牌轮转分配，不调用动态代理 API。
 PLAN_CHECK_PROXY_PROFILES = []
 PLAN_CHECK_PROXY_ACTIVE = ""
 CHECKOUT_CHECK_PROXY_PROFILES = []

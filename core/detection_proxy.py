@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""账号检测页面提交的代理池解析与按需 API 取代理。"""
+"""套餐与 Checkout 检测使用的按国家静态代理池。"""
 from __future__ import annotations
 
 import calendar
+import random
+import re
+import threading
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -19,6 +22,10 @@ _REGION_STANDARD_OFFSETS = {
     "KR": 540,
     "SG": 480,
 }
+
+_COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
+_POOL_ROTATION_LOCK = threading.Lock()
+_POOL_ROTATIONS: dict[tuple[str, str], dict[str, object]] = {}
 
 
 def _last_sunday(year: int, month: int) -> int:
@@ -63,17 +70,56 @@ def parse_detection_proxy_pool(value, *, limit: int = 500) -> list[str]:
 
 
 def detection_proxy_profiles(value) -> list[dict[str, str]]:
+    """返回已标注国家的静态代理；动态 API 与未归类旧格式不会进入检测池。"""
     profiles: list[dict[str, str]] = []
-    used: dict[str, int] = {}
-    for index, spec in enumerate(parse_detection_proxy_pool(value), 1):
-        label, _value = _split_label(spec)
-        if not label and _is_api_spec(spec):
-            label = proxy_cfg.infer_proxy_api_region(_api_url(spec), fallback=f"线路 {index}")
-        label = label or f"线路 {index}"
-        used[label] = used.get(label, 0) + 1
-        key = label if used[label] == 1 else f"{label}-{used[label]}"
-        profiles.append({"key": key, "label": label, "spec": spec})
+    for spec in parse_detection_proxy_pool(value):
+        country, raw_proxy = _split_label(spec)
+        country = country.upper()
+        if not _COUNTRY_CODE_RE.fullmatch(country) or not raw_proxy or _is_api_spec(spec):
+            continue
+        profiles.append({
+            "key": country,
+            "label": proxy_cfg.proxy_region_label(country),
+            "country": country,
+            "spec": f"{country}|{raw_proxy}",
+        })
     return profiles
+
+
+def detection_proxy_country_groups(value) -> list[dict[str, object]]:
+    """把静态代理按两位国家代码归类，供设置页下拉框和服务端选择共用。"""
+    grouped: dict[str, list[str]] = {}
+    for profile in detection_proxy_profiles(value):
+        country = profile["country"]
+        grouped.setdefault(country, []).append(profile["spec"])
+    return [
+        {
+            "country": country,
+            "label": proxy_cfg.proxy_region_label(country),
+            "count": len(specs),
+            "specs": specs,
+        }
+        for country, specs in grouped.items()
+    ]
+
+
+def _randomized_rotation_choice(purpose: str, country: str, specs: list[str]) -> str:
+    """洗牌后逐条分配，确保一轮内并发任务不会反复挤到同一条代理。"""
+    signature = tuple(specs)
+    key = (purpose, country)
+    with _POOL_ROTATION_LOCK:
+        state = _POOL_ROTATIONS.get(key)
+        if not state or state.get("signature") != signature or not state.get("remaining"):
+            remaining = list(specs)
+            random.shuffle(remaining)
+            previous = str((state or {}).get("last") or "")
+            if previous and len(remaining) > 1 and remaining[-1] == previous:
+                remaining[0], remaining[-1] = remaining[-1], remaining[0]
+            state = {"signature": signature, "remaining": remaining, "last": previous}
+            _POOL_ROTATIONS[key] = state
+        selected = state["remaining"].pop()
+        state["last"] = selected
+        return str(selected)
 
 
 def configured_detection_proxy_spec(purpose: str) -> str | None:
@@ -84,11 +130,18 @@ def configured_detection_proxy_spec(purpose: str) -> str | None:
     else:
         entries = getattr(proxy_cfg, "PLAN_CHECK_PROXY_PROFILES", []) or []
         active = str(getattr(proxy_cfg, "PLAN_CHECK_PROXY_ACTIVE", "") or "").strip()
-    profiles = detection_proxy_profiles(entries)
-    if not profiles:
+    groups = detection_proxy_country_groups(entries)
+    if not groups:
+        if parse_detection_proxy_pool(entries):
+            raise ValueError("当前检测配置只有动态 API 或未归类线路，请先通过“加入代理池”导入静态代理")
         return None
-    selected = next((item for item in profiles if item["key"] == active or item["label"] == active), None)
-    return str((selected or profiles[0])["spec"])
+    active_country = active.upper()
+    selected = next((item for item in groups if item["country"] == active_country), None) or groups[0]
+    return _randomized_rotation_choice(
+        normalized,
+        str(selected["country"]),
+        list(selected["specs"]),
+    )
 
 
 def _split_label(spec: str) -> tuple[str, str]:
@@ -165,6 +218,66 @@ def resolve_detection_proxy(
     return proxy
 
 
+def resolve_static_detection_proxy(spec: str | None) -> str | None:
+    """解析静态检测代理，并明确拒绝套餐/Checkout 再调用动态代理 API。"""
+    if spec is not None and _is_api_spec(str(spec or "").strip()):
+        raise ValueError("套餐与 Checkout 检测只支持静态代理池，不再调用动态代理 API")
+    return resolve_detection_proxy(spec)
+
+
+def inspect_static_proxy(spec: str, *, timeout: float = 12.0) -> dict[str, str]:
+    """通过指定静态代理探测出口国家；返回值不包含未掩码凭据。"""
+    proxy = resolve_static_detection_proxy(spec)
+    if not proxy:
+        raise ValueError("静态代理为空或无法识别")
+
+    from config import browser as browser_cfg
+    from core.session import BrowserSession
+    from curl_cffi.requests import Session as CurlSession
+
+    request_timeout = max(2.0, min(float(timeout or 12.0), 30.0))
+    endpoints = list(getattr(browser_cfg, "IP_GEO_ENDPOINTS", []) or [])
+    if not endpoints:
+        endpoints = ["https://ipinfo.io/json"]
+    session = CurlSession()
+    session.proxies = {"http": proxy, "https": proxy}
+    errors: list[str] = []
+    try:
+        for endpoint in endpoints:
+            try:
+                response = session.get(
+                    endpoint,
+                    headers={"accept": "application/json"},
+                    timeout=request_timeout,
+                )
+                if int(response.status_code) != 200:
+                    errors.append(f"HTTP {response.status_code}")
+                    continue
+                geo = BrowserSession._normalize_geo_response(response.json())
+                country = str(geo.get("country") or "").strip().upper()
+                if not _COUNTRY_CODE_RE.fullmatch(country):
+                    errors.append("出口国家无法识别")
+                    continue
+                return {
+                    "country": country,
+                    "country_label": proxy_cfg.proxy_region_label(country),
+                    "proxy": proxy,
+                    "masked_proxy": proxy_cfg.mask_proxy_url(proxy),
+                    "exit_ip": str(geo.get("ip") or "").strip(),
+                    "region": str(geo.get("region") or "").strip(),
+                    "city": str(geo.get("city") or "").strip(),
+                }
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {str(exc)[:120]}")
+        detail = errors[-1] if errors else "所有地理检测接口均未返回国家"
+        raise RuntimeError(f"静态代理出口检测失败：{detail}")
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
 def infer_timezone_offset_min(spec: str | None, fallback: str = "-") -> str:
     label, value = _split_label(str(spec or ""))
     region = proxy_cfg.infer_proxy_api_region(_api_url(value) if _is_api_spec(value) else "", fallback=label)
@@ -190,9 +303,12 @@ def pool_spec_for_index(specs: list[str], index: int) -> str | None:
 __all__ = [
     "infer_timezone_offset_min",
     "configured_detection_proxy_spec",
+    "detection_proxy_country_groups",
     "detection_proxy_profiles",
+    "inspect_static_proxy",
     "is_detection_proxy_api",
     "parse_detection_proxy_pool",
     "pool_spec_for_index",
     "resolve_detection_proxy",
+    "resolve_static_detection_proxy",
 ]

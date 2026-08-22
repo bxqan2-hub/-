@@ -95,6 +95,17 @@ class CheckoutKindDetectionTests(unittest.TestCase):
         self.assertIn("检测执行异常", result["error"])
         self.assertFalse(result["confirm_sent"])
 
+    @patch("core.checkout_kind_service.get_pay153_module")
+    def test_checkout_detection_rejects_dynamic_proxy_api(self, get_pay153_module):
+        result = checkout_kind_service.check_checkout_kind(
+            "account-at",
+            proxy="DE|https://dynamic.example/get?region=DE",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("静态代理池", result["error"])
+        get_pay153_module.assert_not_called()
+
     @patch("core.checkout_kind_service.enqueue")
     @patch("main.run_registration")
     @patch.object(registration_service, "_JobLogContext")
