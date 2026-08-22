@@ -18,7 +18,7 @@
 """
 from __future__ import annotations
 
-from config.env_loader import apply_env_overrides, read_proxy_pool_file
+from config.env_loader import apply_env_overrides, read_runtime_list_file
 import json
 import logging
 import os
@@ -708,7 +708,12 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_MIN_INTERVAL': 'float',
     'PLAN_CHECK_JITTER': 'float',
 })
-_runtime_proxy_pool = read_proxy_pool_file()
-if _runtime_proxy_pool is not None:
-    PROXY_POOL = _runtime_proxy_pool
+for _runtime_key in (
+    "PROXY_POOL",
+    "PLAN_CHECK_PROXY_PROFILES",
+    "CHECKOUT_CHECK_PROXY_PROFILES",
+):
+    _runtime_values = read_runtime_list_file(_runtime_key)
+    if _runtime_values is not None:
+        globals()[_runtime_key] = _runtime_values
 PROXY = _pick_static_or_system_proxy()

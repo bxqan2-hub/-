@@ -124,6 +124,22 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         self.assertEqual(stored[-1], pool[-1])
         self.assertEqual(env_value, "[]")
 
+    def test_plan_detection_pool_1000_entries_use_own_runtime_file(self):
+        pool = [f"JP|socks5h://user-region-JP-sid-{index}:pass@proxy.example:3010" for index in range(1000)]
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(env_loader._RUNTIME_LIST_PATHS, {
+                 "PLAN_CHECK_PROXY_PROFILES": Path(tmp) / "plan_check_proxy_pool.txt",
+             }), patch("config.env_loader._ENV_PATH", Path(tmp) / ".env"), \
+             patch.dict(os.environ, {}, clear=False):
+            result = config_editor.update_config({"PLAN_CHECK_PROXY_PROFILES": pool})
+            stored = env_loader.read_runtime_list_file("PLAN_CHECK_PROXY_PROFILES")
+            env_value = env_loader.read_env_file()["PLAN_CHECK_PROXY_PROFILES"]
+
+        self.assertEqual(result["runtime_file_updated"], ["PLAN_CHECK_PROXY_PROFILES"])
+        self.assertEqual(len(stored), 1000)
+        self.assertEqual(stored[-1], pool[-1])
+        self.assertEqual(env_value, "[]")
+
     def test_apply_env_overrides_does_not_let_blank_values_mask_defaults(self):
         old_loaded = env_loader._LOADED
         env_loader._LOADED = True

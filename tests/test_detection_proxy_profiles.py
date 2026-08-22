@@ -52,6 +52,32 @@ class DetectionProxyProfilesTests(unittest.TestCase):
         )
 
     @patch("curl_cffi.requests.Session")
+    def test_proxy_region_tag_is_used_without_network_probe(self, session_cls):
+        fixtures = [
+            (
+                "us.arxlabs.io:3010:mfrp1243966-region-PH-sid-f5cgegV8-t-20:cqwbwg",
+                "PH",
+            ),
+            (
+                "us.arxlabs.io:3010:mfrp1243966-region-JP-sid-RDvm5YmM-t-20:cqwbwg",
+                "JP",
+            ),
+        ]
+
+        for proxy, expected_country in fixtures:
+            with self.subTest(expected_country=expected_country):
+                self.assertEqual(
+                    detection_proxy.infer_static_proxy_country(proxy),
+                    expected_country,
+                )
+                result = detection_proxy.inspect_static_proxy(proxy)
+                self.assertEqual(result["country"], expected_country)
+                self.assertEqual(result["country_source"], "proxy_region_tag")
+                self.assertEqual(result["exit_ip"], "")
+
+        session_cls.assert_not_called()
+
+    @patch("curl_cffi.requests.Session")
     def test_static_proxy_inspection_reads_exit_country(self, session_cls):
         response = session_cls.return_value.get.return_value
         response.status_code = 200
@@ -68,6 +94,7 @@ class DetectionProxyProfilesTests(unittest.TestCase):
         )
 
         self.assertEqual(result["country"], "JP")
+        self.assertEqual(result["country_source"], "exit_geo")
         self.assertEqual(result["exit_ip"], "203.0.113.9")
         self.assertEqual(
             session_cls.return_value.proxies,

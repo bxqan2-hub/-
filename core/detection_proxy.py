@@ -7,7 +7,7 @@ import random
 import re
 import threading
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from config import proxy as proxy_cfg
 
@@ -24,6 +24,7 @@ _REGION_STANDARD_OFFSETS = {
 }
 
 _COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
+_PROXY_REGION_TAG_RE = re.compile(r"(?:^|[-_])region[-_]([A-Z]{2})(?=$|[-_])", re.IGNORECASE)
 _POOL_ROTATION_LOCK = threading.Lock()
 _POOL_ROTATIONS: dict[tuple[str, str], dict[str, object]] = {}
 
@@ -225,11 +226,37 @@ def resolve_static_detection_proxy(spec: str | None) -> str | None:
     return resolve_detection_proxy(spec)
 
 
+def infer_static_proxy_country(spec: str) -> str:
+    """从代理用户名中的 ``region-XX`` 标签读取供应商指定的国家代码。"""
+    proxy = resolve_static_detection_proxy(spec)
+    if not proxy:
+        return ""
+    parsed = urlparse(proxy)
+    username = unquote(str(parsed.username or ""))
+    match = _PROXY_REGION_TAG_RE.search(username)
+    if not match:
+        return ""
+    country = match.group(1).upper()
+    return country if _COUNTRY_CODE_RE.fullmatch(country) else ""
+
+
 def inspect_static_proxy(spec: str, *, timeout: float = 12.0) -> dict[str, str]:
-    """通过指定静态代理探测出口国家；返回值不包含未掩码凭据。"""
+    """优先读取代理自带地区；没有 ``region-XX`` 时才探测实际出口。"""
     proxy = resolve_static_detection_proxy(spec)
     if not proxy:
         raise ValueError("静态代理为空或无法识别")
+    tagged_country = infer_static_proxy_country(proxy)
+    if tagged_country:
+        return {
+            "country": tagged_country,
+            "country_label": proxy_cfg.proxy_region_label(tagged_country),
+            "country_source": "proxy_region_tag",
+            "proxy": proxy,
+            "masked_proxy": proxy_cfg.mask_proxy_url(proxy),
+            "exit_ip": "",
+            "region": "",
+            "city": "",
+        }
 
     from config import browser as browser_cfg
     from core.session import BrowserSession
@@ -261,6 +288,7 @@ def inspect_static_proxy(spec: str, *, timeout: float = 12.0) -> dict[str, str]:
                 return {
                     "country": country,
                     "country_label": proxy_cfg.proxy_region_label(country),
+                    "country_source": "exit_geo",
                     "proxy": proxy,
                     "masked_proxy": proxy_cfg.mask_proxy_url(proxy),
                     "exit_ip": str(geo.get("ip") or "").strip(),
@@ -305,6 +333,7 @@ __all__ = [
     "configured_detection_proxy_spec",
     "detection_proxy_country_groups",
     "detection_proxy_profiles",
+    "infer_static_proxy_country",
     "inspect_static_proxy",
     "is_detection_proxy_api",
     "parse_detection_proxy_pool",

@@ -725,8 +725,8 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "套餐检测静态代理池", "help": "由“加入代理池”检测出口国家后自动维护；每个国家可加入多条静态代理",
-        "storage": "env", "secret": True,
+        "label": "套餐检测静态代理池", "help": "由“加入代理池”读取代理用户名中的 region-XX 并自动归类；每个国家可加入多条静态代理",
+        "storage": "runtime_file", "secret": True,
     },
     {
         "key": "PLAN_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
@@ -734,8 +734,8 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CHECKOUT_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "Checkout检测静态代理池", "help": "由“加入代理池”检测出口国家后自动维护；与套餐检测静态池完全独立",
-        "storage": "env", "secret": True,
+        "label": "Checkout检测静态代理池", "help": "由“加入代理池”读取代理用户名中的 region-XX 并自动归类；与套餐检测静态池完全独立",
+        "storage": "runtime_file", "secret": True,
     },
     {
         "key": "CHECKOUT_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
@@ -1045,8 +1045,8 @@ def get_config() -> list[dict]:
 
         runtime_value = None
         if field.get("storage") == "runtime_file":
-            from config.env_loader import read_proxy_pool_file
-            runtime_value = read_proxy_pool_file()
+            from config.env_loader import read_runtime_list_file
+            runtime_value = read_runtime_list_file(key)
 
         if runtime_value is not None:
             value = runtime_value
@@ -1200,7 +1200,7 @@ def _format_env_value(value, vtype: str) -> str:
 
 def update_config(updates: dict) -> dict:
     """批量更新配置；大代理池写运行时文件，其余字段写项目根 `.env`。"""
-    from config.env_loader import write_env_values, write_proxy_pool_file, load_env
+    from config.env_loader import write_env_values, write_runtime_list_file, load_env
 
     updated, ignored, runtime_file_updated = [], [], []
     env_updates: dict[str, str] = {}
@@ -1211,7 +1211,7 @@ def update_config(updates: dict) -> dict:
             ignored.append(key)
             continue
         if field.get("storage") == "runtime_file":
-            write_proxy_pool_file(_normalize_config_value(value, field["type"]))
+            write_runtime_list_file(key, _normalize_config_value(value, field["type"]))
             # 清掉 .env 中可能遗留的大字段，仅保留一个小占位值；运行时文件优先。
             env_updates[key] = "[]"
             updated.append(key)

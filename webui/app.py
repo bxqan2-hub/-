@@ -3534,7 +3534,7 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     @app.post("/api/detection-proxy-pools/import")
     def api_detection_proxy_pool_import():
-        """检测静态代理出口国家，按国家合并保存到套餐或 Checkout 独立池。"""
+        """读取静态代理的 region-XX 标签，缺失时探测出口，并按国家保存。"""
         data = request.get_json(silent=True) or {}
         purpose = str(data.get("purpose") or "").strip().lower()
         field_map = {

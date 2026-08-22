@@ -15,6 +15,10 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _PROJECT_ROOT / ".env"
 _PROXY_POOL_PATH = _PROJECT_ROOT / "data" / "proxy_pool.txt"
+_RUNTIME_LIST_PATHS = {
+    "PLAN_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "plan_check_proxy_pool.txt",
+    "CHECKOUT_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "checkout_check_proxy_pool.txt",
+}
 _LOADED = False
 
 # 这些多行列表字段允许用空值显式覆盖为 []。
@@ -86,6 +90,42 @@ def write_proxy_pool_file(values) -> Path:
     tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     tmp.replace(_PROXY_POOL_PATH)
     return _PROXY_POOL_PATH
+
+
+def runtime_list_path(key: str) -> Path:
+    if key == "PROXY_POOL":
+        return _PROXY_POOL_PATH
+    try:
+        return _RUNTIME_LIST_PATHS[key]
+    except KeyError as exc:
+        raise ValueError(f"不支持的运行时列表字段: {key}") from exc
+
+
+def read_runtime_list_file(key: str) -> list[str] | None:
+    if key == "PROXY_POOL":
+        return read_proxy_pool_file()
+    path = runtime_list_path(key)
+    if not path.exists():
+        return None
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def write_runtime_list_file(key: str, values) -> Path:
+    if key == "PROXY_POOL":
+        return write_proxy_pool_file(values)
+    if isinstance(values, str):
+        source = values.splitlines()
+    elif isinstance(values, (list, tuple)):
+        source = values
+    else:
+        source = [] if values is None else [values]
+    lines = [str(value or "").strip() for value in source if str(value or "").strip()]
+    path = runtime_list_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 def load_env(*, override: bool = False) -> Path:

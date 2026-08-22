@@ -2960,7 +2960,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="detectionProxyImportTitle">加入静态代理池</h3>
-        <p id="detectionProxyImportHelp">每行一条静态代理。系统会逐条检测真实出口国家，自动归纳到国家代理池。</p>
+        <p id="detectionProxyImportHelp">每行一条静态代理。系统直接读取用户名中的 region-PH、region-JP 等地区标签并自动归类。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseDetectionProxyImport" aria-label="关闭">×</button>
     </div>
@@ -2969,7 +2969,7 @@
       <label class="outlook-import-field">
         <span>静态代理</span>
         <textarea id="detectionProxyImportTextV2" rows="12" placeholder="host:port:username:password&#10;socks5h://username:password@host:port&#10;http://username:password@host:port" autocomplete="off" spellcheck="false"></textarea>
-        <span class="outlook-import-hint">支持一次粘贴多条；重复代理自动去重。这里只接收静态代理，不调用动态代理 API。</span>
+        <span class="outlook-import-hint">支持一次粘贴多条；重复代理自动去重。优先读取 region-XX，未携带地区标签时才检测实际出口。</span>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -7758,8 +7758,8 @@ function openDetectionProxyImportModalV2(purpose) {
   const isCheckout = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'checkout';
   if (title) title.textContent = isCheckout ? '加入 Checkout 检测代理池' : '加入套餐检测代理池';
   if (help) help.textContent = isCheckout
-    ? '逐条检测真实出口国家并归入 Checkout 独立池，不会加入套餐检测池。'
-    : '逐条检测真实出口国家并归入套餐独立池，不会加入 Checkout 检测池。';
+    ? '读取每条代理用户名中的 region-XX，并归入 Checkout 独立池，不会加入套餐检测池。'
+    : '读取每条代理用户名中的 region-XX，并归入套餐独立池，不会加入 Checkout 检测池。';
   textarea.value = '';
   if (result) result.textContent = '';
   modal.classList.remove('hidden');
@@ -7784,7 +7784,7 @@ async function submitDetectionProxyImportV2() {
     return;
   }
   if (submit) submit.disabled = true;
-  if (result) result.textContent = `正在并发检测 ${proxies.length} 条代理的出口国家…`;
+  if (result) result.textContent = `正在识别 ${proxies.length} 条代理携带的 region-XX 地区…`;
   try {
     const response = await api('/api/detection-proxy-pools/import', {
       method:'POST', headers:{'Content-Type':'application/json'},
