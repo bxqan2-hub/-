@@ -119,13 +119,18 @@ _PROXY_API_CACHE = {"key": None, "proxy": "", "expires_at": 0.0}
 _PROXY_API_FLIGHTS = {}
 
 
-def _normalize_proxy_url(raw: str) -> str:
-    value = (raw or "").strip().strip("\"'").translate(str.maketrans({
+def _clean_proxy_text(raw: str) -> str:
+    """统一用户可能从供应商页面复制到的全角代理分隔符。"""
+    return (raw or "").strip().strip("\"'").translate(str.maketrans({
         "：": ":",
         "／": "/",
         "＠": "@",
         "．": ".",
     }))
+
+
+def _normalize_proxy_url(raw: str) -> str:
+    value = _clean_proxy_text(raw)
     if not value:
         return ""
     # Windows 可能返回 127.0.0.1:7890
@@ -183,7 +188,7 @@ def detect_system_proxy() -> str:
 
 
 def _expand_pool_entry(entry: str) -> str:
-    text = str(entry or "").strip()
+    text = _clean_proxy_text(str(entry or ""))
     if text.lower() in _SYSTEM_PROXY_TOKENS:
         return detect_system_proxy()
     # 常见粘性代理供应商直接给出 host:port:username:password。这个格式是
@@ -241,10 +246,14 @@ def _proxy_url_from_candidate(candidate, protocol: str) -> str:
     parsed = urlparse(text)
     if parsed.scheme.lower() not in _SUPPORTED_PROXY_PROTOCOLS:
         raise ValueError(f"API 返回了不支持的代理协议: {parsed.scheme or '-'}")
-    if not parsed.hostname or not parsed.port:
-        raise ValueError(f"API 代理缺少 host/port: {text[:120]}")
-    if not (1 <= int(parsed.port) <= 65535):
-        raise ValueError(f"API 代理端口非法: {parsed.port}")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("代理端口格式非法；请使用 host:port:username:password 或标准代理 URL") from exc
+    if not parsed.hostname or not port:
+        raise ValueError("API 代理缺少 host/port")
+    if not (1 <= int(port) <= 65535):
+        raise ValueError(f"API 代理端口非法: {port}")
     return text
 
 
@@ -292,9 +301,13 @@ def parse_proxy_api_response(body: str, protocol: str | None = None) -> list[str
 
 def mask_proxy_url(proxy_url: str) -> str:
     parsed = urlparse(str(proxy_url or "").strip())
-    if parsed.hostname and parsed.port:
+    try:
+        port = parsed.port
+    except ValueError:
+        return "已配置（格式错误）"
+    if parsed.hostname and port:
         auth = "***:***@" if parsed.username or parsed.password else ""
-        return f"{parsed.scheme}://{auth}{parsed.hostname}:{parsed.port}"
+        return f"{parsed.scheme}://{auth}{parsed.hostname}:{port}"
     return "已配置" if proxy_url else ""
 
 
@@ -383,10 +396,14 @@ def get_active_proxy_api_url() -> str:
 def validate_proxy_endpoint(proxy_url: str, timeout: float | None = None) -> None:
     """验证代理端口、SOCKS5 隧道及目标站点 TLS 证书。"""
     parsed = urlparse(str(proxy_url or "").strip())
-    if not parsed.hostname or not parsed.port:
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("代理端口格式非法") from exc
+    if not parsed.hostname or not port:
         raise ValueError("代理缺少 host/port")
     check_timeout = max(1.0, float(timeout or PROXY_API_VALIDATE_TIMEOUT or 8))
-    with socket.create_connection((parsed.hostname, parsed.port), timeout=check_timeout) as sock:
+    with socket.create_connection((parsed.hostname, port), timeout=check_timeout) as sock:
         sock.settimeout(check_timeout)
         if parsed.scheme.lower() not in ("socks5", "socks5h"):
             return

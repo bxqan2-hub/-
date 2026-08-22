@@ -39,6 +39,21 @@ class ProxyApiTests(unittest.TestCase):
             "socks5h://user-region-GB-sid-abc-t-15:secret@proxy.example:3010",
         )
 
+    def test_static_pool_parses_fullwidth_four_part_proxy_as_socks5h(self):
+        raw = "proxy．example：3010：user-region-JP-sid-abc-t-20：secret"
+        self.assertEqual(
+            proxy_cfg._expand_pool_entry(raw),
+            "socks5h://user-region-JP-sid-abc-t-20:secret@proxy.example:3010",
+        )
+
+    def test_invalid_proxy_port_error_does_not_echo_credentials(self):
+        raw = "http://proxy.example:3010:sensitive-user:sensitive-password"
+        with self.assertRaisesRegex(ValueError, "代理端口格式非法") as raised:
+            proxy_cfg._proxy_url_from_candidate(raw, "http")
+        self.assertNotIn("sensitive-user", str(raised.exception))
+        self.assertNotIn("sensitive-password", str(raised.exception))
+        self.assertEqual(proxy_cfg.mask_proxy_url(raw), "已配置（格式错误）")
+
     def test_static_pool_can_exclude_a_failed_proxy_on_retry(self):
         pool = ["socks5h://one.example:3010", "socks5h://two.example:3010"]
         with patch.object(proxy_cfg, "PROXY_POOL", pool), \
