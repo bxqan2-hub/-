@@ -331,12 +331,21 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     csrf_headers = session.get_nextauth_headers(referer="https://chatgpt.com/")
     # GET /api/auth/csrf 是页面读取接口，不发送 JSON Content-Type。
     csrf_headers.pop("content-type", None)
+    csrf_resp = None
     try:
         csrf_resp = session.get(csrf_url, headers=csrf_headers)
         csrf_resp.raise_for_status()
         csrf_token = str((csrf_resp.json() or {}).get("csrfToken") or "").strip()
     except Exception as exc:
-        raise TwoFASetupError("totp_reauth", "totp_reauth_request_failed", "2FA 重认证 CSRF 请求失败") from exc
+        status = getattr(csrf_resp, "status_code", None)
+        if not status:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise TwoFASetupError(
+            "totp_reauth",
+            "totp_reauth_request_failed",
+            "2FA 重认证 CSRF 请求失败",
+            http_status=status,
+        ) from exc
     if not csrf_token:
         raise TwoFASetupError("totp_reauth", "totp_reauth_start_failed", "2FA 重认证响应缺少 CSRF Token")
 
@@ -361,12 +370,21 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     })
 
     logger.info("[2FA] 发起重认证 signin/openai...")
+    resp = None
     try:
         resp = session.post(signin_url, headers=headers, data=body)
         resp.raise_for_status()
         auth_url = str((resp.json() or {}).get("url") or "").strip()
     except Exception as exc:
-        raise TwoFASetupError("totp_reauth", "totp_reauth_start_failed", "2FA 重认证启动失败") from exc
+        status = getattr(resp, "status_code", None)
+        if not status:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise TwoFASetupError(
+            "totp_reauth",
+            "totp_reauth_start_failed",
+            "2FA 重认证启动失败",
+            http_status=status,
+        ) from exc
     return _validate_trusted_openai_url(
         auth_url,
         stage="totp_reauth",
@@ -726,6 +744,241 @@ _PASSWORD_RESEND_JS = r"""
 
 def _is_playwright_page(driver) -> bool:
     return callable(getattr(driver, "evaluate", None)) and callable(getattr(driver, "locator", None))
+
+
+_TOTP_BROWSER_POST_JS = r"""
+async request => {
+  try {
+    const path = String(request?.path || '');
+    const payload = request?.payload || {};
+    let accessToken = String(request?.accessToken || '');
+    let email = '';
+    let expires = '';
+    if (!accessToken) {
+      const sessionResponse = await fetch('/api/auth/session', {
+        cache: 'no-store', credentials: 'include',
+        headers: {'accept': 'application/json', 'cache-control': 'no-cache'},
+      });
+      const session = await sessionResponse.json().catch(() => ({}));
+      accessToken = String(session?.accessToken || '');
+      email = String(session?.user?.email || '');
+      expires = String(session?.expires || '');
+      if (!sessionResponse.ok || !accessToken) {
+        return {status:sessionResponse.status, stage:'session', email, expires,
+          accessToken:'', body:{}, json:true};
+      }
+    }
+    const response = await fetch(path, {
+      method: 'POST', credentials: 'include',
+      headers: {
+        'accept': 'application/json',
+        'authorization': `Bearer ${accessToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const contentType = String(response.headers.get('content-type') || '');
+    const text = await response.text();
+    let body = {};
+    let json = true;
+    try { body = text ? JSON.parse(text) : {}; } catch (_) { json = false; }
+    return {status:response.status, stage:'request', contentType, email, expires,
+      accessToken, body, json};
+  } catch (error) {
+    return {status:0, stage:'exception', error:String(error || ''), body:{}, json:false};
+  }
+}
+"""
+
+
+_TOTP_BROWSER_POST_SELENIUM_JS = r"""
+const path = String(arguments[0] || '');
+const payload = arguments[1] || {};
+const suppliedAccessToken = String(arguments[2] || '');
+const done = arguments[arguments.length - 1];
+(async () => {
+  try {
+    let accessToken = suppliedAccessToken;
+    let email = '';
+    let expires = '';
+    if (!accessToken) {
+      const sessionResponse = await fetch('/api/auth/session', {
+        cache:'no-store', credentials:'include',
+        headers:{'accept':'application/json','cache-control':'no-cache'},
+      });
+      const session = await sessionResponse.json().catch(() => ({}));
+      accessToken = String(session?.accessToken || '');
+      email = String(session?.user?.email || '');
+      expires = String(session?.expires || '');
+      if (!sessionResponse.ok || !accessToken) {
+        done({status:sessionResponse.status, stage:'session', email, expires,
+          accessToken:'', body:{}, json:true});
+        return;
+      }
+    }
+    const response = await fetch(path, {
+      method:'POST', credentials:'include',
+      headers:{
+        'accept':'application/json',
+        'authorization':`Bearer ${accessToken}`,
+        'content-type':'application/json',
+      },
+      body:JSON.stringify(payload),
+    });
+    const contentType = String(response.headers.get('content-type') || '');
+    const text = await response.text();
+    let body = {};
+    let json = true;
+    try { body = text ? JSON.parse(text) : {}; } catch (_) { json = false; }
+    done({status:response.status, stage:'request', contentType, email, expires,
+      accessToken, body, json});
+  } catch (error) {
+    done({status:0, stage:'exception', error:String(error || ''), body:{}, json:false});
+  }
+})();
+"""
+
+
+def _driver_supports_authenticated_fetch(driver) -> bool:
+    return bool(
+        driver is not None
+        and (
+            _is_playwright_page(driver)
+            or callable(getattr(driver, "execute_async_script", None))
+        )
+    )
+
+
+def _browser_authenticated_json_post(
+    driver,
+    path: str,
+    payload: dict,
+    *,
+    access_token: str = "",
+    stage: str,
+    code: str,
+    message: str,
+) -> dict:
+    """在当前已登录浏览器网络栈内发送 MFA 请求，避免协议会话被 CF 单独挑战。"""
+    try:
+        if _is_playwright_page(driver):
+            result = driver.evaluate(
+                _TOTP_BROWSER_POST_JS,
+                {"path": path, "payload": payload, "accessToken": access_token},
+            )
+        else:
+            result = driver.execute_async_script(
+                _TOTP_BROWSER_POST_SELENIUM_JS,
+                path,
+                payload,
+                access_token,
+            )
+    except Exception as exc:
+        raise TwoFASetupError(stage, code, message) from exc
+
+    if not isinstance(result, dict):
+        raise TwoFASetupError(stage, code, message)
+    status = int(result.get("status") or 0)
+    if status != 200:
+        raise TwoFASetupError(stage, code, message, http_status=status or None)
+    if not bool(result.get("json", True)):
+        raise TwoFASetupError(stage, code, f"{message}（响应不是 JSON）", http_status=status)
+    body = result.get("body")
+    if not isinstance(body, dict):
+        raise TwoFASetupError(stage, code, f"{message}（响应结构异常）", http_status=status)
+    return {
+        "body": body,
+        "email": str(result.get("email") or "").strip(),
+        "access_token": str(result.get("accessToken") or access_token or "").strip(),
+        "expires": str(result.get("expires") or "").strip() or None,
+    }
+
+
+def _setup_totp_with_driver(
+    driver,
+    email: str,
+    *,
+    authenticated_email: str = "",
+) -> tuple[str, str, str | None]:
+    """按参考项目的实时浏览器方案直接 enroll/activate TOTP。"""
+    _assert_authenticated_account(email, authenticated_email)
+    current_url = _password_page_url(driver)
+    try:
+        current_host = str(urlparse(current_url).hostname or "").lower() if current_url else ""
+    except ValueError:
+        current_host = ""
+    if current_host and not (current_host == "chatgpt.com" or current_host.endswith(".chatgpt.com")):
+        logger.info("[2FA] MFA 浏览器请求前返回 ChatGPT 同源页面")
+        try:
+            if _is_playwright_page(driver):
+                driver.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=30_000)
+            else:
+                driver.get("https://chatgpt.com/")
+        except Exception as exc:
+            raise TwoFASetupError(
+                "totp_session",
+                "totp_browser_origin_failed",
+                "浏览器无法返回 ChatGPT 同源页面",
+            ) from exc
+    logger.info("[2FA] 使用当前浏览器登录态直接执行 MFA enroll/activate，跳过 CSRF 重认证")
+    enroll_result = _browser_authenticated_json_post(
+        driver,
+        "/backend-api/accounts/mfa/enroll",
+        {"factor_type": "totp"},
+        stage="totp_enroll",
+        code="totp_browser_enroll_failed",
+        message="浏览器 MFA enroll 请求失败",
+    )
+    response_email = str(enroll_result.get("email") or "").casefold()
+    expected_email = str(email or "").strip().casefold()
+    if response_email and response_email != expected_email:
+        raise TwoFASetupError(
+            "totp_session",
+            "totp_session_account_mismatch",
+            "浏览器登录账号与待设置 2FA 的邮箱不一致",
+        )
+    enroll = enroll_result["body"]
+    secret = normalize_totp_secret(str(enroll.get("secret") or ""))
+    session_id = str(enroll.get("session_id") or "").strip()
+    access_token = str(enroll_result.get("access_token") or "").strip()
+    if not session_id:
+        raise TwoFASetupError(
+            "totp_enroll",
+            "totp_enroll_response_invalid",
+            "浏览器 MFA enroll 响应缺少 session_id",
+            http_status=200,
+        )
+    if not access_token:
+        raise TwoFASetupError(
+            "totp_session",
+            "totp_session_refresh_failed",
+            "浏览器登录态没有返回 Access Token",
+            http_status=200,
+        )
+
+    _wait_for_totp_window()
+    activation = _browser_authenticated_json_post(
+        driver,
+        "/backend-api/accounts/mfa/user/activate_enrollment",
+        {
+            "code": pyotp.TOTP(secret).now(),
+            "factor_type": "totp",
+            "session_id": session_id,
+        },
+        access_token=access_token,
+        stage="totp_activate",
+        code="totp_browser_activate_failed",
+        message="浏览器 MFA activate 请求失败",
+    )["body"]
+    if activation.get("success") is not True:
+        raise TwoFASetupError(
+            "totp_activate",
+            "totp_activate_failed",
+            "2FA TOTP 激活未确认成功",
+            http_status=200,
+        )
+    logger.info("[2FA] 浏览器 MFA enroll/activate 已完成")
+    return secret, access_token, enroll_result.get("expires")
 
 
 def _password_log_prefix(driver) -> str:
@@ -1515,90 +1768,101 @@ def _setup_2fa_result(
         # 必须重新同步，而不是继续使用补设密码之前的旧 Cookie 快照。
         import_browser_cookies(session, driver, require_auth=True)
 
-    # 阶段二：MFA 重认证。先读取一次 generic/inbox_mate 当前缓存的验证码，
-    # 再记录时间边界并触发新邮件，避免把旧缓存当成本次 OTP。
-    historical_otp_codes: set[str] = set()
-    historical_message_ids: set[str] = set()
-    if otp_code is None and bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False)):
-        historical_otp_codes = _snapshot_otp_history(email, timeout=2.0)
-        historical_message_ids = _snapshot_otp_message_ids(email, timeout=2.0)
-    reauth_otp_after_ts = time.time()
-    auth_url = _trigger_reauth(session, email)
-    human_delay("api")
-    browser_reauth_completed = False
-    try:
-        _follow_reauth(session, auth_url)
-    except TwoFASetupError as exc:
-        if exc.http_status != 403 or driver is None:
-            raise
-        _, browser_reauth_completed = _follow_reauth_with_driver(
-            session,
+    # 参考项目当前 Roxy 实现已不再为 TOTP 重走 NextAuth CSRF/邮箱 OTP：
+    # 直接在已登录浏览器网络栈中调用 enroll/activate，可复用真实浏览器指纹、
+    # Cookie 和代理出口，避免独立 BrowserSession 在 /api/auth/csrf 被 CF 403。
+    if _driver_supports_authenticated_fetch(driver):
+        secret, new_token, browser_expires = _setup_totp_with_driver(
             driver,
-            auth_url,
-            password=configured_password,
+            email,
+            authenticated_email=authenticated_email,
         )
-    human_delay("navigate")
-
-    if not browser_reauth_completed and otp_code is None:
-        if _email_cfg.USE_EMAIL_SERVICE:
-            from core.email_provider import wait_for_otp
-            logger.info("[2FA] 自动等待邮箱重认证 OTP...")
-            otp_code = wait_for_otp(
-                email,
-                after_ts=reauth_otp_after_ts,
-                max_wait=int(getattr(_twofa_cfg, "TWOFA_OTP_MAX_WAIT", 120) or 120),
-                poll_interval=int(getattr(_twofa_cfg, "TWOFA_OTP_POLL_INTERVAL", 2) or 2),
-                settle_seconds=max(
-                    0,
-                    int(
-                        getattr(_twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", 1)
-                        if getattr(_twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", None) is not None
-                        else 1
-                    ),
-                ),
-                request_timeout=float(getattr(_twofa_cfg, "TWOFA_GENERIC_API_REQUEST_TIMEOUT", 12) or 12),
-                retry_timeout=float(getattr(_twofa_cfg, "TWOFA_GENERIC_API_RETRY_TIMEOUT", 8) or 8),
-                max_consecutive_errors=int(getattr(_twofa_cfg, "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", 2) or 2),
-                exclude_codes=historical_otp_codes,
-                exclude_message_ids=historical_message_ids,
-            )
-        else:
-            logger.info("")
-            logger.info("[2FA] 请检查邮箱，输入新收到的 6 位验证码")
-            otp_code = input(">>> 2FA 验证码: ").strip()
-
-    if browser_reauth_completed:
-        try:
-            new_session = fetch_session(session)
-            new_token = str(new_session.get("accessToken") or "").strip()
-            setattr(session, "_twofa_session_expires", str(new_session.get("expires") or "").strip() or None)
-        except Exception as exc:
-            raise TwoFASetupError(
-                "totp_session",
-                "totp_session_refresh_failed",
-                "浏览器重认证完成后未取得新的 Session Token",
-            ) from exc
-        if not new_token:
-            raise TwoFASetupError(
-                "totp_session",
-                "totp_session_refresh_failed",
-                "浏览器重认证完成后 Session Token 为空",
-            )
-        logger.info("[2FA] 已从浏览器重认证会话取得新 Token")
+        setattr(session, "_twofa_session_expires", browser_expires)
+        totp_checkpoint_persisted = _persist_activated_totp_checkpoint(email, secret, new_token)
     else:
-        human_delay("otp_input")
-        continue_url = _validate_reauth_otp(session, otp_code)
+        # 无浏览器的兼容入口保留原协议流程。先读取当前验证码快照，随后再触发
+        # 重认证邮件，避免把旧缓存误当成本次 OTP。
+        historical_otp_codes: set[str] = set()
+        historical_message_ids: set[str] = set()
+        if otp_code is None and bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False)):
+            historical_otp_codes = _snapshot_otp_history(email, timeout=2.0)
+            historical_message_ids = _snapshot_otp_message_ids(email, timeout=2.0)
+        reauth_otp_after_ts = time.time()
+        auth_url = _trigger_reauth(session, email)
         human_delay("api")
-        new_token = _exchange_new_token(session, continue_url)
-        human_delay("api")
+        browser_reauth_completed = False
+        try:
+            _follow_reauth(session, auth_url)
+        except TwoFASetupError as exc:
+            if exc.http_status != 403 or driver is None:
+                raise
+            _, browser_reauth_completed = _follow_reauth_with_driver(
+                session,
+                driver,
+                auth_url,
+                password=configured_password,
+            )
+        human_delay("navigate")
 
-    # 阶段三：enroll + activate
-    secret, session_id = _enroll_totp(session, new_token)
-    human_delay("form")
-    _wait_for_totp_window()
-    if _activate_totp(session, new_token, secret, session_id) is not True:
-        raise TwoFASetupError("totp_activate", "totp_activate_failed", "2FA TOTP 激活未确认成功")
-    totp_checkpoint_persisted = _persist_activated_totp_checkpoint(email, secret, new_token)
+        if not browser_reauth_completed and otp_code is None:
+            if _email_cfg.USE_EMAIL_SERVICE:
+                from core.email_provider import wait_for_otp
+                logger.info("[2FA] 自动等待邮箱重认证 OTP...")
+                otp_code = wait_for_otp(
+                    email,
+                    after_ts=reauth_otp_after_ts,
+                    max_wait=int(getattr(_twofa_cfg, "TWOFA_OTP_MAX_WAIT", 120) or 120),
+                    poll_interval=int(getattr(_twofa_cfg, "TWOFA_OTP_POLL_INTERVAL", 2) or 2),
+                    settle_seconds=max(
+                        0,
+                        int(
+                            getattr(_twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", 1)
+                            if getattr(_twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", None) is not None
+                            else 1
+                        ),
+                    ),
+                    request_timeout=float(getattr(_twofa_cfg, "TWOFA_GENERIC_API_REQUEST_TIMEOUT", 12) or 12),
+                    retry_timeout=float(getattr(_twofa_cfg, "TWOFA_GENERIC_API_RETRY_TIMEOUT", 8) or 8),
+                    max_consecutive_errors=int(getattr(_twofa_cfg, "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", 2) or 2),
+                    exclude_codes=historical_otp_codes,
+                    exclude_message_ids=historical_message_ids,
+                )
+            else:
+                logger.info("")
+                logger.info("[2FA] 请检查邮箱，输入新收到的 6 位验证码")
+                otp_code = input(">>> 2FA 验证码: ").strip()
+
+        if browser_reauth_completed:
+            try:
+                new_session = fetch_session(session)
+                new_token = str(new_session.get("accessToken") or "").strip()
+                setattr(session, "_twofa_session_expires", str(new_session.get("expires") or "").strip() or None)
+            except Exception as exc:
+                raise TwoFASetupError(
+                    "totp_session",
+                    "totp_session_refresh_failed",
+                    "浏览器重认证完成后未取得新的 Session Token",
+                ) from exc
+            if not new_token:
+                raise TwoFASetupError(
+                    "totp_session",
+                    "totp_session_refresh_failed",
+                    "浏览器重认证完成后 Session Token 为空",
+                )
+            logger.info("[2FA] 已从浏览器重认证会话取得新 Token")
+        else:
+            human_delay("otp_input")
+            continue_url = _validate_reauth_otp(session, otp_code)
+            human_delay("api")
+            new_token = _exchange_new_token(session, continue_url)
+            human_delay("api")
+
+        secret, session_id = _enroll_totp(session, new_token)
+        human_delay("form")
+        _wait_for_totp_window()
+        if _activate_totp(session, new_token, secret, session_id) is not True:
+            raise TwoFASetupError("totp_activate", "totp_activate_failed", "2FA TOTP 激活未确认成功")
+        totp_checkpoint_persisted = _persist_activated_totp_checkpoint(email, secret, new_token)
 
     # 激活成功后 secret 必须保留。models 只是只读健康检查，可能因 401/429
     # 或瞬时网络错误失败；把失败编码到结果中而不是抛出并让调用方丢 secret。

@@ -381,6 +381,30 @@ def test_reauth_navigation_http_error_fails_before_otp_wait() -> None:
     assert exc_info.value.http_status == 500
 
 
+def test_reauth_csrf_error_preserves_http_status() -> None:
+    class Response:
+        status_code = 403
+
+        @staticmethod
+        def raise_for_status():
+            raise RuntimeError("managed challenge")
+
+    class Session:
+        @staticmethod
+        def get_nextauth_headers(**_kwargs):
+            return {}
+
+        @staticmethod
+        def get(*_args, **_kwargs):
+            return Response()
+
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._trigger_reauth(Session(), "user@example.com")
+
+    assert exc_info.value.code == "totp_reauth_request_failed"
+    assert exc_info.value.http_status == 403
+
+
 def test_browser_reauth_fallback_reuses_current_driver_and_syncs_cookies(monkeypatch) -> None:
     navigated = []
     synced = []
@@ -467,6 +491,99 @@ def test_setup_2fa_uses_browser_fallback_only_for_protocol_403(monkeypatch) -> N
 
     assert result.security_ok is True
     assert fallback == [(driver, "Stable-pass-1!")]
+
+
+def test_setup_2fa_prefers_live_browser_mfa_and_skips_csrf_reauth(monkeypatch) -> None:
+    """已登录浏览器直接 enroll/activate，不再触发会被 CF 拦截的 CSRF 请求。"""
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
+    monkeypatch.setattr(
+        account_export,
+        "_trigger_reauth",
+        lambda *args: pytest.fail("实时浏览器 MFA 分支不得请求 /api/auth/csrf"),
+    )
+    validation_tokens = []
+    monkeypatch.setattr(
+        account_export,
+        "_validate_2fa_token",
+        lambda _session, token: validation_tokens.append(token) or 200,
+    )
+    calls = []
+
+    class Driver:
+        def execute_async_script(self, script, path, payload, access_token):
+            calls.append((script, path, payload, access_token))
+            if path.endswith("/enroll"):
+                return {
+                    "status": 200,
+                    "json": True,
+                    "email": "user@example.com",
+                    "expires": "2026-08-24T00:00:00.000Z",
+                    "accessToken": "browser-access-token",
+                    "body": {"secret": "JBSWY3DPEHPK3PXP", "session_id": "enrollment-session"},
+                }
+            return {
+                "status": 200,
+                "json": True,
+                "accessToken": access_token,
+                "body": {"success": True},
+            }
+
+    session = SimpleNamespace()
+    result = account_export.setup_2fa_result(
+        session,
+        "user@example.com",
+        driver=Driver(),
+        existing_password="Stable-pass-1!",
+        authenticated_email="USER@example.com",
+    )
+
+    assert result.secret == "JBSWY3DPEHPK3PXP"
+    assert result.access_token == "browser-access-token"
+    assert result.expires == "2026-08-24T00:00:00.000Z"
+    assert result.validation_status == 200
+    assert validation_tokens == ["browser-access-token"]
+    assert [call[1] for call in calls] == [
+        "/backend-api/accounts/mfa/enroll",
+        "/backend-api/accounts/mfa/user/activate_enrollment",
+    ]
+    assert calls[0][3] == ""
+    assert calls[1][3] == "browser-access-token"
+    assert calls[1][2]["factor_type"] == "totp"
+    assert calls[1][2]["session_id"] == "enrollment-session"
+    assert len(str(calls[1][2]["code"])) == 6
+    assert "fetch('/api/auth/session'" in calls[0][0]
+
+
+def test_browser_mfa_http_failure_keeps_stage_and_status(monkeypatch) -> None:
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(
+        account_export,
+        "_trigger_reauth",
+        lambda *args: pytest.fail("浏览器 MFA 失败不得悄悄退回旧 CSRF 协议"),
+    )
+
+    class Driver:
+        @staticmethod
+        def execute_async_script(_script, _path, _payload, _access_token):
+            return {"status": 403, "json": False, "body": {}}
+
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export.setup_2fa_result(
+            SimpleNamespace(),
+            "user@example.com",
+            driver=Driver(),
+            existing_password="Stable-pass-1!",
+            authenticated_email="user@example.com",
+        )
+
+    assert exc_info.value.stage == "totp_enroll"
+    assert exc_info.value.code == "totp_browser_enroll_failed"
+    assert exc_info.value.http_status == 403
 
 
 def test_reauth_callback_http_error_fails_before_session_fetch(monkeypatch) -> None:
