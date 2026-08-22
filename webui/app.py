@@ -283,6 +283,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "gcash_status", "gcash_eligible", "gcash_payment_method_id",
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error", "jp_trial_checked_at",
         "codex_status", "codex_agent_status",
+        "email_rebind_status", "email_rebind_label", "email_rebind_from", "email_rebound_at",
     ):
         if key in row:
             out[key] = row.get(key)
@@ -777,6 +778,52 @@ def create_app(auth_code: str | None = None) -> Flask:
         if group is None:
             return jsonify({"ok": False, "error": "分组不存在"}), 404
         return jsonify({"ok": True, "group": group})
+
+    @app.post("/api/accounts/import-rebound")
+    def api_accounts_import_rebound():
+        """导入独立换绑分站结果，并迁移原账号到当前选择的分组。"""
+        data = request.get_json(silent=True) or {}
+        text = str(data.get("text") or "")
+        group_id = str(data.get("group_id") or "default").strip() or "default"
+        records: list[dict] = []
+        invalid: list[dict] = []
+        for number, raw in enumerate(text.splitlines(), start=1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            delimiter = "----" if "----" in line else "====" if "====" in line else ""
+            parts = [part.strip() for part in line.split(delimiter)] if delimiter else []
+            if len(parts) < 4:
+                invalid.append({"line": number, "reason": "需要：新邮箱----密码----2FA----AT"})
+                continue
+            records.append({
+                "email": parts[0],
+                "password": parts[1],
+                "totp_secret": parts[2],
+                "access_token": parts[3],
+            })
+        if not records:
+            return jsonify({
+                "ok": False,
+                "error": "未识别到换绑结果；每行需要：新邮箱----密码----2FA----AT",
+                "invalid": invalid,
+            }), 400
+        if len(records) > 5000:
+            return jsonify({"ok": False, "error": "单次最多导入 5000 个换绑结果"}), 400
+        try:
+            updated, skipped = db.import_rebound_accounts(records, target_group_id=group_id)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        skipped = [*invalid, *skipped]
+        return jsonify({
+            "ok": True,
+            "parsed": len(records),
+            "updated": updated,
+            "updated_count": len(updated),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            "group_id": group_id,
+        })
 
     @app.post("/api/accounts/filter-emails")
     def api_accounts_filter_emails():

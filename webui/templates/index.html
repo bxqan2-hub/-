@@ -1692,6 +1692,7 @@
 
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden),
+    #reboundImportModal:not(.hidden),
     #proxyApiImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
@@ -2434,6 +2435,7 @@
               <option value="archived">归档分组</option>
             </select>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCreateAccountGroupV2" title="新建一个本地账号分组">新建</button>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="导入独立换绑分站结果；替换原账号邮箱和AT，并迁移到当前分组">导入换绑邮箱</button>
             <button type="button" class="jobs-tb-btn" id="btnRenameAccountGroupV2" disabled title="修改当前分组名称">重命名</button>
             <button type="button" class="jobs-tb-btn" id="btnDeleteAccountGroupV2" disabled title="仅删除当前分组，不删除其中账号">删除</button>
           </div>
@@ -2888,6 +2890,32 @@
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelOutlookImport">取消</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitOutlookImport">导入</button>
+    </div>
+  </div>
+</div>
+<div id="reboundImportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="reboundImportTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="reboundImportTitle">导入换绑邮箱</h3>
+        <p>粘贴独立换绑分站导出的结果。系统使用“原密码 + 原2FA”识别主站里的旧账号，只更新新邮箱和新 AT。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseReboundImport" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="outlook-import-result" id="reboundImportResultV2"></div>
+      <div class="outlook-import-check">
+        <span>导入目标：<strong id="reboundImportGroupNameV2">当前分组</strong><br><small>匹配成功后，原邮箱会从全部旧分组清除，新邮箱只显示在这个分组。</small></span>
+      </div>
+      <label class="outlook-import-field">
+        <span>换绑完成结果</span>
+        <textarea id="reboundImportTextV2" placeholder="new@example.com----原OpenAI密码----原MFA Secret----新accessToken"></textarea>
+        <span class="outlook-import-hint">每行四段：新邮箱----密码----2FA----AT。密码与 2FA 不会改动，只用于精确匹配原账号。</span>
+      </label>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelReboundImport">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitReboundImport">识别、替换并迁移分组</button>
     </div>
   </div>
 </div>
@@ -3633,6 +3661,7 @@ function updateModalScrollLock() {
     || !$('#liveLogPanel').classList.contains('hidden')
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden')
+    || !$('#reboundImportModal').classList.contains('hidden')
     || !$('#proxyApiImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
@@ -4102,6 +4131,74 @@ async function addSelectedAccountsToGroup() {
     const skipped = (result.skipped || []).length;
     showToast(skipped ? `已移入“${targetGroup.name}”，跳过 ${skipped} 个不存在账号` : `已移入“${targetGroup.name}”`);
   } catch (error) { showToast('移入分组失败: ' + error.message); }
+}
+function activeAccountGroupLabel() {
+  if (ACTIVE_ACCOUNT_GROUP_ID === 'default') return '默认组';
+  const group = ACCOUNT_GROUPS.find(item => item.id === ACTIVE_ACCOUNT_GROUP_ID);
+  return group ? group.name : '当前分组';
+}
+function openReboundImportModal() {
+  if (ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID) {
+    showToast('请先选择默认组或一个普通账号分组');
+    return;
+  }
+  const modal = $('#reboundImportModal');
+  if (!modal) return;
+  const groupName = $('#reboundImportGroupNameV2');
+  if (groupName) groupName.textContent = activeAccountGroupLabel();
+  const result = $('#reboundImportResultV2');
+  if (result) result.innerHTML = '';
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+  setTimeout(() => $('#reboundImportTextV2')?.focus(), 50);
+}
+function closeReboundImportModal() {
+  $('#reboundImportModal')?.classList.add('hidden');
+  updateModalScrollLock();
+}
+async function submitReboundImport() {
+  const text = $('#reboundImportTextV2')?.value || '';
+  const resultEl = $('#reboundImportResultV2');
+  const button = $('#btnSubmitReboundImport');
+  if (!text.trim()) { showToast('请粘贴换绑分站导出的四段结果'); return; }
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/accounts/import-rebound', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text, group_id:ACTIVE_ACCOUNT_GROUP_ID}),
+    });
+    const message = `已更新 ${result.updated_count || 0} 个账号并迁移到“${activeAccountGroupLabel()}”` +
+      ((result.skipped_count || 0) ? `；跳过 ${result.skipped_count} 行` : '；旧分组邮箱已清理');
+    if (resultEl) resultEl.innerHTML = `<div class="banner ${result.updated_count ? 'info' : 'warn'}">${esc(message)}</div>`;
+    if (result.updated_count) {
+      $('#reboundImportTextV2').value = '';
+      ACCOUNT_SELECTED.clear();
+      await loadAccountGroups();
+      await loadAccounts();
+      await loadSummary();
+      showToast(message);
+      setTimeout(closeReboundImportModal, 900);
+    } else {
+      showToast('没有匹配到可更新的原账号，请检查密码和2FA');
+    }
+  } catch (error) {
+    if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(error.message)}</div>`;
+    else showToast('导入换绑结果失败: ' + error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+function bindReboundImportModal() {
+  const modal = $('#reboundImportModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  $('#btnCloseReboundImport')?.addEventListener('click', closeReboundImportModal);
+  $('#btnCancelReboundImport')?.addEventListener('click', closeReboundImportModal);
+  $('#btnSubmitReboundImport')?.addEventListener('click', submitReboundImport);
+  modal.addEventListener('click', event => { if (event.target === modal) closeReboundImportModal(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeReboundImportModal();
+  });
 }
 async function loadAccounts() {
   if (accountsLoading) return;
@@ -4656,7 +4753,7 @@ function renderAccounts() {
       <td class="col-check"><input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''} title="单击选择；按住并上下拖动可连续选择或取消"></td>
       <td class="col-id">#${esc(r.id)}</td>
       <td class="col-email" title="${esc(r.email || '')}">
-        <div class="acc-v2-email-line"><div class="acc-v2-email">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>${_gcWindowBadge(r)}</div>
+        <div class="acc-v2-email-line"><div class="acc-v2-email">${esc(r.email)}${r.email_rebind_label ? ' <span class="pill status-available" title="该账号由独立换绑分站更新邮箱和AT">换绑过后的</span>' : ''}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>${_gcWindowBadge(r)}</div>
         ${_registrationExitIpLine(r)}
         ${_registrationTrafficLine(r)}
       </td>
@@ -6164,6 +6261,7 @@ async function findSelectedAccountsInEmailPool() {
   bind('btnRenameAccountGroupV2', renameActiveAccountGroup);
   bind('btnDeleteAccountGroupV2', deleteActiveAccountGroup);
   bind('btnAddSelectedToAccountGroupV2', addSelectedAccountsToGroup);
+  bind('btnImportReboundAccountsV2', openReboundImportModal);
   $('#accountGroupSelectV2')?.addEventListener('change', e => applyAccountGroup(e.target.value));
   $('#accountGroupTargetV2')?.addEventListener('change', e => {
     TARGET_ACCOUNT_GROUP_ID = e.target.value || '';
@@ -6190,6 +6288,7 @@ async function findSelectedAccountsInEmailPool() {
   bind('btnPurgeSelectedAccountsV2', () => purgeSelectionEmails(
     {account_ids:Array.from(ACCOUNT_SELECTED)}, () => ACCOUNT_SELECTED.clear()
   ));
+  bindReboundImportModal();
 })();
 
 // ---------- Plus 邮件检测 ----------

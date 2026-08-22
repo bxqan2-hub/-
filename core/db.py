@@ -9,6 +9,7 @@
     - 用于注册的邮箱.json     Outlook 账号池完整状态
     - 注册成功的邮箱.json     注册成功账号完整状态
 """
+import copy
 import hashlib
 import json
 import logging
@@ -2132,6 +2133,149 @@ def get_account_by_email(email: str) -> dict | None:
     with _LOCK:
         row = _find_by_email(_load_accounts(), email)
         return _decorate_account(row) if row else None
+
+
+def _stored_registration_password(row: dict) -> str:
+    """读取账号已确认的 OpenAI 密码，供换绑结果按“密码 + 2FA”匹配原账号。"""
+    raw = row.get("extra_json")
+    if isinstance(raw, dict):
+        extra = raw
+    else:
+        try:
+            extra = json.loads(str(raw or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+    if not isinstance(extra, dict):
+        return ""
+    return str(extra.get("registration_password") or extra.get("chatgpt_password") or "").strip()
+
+
+def import_rebound_accounts(records: list[dict], target_group_id: str = "default") -> tuple[list[dict], list[dict]]:
+    """导入独立换绑分站结果，并把原账号身份迁移到新邮箱。
+
+    分站导出固定为 ``新邮箱----原密码----原2FA----新AT``。密码和 TOTP 在
+    换绑过程中保持不变，因此两者组成原账号的匹配键；匹配成功后只替换邮箱
+    与 access token，保留账号 ID、套餐、历史和其他业务字段。旧邮箱会从全部
+    自定义分组移除，新邮箱只加入用户当前选择的目标分组。
+    """
+    target = str(target_group_id or "default").strip() or "default"
+    if target == "archived":
+        raise ValueError("归档分组不能作为换绑结果导入目标")
+
+    with _LOCK:
+        accounts = _load_accounts()
+        groups = _load_account_groups()
+        if target != "default" and not any(
+            isinstance(group, dict) and str(group.get("id") or "") == target
+            for group in groups
+        ):
+            raise ValueError("目标分组不存在")
+
+        original_accounts = copy.deepcopy(accounts)
+        original_groups = copy.deepcopy(groups)
+        updated: list[dict] = []
+        skipped: list[dict] = []
+        seen_new_emails: set[str] = set()
+
+        for index, raw in enumerate(records or [], start=1):
+            new_email = str(raw.get("email") or raw.get("new_email") or "").strip()
+            password = str(raw.get("password") or "").strip()
+            totp_secret = str(raw.get("totp_secret") or raw.get("mfa_secret") or "").strip()
+            access_token = str(raw.get("access_token") or raw.get("at") or "").strip()
+            normalized_new = new_email.lower()
+            if not (new_email and "@" in new_email and password and totp_secret and access_token):
+                skipped.append({"line": index, "email": new_email, "reason": "需要：新邮箱----密码----2FA----AT"})
+                continue
+            if normalized_new in seen_new_emails:
+                skipped.append({"line": index, "email": new_email, "reason": "本次导入的新邮箱重复"})
+                continue
+
+            matches = [
+                row for row in accounts
+                if _stored_registration_password(row) == password
+                and str(row.get("totp_secret") or "").replace(" ", "").upper()
+                == totp_secret.replace(" ", "").upper()
+            ]
+            if not matches:
+                skipped.append({"line": index, "email": new_email, "reason": "未找到密码和 2FA 同时匹配的原账号"})
+                continue
+            if len(matches) > 1:
+                skipped.append({"line": index, "email": new_email, "reason": "密码和 2FA 匹配到多个账号，已避免误替换"})
+                continue
+            row = matches[0]
+            conflict = next((
+                other for other in accounts
+                if other is not row and str(other.get("email") or "").strip().lower() == normalized_new
+            ), None)
+            if conflict is not None:
+                skipped.append({"line": index, "email": new_email, "reason": "新邮箱已属于另一个主站账号"})
+                continue
+
+            old_email = str(row.get("email") or "").strip()
+            normalized_old = old_email.lower()
+            now = _now()
+            raw_extra = row.get("extra_json")
+            if isinstance(raw_extra, dict):
+                extra = dict(raw_extra)
+            else:
+                try:
+                    decoded = json.loads(str(raw_extra or "{}"))
+                    extra = dict(decoded) if isinstance(decoded, dict) else {}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    extra = {}
+            history = extra.get("email_rebind_history")
+            if not isinstance(history, list):
+                history = []
+            history.append({"from": old_email, "to": new_email, "imported_at": now})
+            extra["email_rebind_history"] = history[-20:]
+            extra["email_rebind_last"] = {"from": old_email, "to": new_email, "imported_at": now}
+
+            row.update({
+                "email": new_email,
+                "access_token": access_token,
+                "original_email_line": new_email,
+                "extra_json": json.dumps(extra, ensure_ascii=False),
+                "email_rebind_status": "success",
+                "email_rebind_label": "换绑过后的",
+                "email_rebind_from": old_email,
+                "email_rebound_at": now,
+                "archived": False,
+                "updated_at": now,
+            })
+            row.pop("archived_at", None)
+
+            # 分组成员以邮箱保存。先从所有分组清除原/新邮箱，再仅写入当前目标组，
+            # 因而“分组1旧邮箱 → 当前分组2新邮箱”的迁移不会留下幽灵成员。
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                before = [str(value or "").strip().lower() for value in group.get("emails") or [] if str(value or "").strip()]
+                after = [value for value in before if value not in {normalized_old, normalized_new}]
+                if str(group.get("id") or "") == target and normalized_new not in after:
+                    after.append(normalized_new)
+                if after != before:
+                    group["emails"] = after
+                    group["updated_at"] = now
+
+            seen_new_emails.add(normalized_new)
+            updated.append({
+                "account_id": int(row.get("id") or 0),
+                "old_email": old_email,
+                "new_email": new_email,
+                "group_id": target,
+                "label": "换绑过后的",
+            })
+
+        if updated:
+            try:
+                _save_accounts(accounts)
+                _save_account_groups(groups)
+            except Exception:
+                # 不创建本地备份文件；用内存中的提交前状态恢复两个持久化对象。
+                _save_accounts(original_accounts)
+                _save_account_groups(original_groups)
+                raise
+        return updated, skipped
 
 
 def update_account_note(acc_id: int, note: str) -> bool:
