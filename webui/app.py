@@ -725,7 +725,11 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/account-groups")
     def api_account_groups():
-        return jsonify({"ok": True, "items": db.list_account_groups()})
+        return jsonify({
+            "ok": True,
+            "items": db.list_account_groups(),
+            "archived_count": len(db.list_accounts(limit=1_000_000, archived="only")),
+        })
 
     @app.post("/api/account-groups")
     def api_account_groups_create():

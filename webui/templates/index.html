@@ -2337,7 +2337,7 @@
               </button>
             </span>
           </label>
-          <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
+          <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="打开归档分组，单独查看和恢复已归档账号">归档分组</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="显示 AT entitlement 或邮箱凭证已确认开通 Plus 的账号">已开通Plus</button>
           <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测已确认是 Free，且确认可试用 Plus 的账号">可试用 Free</button>
           <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测已确认是 Free，且明确没有 Plus 试用资格的账号">Free 无试用资格</button>
@@ -2356,6 +2356,7 @@
             <span class="account-group-label">分组</span>
             <select id="accountGroupSelectV2" title="选择分组后筛选该组账号；删除分组不会删除账号">
               <option value="default">默认组</option>
+              <option value="archived">归档分组</option>
             </select>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCreateAccountGroupV2" title="新建一个本地账号分组">新建</button>
             <button type="button" class="jobs-tb-btn" id="btnRenameAccountGroupV2" disabled title="修改当前分组名称">重命名</button>
@@ -2845,6 +2846,8 @@ let ACCOUNT_PLAN_FILTER = '';
 let ACCOUNT_CHECKOUT_KIND_FILTER = '';
 let ACCOUNT_GCASH_FILTER = '';
 let ACCOUNT_GROUPS = [];
+const ARCHIVED_ACCOUNT_GROUP_ID = 'archived';
+let ARCHIVED_ACCOUNTS_TOTAL = 0;
 let ACTIVE_ACCOUNT_GROUP_ID = 'default';
 let TARGET_ACCOUNT_GROUP_ID = '';
 const ACCOUNT_SELECTED = new Set();
@@ -2945,8 +2948,10 @@ function _renderPager(id, total) {
         ? PAGER_DRAFT_SIZES[id]
         : p.size;
       const sizeControl = `<label class="pager-custom-size" for="${sizeInputId}">每页
-          <input id="${sizeInputId}" type="number" min="1" max="500" value="${draftSize}" inputmode="numeric"
+          <input id="${sizeInputId}" type="text" pattern="[0-9]*" value="${attrEsc(draftSize)}" inputmode="numeric"
             title="输入 1 到 500，例如 35"
+            onfocus="pagerPlaceCaretAtEnd(this)"
+            onclick="pagerPlaceCaretAtEnd(this)"
             oninput="pagerDraftSize('${id}',this.value)"
             onkeydown="if(event.key==='Enter'){pagerSetCustomSize('${id}',this.value);event.preventDefault();}">
           条
@@ -3034,9 +3039,15 @@ function pagerSetSize(id, val) {
 function pagerDraftSize(id, val) {
   PAGER_DRAFT_SIZES[id] = String(val ?? '');
 }
+function pagerPlaceCaretAtEnd(input) {
+  if (!input || typeof input.setSelectionRange !== 'function') return;
+  const end = String(input.value || '').length;
+  input.setSelectionRange(end, end);
+}
 function pagerSetCustomSize(id, val) {
-  const parsed = parseInt(val, 10);
-  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 500) {
+  const raw = String(val ?? '').trim();
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
     showToast('每页条数请输入 1–500');
     const input = document.getElementById(`pagerSizeInput-${id}`);
     if (input) input.focus();
@@ -3213,6 +3224,7 @@ function activateTab(tab, persist=true) {
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
+  window.scrollTo({top: 0, left: 0, behavior: 'auto'});
   if (tab === 'accounts') loadAccounts();
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
@@ -3881,13 +3893,15 @@ function renderAccountGroups() {
   const groupOptions = ACCOUNT_GROUPS.map(group =>
     `<option value="${esc(group.id)}">${esc(group.name)} (${Number(group.count || 0)})</option>`
   ).join('');
-  select.innerHTML = '<option value="default">默认组</option>' + groupOptions;
+  select.innerHTML = `<option value="default">默认组</option><option value="${ARCHIVED_ACCOUNT_GROUP_ID}">归档分组 (${ARCHIVED_ACCOUNTS_TOTAL})</option>` + groupOptions;
   select.value = ACTIVE_ACCOUNT_GROUP_ID;
   if (select.value !== ACTIVE_ACCOUNT_GROUP_ID) ACTIVE_ACCOUNT_GROUP_ID = 'default';
   targetSelect.innerHTML = '<option value="">选择目标分组</option><option value="default">默认组</option>' + groupOptions;
   targetSelect.value = TARGET_ACCOUNT_GROUP_ID;
   if (targetSelect.value !== TARGET_ACCOUNT_GROUP_ID) TARGET_ACCOUNT_GROUP_ID = '';
-  const hasGroup = Boolean(ACTIVE_ACCOUNT_GROUP_ID) && ACTIVE_ACCOUNT_GROUP_ID !== 'default';
+  const hasGroup = Boolean(ACTIVE_ACCOUNT_GROUP_ID)
+    && ACTIVE_ACCOUNT_GROUP_ID !== 'default'
+    && ACTIVE_ACCOUNT_GROUP_ID !== ARCHIVED_ACCOUNT_GROUP_ID;
   const renameBtn = $('#btnRenameAccountGroupV2');
   if (renameBtn) renameBtn.disabled = !hasGroup;
   const deleteBtn = $('#btnDeleteAccountGroupV2');
@@ -3899,6 +3913,7 @@ async function loadAccountGroups() {
   try {
     const result = await api('/api/account-groups');
     ACCOUNT_GROUPS = result.items || [];
+    ARCHIVED_ACCOUNTS_TOTAL = Number(result.archived_count || 0);
     renderAccountGroups();
   } catch (error) {
     showToast('加载账号分组失败: ' + error.message);
@@ -3906,6 +3921,8 @@ async function loadAccountGroups() {
 }
 function applyAccountGroup(groupId) {
   ACTIVE_ACCOUNT_GROUP_ID = groupId || 'default';
+  SHOW_ARCHIVED_ACCOUNTS = ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID;
+  setAccountsFilterToggle($('#showArchivedAccountsV2'), SHOW_ARCHIVED_ACCOUNTS);
   ACCOUNT_EMAIL_FILTER = [];
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
@@ -3990,7 +4007,7 @@ async function loadAccounts() {
           method:'POST', headers:{'Content-Type':'application/json'},
           body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page:p.page,page_size:p.size,archived:'all',plan,q,checkout_kind:checkoutKind,gcash}),
         })
-      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&gcash=${encodeURIComponent(gcash)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID)}`);
+      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&gcash=${encodeURIComponent(gcash)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID ? '' : ACTIVE_ACCOUNT_GROUP_ID)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -4412,7 +4429,10 @@ function _profileCell(r) {
   const birth = r.birth_date || '';
   const age = accountAge(birth);
   const birthLine = birth ? [birth, age].filter(Boolean).join(' · ') : '-';
-  return `<div class="acc-v2-email">${esc(name)}</div><div class="acc-v2-sub">${esc(birthLine)}</div>`;
+  const registeredAt = r.created_at || r.openai_created_at || '';
+  const registeredLine = registeredAt ? formatDateTime(registeredAt).slice(0, 16) : '-';
+  return `<div class="acc-v2-email">${esc(name)}</div><div class="acc-v2-sub">${esc(birthLine)}</div>`
+    + `<div class="acc-v2-sub" title="注册成功时间：${esc(registeredLine)}">注册成功：${esc(registeredLine)}</div>`;
 }
 function _registrationExitIpLine(r) {
   const ip = r.registration_exit_ip || '';
@@ -5156,9 +5176,12 @@ function setAccountsFilterToggle(el, on) {
 }
 async function applyAccountsArchivedFilter(on) {
   SHOW_ARCHIVED_ACCOUNTS = !!on;
+  if (SHOW_ARCHIVED_ACCOUNTS) ACTIVE_ACCOUNT_GROUP_ID = ARCHIVED_ACCOUNT_GROUP_ID;
+  else if (ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID) ACTIVE_ACCOUNT_GROUP_ID = 'default';
   setAccountsFilterToggle($('#showArchivedAccountsV2'), SHOW_ARCHIVED_ACCOUNTS);
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
+  renderAccountGroups();
   await loadAccounts();
   await pollAccountPlanStatuses();
 }
@@ -5751,7 +5774,7 @@ async function archiveOneAccount(id, archived, btn) {
     });
     ACCOUNT_SELECTED.delete(Number(id));
     showToast(archived ? '账号已归档' : '账号已恢复');
-    loadAccounts(); loadSummary();
+    loadAccountGroups(); loadAccounts(); loadSummary();
   } catch(err) {
     showToast(`${action}失败: ` + err.message);
     btn.disabled = false;
@@ -5778,7 +5801,7 @@ async function archiveSelectedAccounts() {
     (r.updated || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
     const skippedCount = (r.skipped || []).length;
     showToast(skippedCount ? `已${action} ${r.updated_count || 0} 个，跳过 ${skippedCount} 个` : `已${action} ${r.updated_count || 0} 个`);
-    loadAccounts(); loadSummary();
+    loadAccountGroups(); loadAccounts(); loadSummary();
   } catch(err) {
     showToast(`批量${action}失败: ` + err.message);
     updateAccountSelectionUi();

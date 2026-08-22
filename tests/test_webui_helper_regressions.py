@@ -216,6 +216,38 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("oninput=\"pagerDraftSize('${id}',this.value)\"", html)
         self.assertIn("startsWith('pagerSizeInput-')", html)
 
+    def test_accounts_ui_resets_tabs_and_exposes_archived_group(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("window.scrollTo({top: 0, left: 0, behavior: 'auto'})", html)
+        self.assertIn('<option value="archived">归档分组</option>', html)
+        self.assertIn("const ARCHIVED_ACCOUNT_GROUP_ID = 'archived'", html)
+        self.assertIn("ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID ? '' : ACTIVE_ACCOUNT_GROUP_ID", html)
+        self.assertIn('id="showArchivedAccountsV2"', html)
+        self.assertIn('>归档分组</button>', html)
+
+    def test_accounts_ui_appends_custom_page_size_and_shows_registration_minute(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('type="text" pattern="[0-9]*" value="${attrEsc(draftSize)}"', html)
+        self.assertIn('onfocus="pagerPlaceCaretAtEnd(this)"', html)
+        self.assertIn('onclick="pagerPlaceCaretAtEnd(this)"', html)
+        self.assertIn("input.setSelectionRange(end, end)", html)
+        self.assertIn("const registeredAt = r.created_at || r.openai_created_at || ''", html)
+        self.assertIn("formatDateTime(registeredAt).slice(0, 16)", html)
+        self.assertIn("注册成功：${esc(registeredLine)}", html)
+
+    @patch("webui.app.db.list_account_groups", return_value=[])
+    @patch("webui.app.db.list_accounts")
+    def test_account_groups_route_reports_archived_count(self, list_accounts, _list_groups):
+        list_accounts.return_value = [{"id": 1}, {"id": 2}]
+
+        response = self.client.get("/api/account-groups")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["archived_count"], 2)
+        list_accounts.assert_called_once_with(limit=1_000_000, archived="only")
+
     def test_proxy_pool_uses_large_unbounded_editor(self):
         html = self.client.get("/").get_data(as_text=True)
 
