@@ -77,3 +77,12 @@
 - 上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的对应实现会先等待密码 input hydration（最长 8 秒），点击后再观察页面（最长 20 秒），并把表单未前进与真正拒绝分开处理；上游文件没有本地 `_submit_signup_password_direct` 这个封装。
 - 本地提交 `1de69761dff7a3c61015ed94bb2cb227a8b7f052` 与回归测试提交 `5b1ffc992f6c418b52c97f3392e09d70ec5b8fec`：`_fill_password_page_if_present` 现在把 `missing_password_input` 视为导航/hydration 瞬态，等待邮箱验证码页、登录态、错误字段或密码 input 重新出现；未出现 input 时才消耗重试次数，input 重新出现则重用同一次提交额度。服务端错误仍优先抛出，确认回调只在已观察到最终状态后执行。
 - 验证：`PYTHONPATH=. pytest -q tests/test_roxy_registration_otp_recovery.py`，`59 passed`；新增用例覆盖“输入框重新出现后复用同一次提交额度”。
+
+## 本次密码页提交仍停留修复（2026-08-24）
+
+- 最新失败日志：`注册日志/bc7ad3fd-198c-4ea9-8890-f97fb9d0217b.log`；同型记录还包括 `注册日志/1d36617b-9894-443c-b2b8-231a177083c5.log`、`注册日志/003e9757-7d08-42c6-90d7-4b43bcc70070.log`。
+- 共同现象：第一次提交后固定等待约 8 秒立即发起第二次提交，第二次结束后仍为 `/create-account/password`；最终 state 仍有可见 `new-password` input、`button[type=submit]` 和空 `errors`。这次不是 input 瞬态，而是前一轮提交仍在 auth 前端事件/导航窗口内，旧的同步 `requestSubmit()` 重试过早。
+- 对照上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`：上游优先点击可见 submit 按钮，并在提交后观察约 20 秒；本地现在首次使用异步原生 click（带 pointer/mouse 事件），观察窗口为 20 秒，只有窗口耗尽才切换第二次 `requestSubmit`，日志会记录 `method=scheduled_click_async` 或 `method=scheduled_request_submit_async`。
+- 本地提交 `22dbd68d11db5f8aefd4bed367dcb2dba8b9956e`，修改字段：`core/roxy_registration.py::_submit_signup_password_direct`、`_fill_password_page_if_present`；回归测试新增十路并发密码页回放，覆盖 9 个首轮 click 成功和 1 个第二策略恢复。
+- 本地十路并发回放结果：10/10 返回确认密码，提交策略调用总数 11（第 10 路使用 `click_async → request_submit_async`），未出现“仍停留在密码页”。
+- 验证：注册/密码/2FA/停止相关测试合计 `110 passed`。
