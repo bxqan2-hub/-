@@ -291,6 +291,12 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="atQualificationModal"', html)
         self.assertIn("/api/accounts/at-qualification-check", html)
         self.assertIn("renderAtQualificationResults(payload)", html)
+        self.assertIn('class="outlook-import-dialog at-qualification-dialog"', html)
+        self.assertIn('class="outlook-import-result at-qualification-result"', html)
+        self.assertIn('class="at-qualification-table"', html)
+        self.assertIn('<th>检测时间</th>', html)
+        self.assertIn('<th>代理</th>', html)
+        self.assertIn("row.error || row.detection_outcome || '—'", html)
 
     def test_accounts_ui_appends_custom_page_size_and_shows_registration_minute(self):
         html = self.client.get("/").get_data(as_text=True)
