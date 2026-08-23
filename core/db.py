@@ -926,10 +926,17 @@ def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> b
         and "plus" in subscription_plan
         and "free" not in subscription_plan
     )
+    plan_import_hint = str(row.get("plan_import_hint") or "").strip().lower()
+    hint_at = str(row.get("plan_import_hint_at") or "").strip()
+    checked_at = str(row.get("plan_checked_at") or "").strip()
+    hint_is_current = bool(plan_import_hint and (not checked_at or hint_at >= checked_at))
+    hint_is_plus = hint_is_current and "plus" in plan_import_hint and "free" not in plan_import_hint
     is_free = bool(row.get("is_free_plan")) or (
         not has_active_plus
         and (plan == "free" or subscription_plan == "chatgptfreeplan")
     )
+    if hint_is_plus:
+        is_free = False
     trial_checked = is_free and bool(row.get("plan_last_success_at"))
     trial_eligible = trial_checked and bool(row.get("plus_trial_eligible"))
     trial_offer_kind = str(row.get("plus_trial_offer_kind") or "").strip().lower()
@@ -952,7 +959,7 @@ def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> b
             },
         })["kind"]
     if f == "plus":
-        return has_active_plus
+        return has_active_plus or hint_is_plus
     if f == "free":
         return is_free
     if f in {"trial", "free-trial", "trial-eligible"}:
@@ -1893,6 +1900,10 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
         # 查询失败只更新本次错误和网络信息，不覆盖上一次成功拿到的套餐、
         # 试用资格、优惠及有效期，避免临时网络故障把真实权益清空。
         if ok:
+            # 查询方法仍是原 accounts/check 链路；成功后权威结果取代导入提示。
+            row.pop("plan_import_hint", None)
+            row.pop("plan_import_hint_source", None)
+            row.pop("plan_import_hint_at", None)
             row["plan_terminal_code"] = result.get("plan_terminal_code")
             row["status_code"] = result.get("status_code") or "ok"
             if result.get("current_plan_type"):
@@ -2025,6 +2036,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "id", "email", "archived",
         "plan_type", "current_plan_type", "subscription_plan", "has_active_subscription",
         "has_active_plus_subscription", "is_free_plan", "plus_trial_eligible",
+        "plan_import_hint", "plan_import_hint_source", "plan_import_hint_at",
         "plus_trial_offer_kind", "plus_trial_offer_label", "plus_trial_offer_percentage",
         "plus_trial_offer_evidence", "plus_trial_campaign_id", "plus_trial_title",
         "plus_trial_summary", "plus_trial_discount_percentage",
@@ -2114,6 +2126,8 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     "plan_type": row.get("plan_type"),
                     "subscription_plan": row.get("subscription_plan"),
                     "has_active_plus_subscription": row.get("has_active_plus_subscription"),
+                    "plan_import_hint": row.get("plan_import_hint"),
+                    "plan_import_hint_at": row.get("plan_import_hint_at"),
                     "plus_trial_eligible": row.get("plus_trial_eligible"),
                     "checkout_kind_status": row.get("checkout_kind_status"),
                     "checkout_kind": row.get("checkout_kind"),
@@ -2243,6 +2257,16 @@ def replace_account_access_tokens(records: list[dict]) -> tuple[list[dict], list
             row["access_token_replaced_at"] = now
             row["access_token_replace_source"] = str(raw.get("source") or "manual")[:40]
             _reset_account_at_validity_fields(row)
+            plan_import_hint = str(raw.get("plan_import_hint") or "").strip().lower()
+            plan_import_hint_source = str(raw.get("plan_import_hint_source") or "").strip()
+            if plan_import_hint:
+                row["plan_import_hint"] = plan_import_hint
+                row["plan_import_hint_source"] = plan_import_hint_source or "access_token_claim"
+                row["plan_import_hint_at"] = now
+            else:
+                row.pop("plan_import_hint", None)
+                row.pop("plan_import_hint_source", None)
+                row.pop("plan_import_hint_at", None)
             row["updated_at"] = now
             normalized_email = str(row.get("email") or "").strip().lower()
             for pool_rows in (outlook_rows, generic_rows, domain_rows):

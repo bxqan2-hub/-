@@ -225,6 +225,7 @@ def _session_payload_from_mapping(value: dict, depth: int = 0) -> dict | None:
 def _access_token_identity(raw_token: object) -> dict:
     """统一解析原始 AT、邮箱+AT 和 /api/auth/session JSON。"""
     expected_email = ""
+    session_plan_hint = ""
     input_format = "raw_at"
     value = raw_token
     if isinstance(value, dict):
@@ -233,7 +234,9 @@ def _access_token_identity(raw_token: object) -> dict:
             raise ValueError("JSON 中没有 accessToken/access_token")
         value = session.get("accessToken") or session.get("access_token")
         user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        account = session.get("account") if isinstance(session.get("account"), dict) else {}
         expected_email = str(user.get("email") or session.get("email") or "").strip()
+        session_plan_hint = str(account.get("planType") or account.get("plan_type") or "").strip()
         input_format = "session_json"
     elif isinstance(value, list):
         if len(value) != 1:
@@ -274,12 +277,20 @@ def _access_token_identity(raw_token: object) -> dict:
         raise ValueError("AT 中未识别到邮箱信息")
     if expected_email and expected_email.casefold() != email.casefold():
         raise ValueError(f"Session/导入行邮箱 {expected_email} 与 AT 邮箱 {email} 不一致")
+    claim_plan_hint = str(claims.get("claim_plan_type") or "").strip()
     return {
         "access_token": token,
         "email": email,
         "token_expires_at": claims.get("token_expires_at"),
         "token_expired": claims.get("token_expired"),
         "exp": claims.get("exp"),
+        # 仅作为导入后的即时提示；不得写入实时套餐查询字段。
+        "plan_import_hint": session_plan_hint or claim_plan_hint,
+        "plan_import_hint_source": (
+            "api/auth/session" if session_plan_hint
+            else "access_token_claim" if claim_plan_hint
+            else ""
+        ),
         "input_format": input_format,
     }
 
@@ -577,6 +588,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "email_source", "note", "archived", "created_at",
         "plan_type", "current_plan_type", "subscription_plan", "has_active_subscription",
         "has_active_plus_subscription", "is_free_plan", "plus_trial_eligible",
+        "plan_import_hint", "plan_import_hint_source", "plan_import_hint_at",
         "plus_trial_offer_kind", "plus_trial_offer_label", "plus_trial_offer_percentage",
         "plan_check_status", "plan_detection_source", "plan_authority", "plan_confidence",
         "checkout_kind_status", "checkout_kind",

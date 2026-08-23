@@ -3007,7 +3007,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="atReplaceTitle">批量导入 AT</h3>
-        <p id="atReplaceDescription">支持原始 AT 或完整 /api/auth/session JSON。系统只读取邮箱用于匹配账号并替换 AT，不改变套餐检测结果。</p>
+        <p id="atReplaceDescription">支持原始 AT 或完整 /api/auth/session JSON。导入后可显示 AT 套餐声明提示；原实时套餐查询方式不变。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseAtReplace" aria-label="关闭">×</button>
     </div>
@@ -4421,7 +4421,7 @@ function openAtReplaceModal(accountId = null) {
   $('#atReplaceTitle').textContent = single ? '替换账号 AT' : '批量导入 AT';
   $('#atReplaceDescription').textContent = single
     ? `当前账号：${account.email}。系统会校验 AT 内邮箱，匹配后再替换。`
-    : '支持原始 AT 或完整 /api/auth/session JSON。系统只读取邮箱用于匹配账号并替换 AT，不改变套餐检测结果。';
+    : '支持原始 AT 或完整 /api/auth/session JSON。导入后可显示 AT 套餐声明提示；原实时套餐查询方式不变。';
   $('#atReplaceFieldLabelV2').textContent = single ? '新的 AT' : 'AT 列表';
   $('#atReplaceHintV2').textContent = single
     ? '可粘贴一个原始 AT 或完整 Session JSON；其中邮箱必须与当前账号一致。'
@@ -4766,6 +4766,10 @@ function _planCell(r) {
   const mailConfirmedPlus = r.mail_plus_promoted === true;
   const detectedPlus = r.has_active_plus_subscription === true;
   const hasPlus = detectedPlus;
+  const planImportHint = String(r.plan_import_hint || '').toLowerCase();
+  const hintAt = String(r.plan_import_hint_at || '');
+  const hintIsCurrent = Boolean(planImportHint && (!r.plan_checked_at || hintAt >= String(r.plan_checked_at || '')));
+  const hintedPlus = hintIsCurrent && planImportHint.includes('plus') && !planImportHint.includes('free');
   const checked = r.plan_checked_at ? `查询: ${esc(r.plan_checked_at)}` : '未查询实时套餐';
   const proxyCountry = (r.plan_check_proxy_country || '').toString().trim().toUpperCase();
   const proxyCountryName = proxyCountry ? proxyRegionLabelV2(proxyCountry) : '';
@@ -4809,6 +4813,11 @@ function _planCell(r) {
       err ? `最近复检: ${err}` : '',
     ].filter(Boolean).join('；');
     return withProxyCountry(`<span class="pill status-success" title="${esc([detail, proxyCountryDetail].filter(Boolean).join('；'))}">Plus${parts.length ? ` ${esc(parts.join('/'))}` : ''}</span>`);
+  }
+  if (hintedPlus) {
+    const hintSource = r.plan_import_hint_source === 'api/auth/session' ? 'Session JSON' : 'AT JWT 声明';
+    const detail = `${hintSource}预识别为 Plus；点击查询套餐后，以原实时套餐接口结果为准`;
+    return withProxyCountry(`<span class="pill status-available" title="${esc(detail)}">Plus（AT声明）</span>`);
   }
   if (err || r.plan_check_status === 'failed') {
     let reason = (err || '套餐查询失败，未返回具体原因').replace(/[，,]?已保留上次结果\s*$/, '');
