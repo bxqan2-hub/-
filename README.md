@@ -35,10 +35,13 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 
 ```text
 主站导出给分站：原邮箱----OpenAI密码----MFA Secret
-分站导回主站：新邮箱----原OpenAI密码----原MFA Secret----新accessToken
+原邮箱 API 模式：原邮箱----API取码地址
+分站导回主站（密码模式）：新邮箱----原OpenAI密码----原MFA Secret----新accessToken
+分站导回主站（API模式）：新邮箱----原邮箱----原API取码地址----新accessToken
 ```
 
-主站使用“原密码 + 原 MFA Secret”识别旧账号，仅把邮箱和 AT 更新为分站结果，
+主站对密码模式使用“原密码 + 原 MFA Secret”识别旧账号，对 API 模式使用原邮箱识别，
+仅把邮箱和 AT 更新为分站结果，
 清除旧邮箱在原分组中的显示，再把新邮箱加入用户当前选择的分组。
 
 ---

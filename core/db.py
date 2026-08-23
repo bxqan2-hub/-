@@ -2202,10 +2202,10 @@ def _stored_registration_password(row: dict) -> str:
 def import_rebound_accounts(records: list[dict], target_group_id: str = "default") -> tuple[list[dict], list[dict]]:
     """导入独立换绑分站结果，并把原账号身份迁移到新邮箱。
 
-    分站导出固定为 ``新邮箱----原密码----原2FA----新AT``。密码和 TOTP 在
-    换绑过程中保持不变，因此两者组成原账号的匹配键；匹配成功后只替换邮箱
-    与 access token，保留账号 ID、套餐、历史和其他业务字段。旧邮箱会从全部
-    自定义分组移除，新邮箱只加入用户当前选择的目标分组。
+    密码账号由 ``原密码 + 原2FA`` 匹配；邮箱 API 登录账号由分站导出的
+    ``原邮箱 + 原取码URL`` 格式识别，并按原邮箱精确匹配。匹配成功后只替换
+    邮箱与 access token，保留账号 ID、套餐、历史和其他业务字段。旧邮箱会从
+    全部自定义分组移除，新邮箱只加入用户当前选择的目标分组。
     """
     target = str(target_group_id or "default").strip() or "default"
     if target == "archived":
@@ -2230,26 +2230,47 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             new_email = str(raw.get("email") or raw.get("new_email") or "").strip()
             password = str(raw.get("password") or "").strip()
             totp_secret = str(raw.get("totp_secret") or raw.get("mfa_secret") or "").strip()
+            old_email_hint = str(raw.get("old_email") or "").strip()
+            source_api_url = str(raw.get("source_api_url") or raw.get("api_url") or "").strip()
             access_token = str(raw.get("access_token") or raw.get("at") or "").strip()
             normalized_new = new_email.lower()
-            if not (new_email and "@" in new_email and password and totp_secret and access_token):
-                skipped.append({"line": index, "email": new_email, "reason": "需要：新邮箱----密码----2FA----AT"})
+            credential_mode = bool(password and totp_secret)
+            email_api_mode = bool(
+                old_email_hint and "@" in old_email_hint
+                and source_api_url.lower().startswith(("http://", "https://"))
+            )
+            if not (new_email and "@" in new_email and access_token and (credential_mode or email_api_mode)):
+                skipped.append({
+                    "line": index, "email": new_email,
+                    "reason": "需要：新邮箱----密码----2FA----AT，或 新邮箱----原邮箱----原取码URL----AT",
+                })
                 continue
             if normalized_new in seen_new_emails:
                 skipped.append({"line": index, "email": new_email, "reason": "本次导入的新邮箱重复"})
                 continue
 
-            matches = [
-                row for row in accounts
-                if _stored_registration_password(row) == password
-                and str(row.get("totp_secret") or "").replace(" ", "").upper()
-                == totp_secret.replace(" ", "").upper()
-            ]
+            if email_api_mode:
+                normalized_hint = old_email_hint.lower()
+                matches = [
+                    row for row in accounts
+                    if str(row.get("email") or "").strip().lower() == normalized_hint
+                ]
+                no_match_reason = "未找到原邮箱完全匹配的主站账号"
+                duplicate_reason = "原邮箱匹配到多个账号，已避免误替换"
+            else:
+                matches = [
+                    row for row in accounts
+                    if _stored_registration_password(row) == password
+                    and str(row.get("totp_secret") or "").replace(" ", "").upper()
+                    == totp_secret.replace(" ", "").upper()
+                ]
+                no_match_reason = "未找到密码和 2FA 同时匹配的原账号"
+                duplicate_reason = "密码和 2FA 匹配到多个账号，已避免误替换"
             if not matches:
-                skipped.append({"line": index, "email": new_email, "reason": "未找到密码和 2FA 同时匹配的原账号"})
+                skipped.append({"line": index, "email": new_email, "reason": no_match_reason})
                 continue
             if len(matches) > 1:
-                skipped.append({"line": index, "email": new_email, "reason": "密码和 2FA 匹配到多个账号，已避免误替换"})
+                skipped.append({"line": index, "email": new_email, "reason": duplicate_reason})
                 continue
             row = matches[0]
             conflict = next((

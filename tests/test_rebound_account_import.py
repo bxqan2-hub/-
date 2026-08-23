@@ -80,12 +80,50 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertNotIn("access_token", payload["updated"][0])
                 self.assertNotIn("password", payload["updated"][0])
 
+    def test_email_api_result_matches_original_account_by_old_email(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._seed(root)
+            with self._patch_storage(root):
+                updated, skipped = db.import_rebound_accounts([{
+                    "email": "new@example.com",
+                    "old_email": "old@example.com",
+                    "source_api_url": "https://mail.example/old-code",
+                    "access_token": "at-new",
+                }], target_group_id="group-2")
+
+                self.assertEqual(skipped, [])
+                self.assertEqual(updated[0]["old_email"], "old@example.com")
+                self.assertEqual(db.get_account(7)["email"], "new@example.com")
+                groups = {group["id"]: group for group in db.list_account_groups()}
+                self.assertEqual(groups["group-1"]["emails"], [])
+                self.assertEqual(groups["group-2"]["emails"], ["new@example.com"])
+
+    def test_route_accepts_email_api_subsite_export(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._seed(root)
+            with self._patch_storage(root):
+                client = create_app(auth_code="test-auth").test_client()
+                client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
+                response = client.post("/api/accounts/import-rebound", json={
+                    "group_id": "group-2",
+                    "text": "new@example.com----old@example.com----https://mail.example/old-code----at-new",
+                })
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["updated_count"], 1)
+                self.assertEqual(payload["updated"][0]["old_email"], "old@example.com")
+                self.assertEqual(db.get_account(7)["email"], "new@example.com")
+
     def test_template_exposes_rebound_import_controls_and_label(self):
         template = Path("webui/templates/index.html").read_text(encoding="utf-8")
         self.assertIn('id="btnImportReboundAccountsV2"', template)
         self.assertIn('id="reboundImportModal"', template)
         self.assertIn("换绑过后的", template)
         self.assertIn("/api/accounts/import-rebound", template)
+        self.assertIn("新邮箱+原邮箱+原取码URL+AT", template)
 
 
 if __name__ == "__main__":

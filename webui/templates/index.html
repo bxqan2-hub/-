@@ -2938,7 +2938,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="reboundImportTitle">导入换绑邮箱</h3>
-        <p>粘贴独立换绑分站导出的结果。系统使用“原密码 + 原2FA”识别主站里的旧账号，只更新新邮箱和新 AT。</p>
+        <p>粘贴独立换绑分站导出的结果。密码账号使用“原密码 + 原2FA”识别；API 原邮箱账号使用“原邮箱”识别，只更新新邮箱和新 AT。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseReboundImport" aria-label="关闭">×</button>
     </div>
@@ -2948,7 +2948,7 @@
         <span>导入目标：<strong id="reboundImportGroupNameV2">当前分组</strong><br><small>匹配成功后，原邮箱会从全部旧分组清除，新邮箱只显示在这个分组。</small></span>
       </div>
       <label class="outlook-import-field">
-        <span>换绑完成结果</span>
+        <span>换绑完成结果（新邮箱+密码+2FA+AT，或新邮箱+原邮箱+原取码URL+AT）</span>
         <textarea id="reboundImportTextV2" placeholder="new@example.com----原OpenAI密码----原MFA Secret----新accessToken"></textarea>
         <span class="outlook-import-hint">每行四段：新邮箱----密码----2FA----AT。密码与 2FA 不会改动，只用于精确匹配原账号。</span>
       </label>

@@ -800,18 +800,26 @@ def create_app(auth_code: str | None = None) -> Flask:
             delimiter = "----" if "----" in line else "====" if "====" in line else ""
             parts = [part.strip() for part in line.split(delimiter)] if delimiter else []
             if len(parts) < 4:
-                invalid.append({"line": number, "reason": "需要：新邮箱----密码----2FA----AT"})
+                invalid.append({"line": number, "reason": "需要四段换绑结果"})
                 continue
-            records.append({
-                "email": parts[0],
-                "password": parts[1],
-                "totp_secret": parts[2],
-                "access_token": parts[3],
-            })
+            if "@" in parts[1] and parts[2].lower().startswith(("http://", "https://")):
+                records.append({
+                    "email": parts[0],
+                    "old_email": parts[1],
+                    "source_api_url": parts[2],
+                    "access_token": parts[3],
+                })
+            else:
+                records.append({
+                    "email": parts[0],
+                    "password": parts[1],
+                    "totp_secret": parts[2],
+                    "access_token": parts[3],
+                })
         if not records:
             return jsonify({
                 "ok": False,
-                "error": "未识别到换绑结果；每行需要：新邮箱----密码----2FA----AT",
+                "error": "未识别到换绑结果；支持新邮箱+密码+2FA+AT，或新邮箱+原邮箱+原取码URL+AT",
                 "invalid": invalid,
             }), 400
         if len(records) > 5000:
