@@ -1203,6 +1203,10 @@
     .accounts-filter-v2 .el-input-number__decrease svg {
       width: 11px; height: 11px;
     }
+    .accounts-filter-v2 .at-validity-status {
+      max-width: 210px; overflow: hidden; text-overflow: ellipsis;
+      color: #909399; font-size: 12px; white-space: nowrap;
+    }
     #accountsToolbarV2 { padding-top: 12px; }
 
     /* ---- Codex 授权 ---- */
@@ -2432,6 +2436,22 @@
           <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测成功且明确没有 Plus 试用活动的 Free 账号">无试用资格</button>
           <button type="button" class="acc-v2-toggle" id="showOaicsAccountsOnlyV2" aria-pressed="false" title="只显示 Checkout 类型已检测为 OAICS 的账号">OAICS</button>
           <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">GC资格</button>
+          <button type="button" class="acc-v2-toggle" id="showAtInvalidAccountsOnlyV2" aria-pressed="false" title="只显示 AT 已确认失效或检测遇到错误的账号；网络错误不会误标成失效">AT失效/错误</button>
+          <button type="button" class="acc-v2-toggle" id="atValidityEnabledV2" aria-pressed="true" title="启用或停用 AT 定时有效性检测；修改后点击保存">定时AT检测</button>
+          <label class="acc-v2-inline" title="AT 定时有效性检测周期，单位为分钟">周期
+            <span class="el-input-number">
+              <input id="atValidityIntervalV2" type="number" min="1" max="43200" value="360" inputmode="numeric">
+              <button type="button" class="el-input-number__increase" data-step-for="atValidityIntervalV2" data-step="1" aria-label="增加">
+                <svg viewBox="0 0 24 24"><polyline points="6 14 12 8 18 14"/></svg>
+              </button>
+              <button type="button" class="el-input-number__decrease" data-step-for="atValidityIntervalV2" data-step="-1" aria-label="减少">
+                <svg viewBox="0 0 24 24"><polyline points="6 10 12 16 18 10"/></svg>
+              </button>
+            </span>分钟
+          </label>
+          <button type="button" class="jobs-tb-btn" id="btnSaveAtValidityScheduleV2" title="保存启用状态和检测周期，保存后立即热加载">保存AT定时</button>
+          <button type="button" class="jobs-tb-btn" id="btnRunAtValidityNowV2" title="立即把所有未归档且有 AT 的账号放入轻量检测队列">立即检查AT</button>
+          <span class="at-validity-status" id="atValidityScheduleStatusV2" title="AT 定时检测状态">读取定时状态…</span>
           <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnExtractSelectedOaicsV2" disabled title="调用 PayPal OAICS 提链核心并发提取选中账号">OAICS提链</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopyAllOaicsLinksV2" title="复制当前已完成 OAICS 提链的全部链接">复制全部OAICS链</button>
@@ -3002,6 +3022,8 @@ let SHOW_ARCHIVED_ACCOUNTS = false;
 let ACCOUNT_PLAN_FILTER = '';
 let ACCOUNT_CHECKOUT_KIND_FILTER = '';
 let ACCOUNT_GCASH_FILTER = '';
+let ACCOUNT_AT_VALIDITY_FILTER = '';
+let AT_VALIDITY_SCHEDULE = {enabled:true, interval_minutes:360};
 let ACCOUNT_GROUPS = [];
 const ARCHIVED_ACCOUNT_GROUP_ID = 'archived';
 let ARCHIVED_ACCOUNTS_TOTAL = 0;
@@ -3400,7 +3422,7 @@ function activateTab(tab, persist=true) {
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   window.scrollTo({top: 0, left: 0, behavior: 'auto'});
-  if (tab === 'accounts') loadAccounts();
+  if (tab === 'accounts') { loadAccounts(); loadAtValiditySchedule(); }
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
@@ -4246,14 +4268,15 @@ async function loadAccounts() {
     const plan = ACCOUNT_PLAN_FILTER;
     const checkoutKind = ACCOUNT_CHECKOUT_KIND_FILTER;
     const gcash = ACCOUNT_GCASH_FILTER;
+    const atValidity = ACCOUNT_AT_VALIDITY_FILTER;
     const q = getAccountsQuery();
     const p = PAGERS.accounts;
     const res = ACCOUNT_EMAIL_FILTER.length
       ? await api('/api/accounts/filter-emails', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page:p.page,page_size:p.size,archived:'all',plan,q,checkout_kind:checkoutKind,gcash}),
+          body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page:p.page,page_size:p.size,archived:'all',plan,q,checkout_kind:checkoutKind,gcash,at:atValidity}),
         })
-      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&gcash=${encodeURIComponent(gcash)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID ? '' : ACTIVE_ACCOUNT_GROUP_ID)}`);
+      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&gcash=${encodeURIComponent(gcash)}&at=${encodeURIComponent(atValidity)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID ? '' : ACTIVE_ACCOUNT_GROUP_ID)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -4271,9 +4294,10 @@ async function pollAccountPlanStatuses() {
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = ACCOUNT_PLAN_FILTER;
+    const atValidity = ACCOUNT_AT_VALIDITY_FILTER;
     const q = getAccountsQuery();
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&q=${encodeURIComponent(q)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&at=${encodeURIComponent(atValidity)}&q=${encodeURIComponent(q)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -4673,11 +4697,18 @@ function _tokenCellV2(r) {
   else if (live === 'running') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}" style="color:#e6a23c">查活: 运行中</div>`;
   else if (live === 'deactivated') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#f56c6c">查活: 已废</div>`;
   else if (live === 'failed') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#e6a23c">查活: 失败</div>`;
+  const atStatus = String(r.at_validity_status || '');
+  const atError = r.at_validity_error || '';
+  const atChecked = r.at_validity_checked_at || '';
+  let atHtml = '';
+  if (atStatus === 'valid') atHtml = `<div class="acc-v2-sub" title="${esc(atChecked)}" style="color:#67c23a">AT: 有效</div>`;
+  else if (atStatus === 'invalid_confirmed') atHtml = `<div class="acc-v2-sub" title="${esc(atError || atChecked)}" style="color:#f56c6c">AT: 已失效</div>`;
+  else if (atStatus === 'check_error') atHtml = `<div class="acc-v2-sub" title="${esc(atError || atChecked)}" style="color:#e6a23c">AT检测: 错误</div>`;
   const twoFaHtml = _twoFaCellV2(r);
   if (r.has_access_token) {
-    return `<div class="account-token-stack"><button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制 AT</button>${twoFaHtml}${liveHtml}</div>`;
+    return `<div class="account-token-stack"><button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制 AT</button>${twoFaHtml}${atHtml}${liveHtml}</div>`;
   }
-  return `<div class="account-token-stack"><span class="pill status-failed">无 AT</span>${twoFaHtml}${liveHtml}</div>`;
+  return `<div class="account-token-stack"><span class="pill status-failed">无 AT</span>${twoFaHtml}${atHtml}${liveHtml}</div>`;
 }
 function _accountsV2MoreMenu(r) {
   const parts = [
@@ -5519,6 +5550,69 @@ async function applyAccountsGcashFilter() {
   await loadAccounts();
   await pollAccountPlanStatuses();
 }
+async function applyAccountsAtValidityFilter() {
+  ACCOUNT_AT_VALIDITY_FILTER = ACCOUNT_AT_VALIDITY_FILTER === 'invalid-or-error' ? '' : 'invalid-or-error';
+  setAccountsFilterToggle($('#showAtInvalidAccountsOnlyV2'), ACCOUNT_AT_VALIDITY_FILTER === 'invalid-or-error');
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+}
+
+function renderAtValidityScheduleStatus(status = AT_VALIDITY_SCHEDULE) {
+  AT_VALIDITY_SCHEDULE = {...AT_VALIDITY_SCHEDULE, ...(status || {})};
+  const enabled = Boolean(AT_VALIDITY_SCHEDULE.enabled);
+  const toggle = $('#atValidityEnabledV2');
+  setAccountsFilterToggle(toggle, enabled);
+  if (toggle) toggle.textContent = enabled ? '定时AT检测：开' : '定时AT检测：关';
+  const interval = $('#atValidityIntervalV2');
+  if (interval && document.activeElement !== interval) interval.value = String(AT_VALIDITY_SCHEDULE.interval_minutes || 360);
+  const statusEl = $('#atValidityScheduleStatusV2');
+  if (statusEl) {
+    const next = AT_VALIDITY_SCHEDULE.next_run_at ? formatDateTime(AT_VALIDITY_SCHEDULE.next_run_at) : '未安排';
+    const last = AT_VALIDITY_SCHEDULE.last_run_at ? formatDateTime(AT_VALIDITY_SCHEDULE.last_run_at) : '尚未执行';
+    statusEl.textContent = enabled ? `下次 ${next}` : '定时检测已停用';
+    statusEl.title = `上次：${last}；下次：${next}`;
+  }
+}
+async function loadAtValiditySchedule() {
+  try {
+    renderAtValidityScheduleStatus(await api('/api/accounts/at-validity-schedule'));
+  } catch (error) {
+    const statusEl = $('#atValidityScheduleStatusV2');
+    if (statusEl) statusEl.textContent = '定时状态读取失败';
+  }
+}
+async function saveAtValiditySchedule(button) {
+  const interval = Number($('#atValidityIntervalV2')?.value || 0);
+  if (!Number.isInteger(interval) || interval < 1 || interval > 43200) {
+    showToast('AT 检测周期必须是 1 到 43200 分钟');
+    return;
+  }
+  const old = button?.textContent || '保存AT定时';
+  if (button) { button.disabled = true; button.textContent = '保存中…'; }
+  try {
+    const status = await api('/api/accounts/at-validity-schedule', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled:Boolean(AT_VALIDITY_SCHEDULE.enabled), interval_minutes:interval}),
+    });
+    renderAtValidityScheduleStatus(status);
+    showToast(`AT 定时检测已${status.enabled ? '启用' : '停用'}，周期 ${status.interval_minutes} 分钟`);
+  } catch (error) { showToast('保存 AT 定时失败: ' + error.message); }
+  finally { if (button) { button.disabled = false; button.textContent = old; } }
+}
+async function runAtValidityNow(button) {
+  if (!confirm('立即检测所有未归档且有 AT 的账号吗？\n\n使用轻量套餐接口，不会触发邮箱 OTP 登录。')) return;
+  const old = button?.textContent || '立即检查AT';
+  if (button) { button.disabled = true; button.textContent = '入队中…'; }
+  try {
+    const result = await api('/api/accounts/at-validity-check-now', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    renderAtValidityScheduleStatus(result.schedule || {});
+    showToast(`AT 检测已入队 ${result.started_count || 0} 个，忙碌 ${result.busy_count || 0} 个，跳过无AT ${result.skipped_no_token_count || 0} 个`);
+    await loadAccounts();
+  } catch (error) { showToast('AT 检测入队失败: ' + error.message); }
+  finally { if (button) { button.disabled = false; button.textContent = old; } }
+}
 async function refreshAccountsList(btn) {
   if (!btn) return;
   const old = btn.textContent;
@@ -5586,6 +5680,14 @@ async function refreshAccountsList(btn) {
   if (oaicsV2) oaicsV2.addEventListener('click', applyAccountsCheckoutKindFilter);
   const gcashV2 = $('#showGcashAccountsOnlyV2');
   if (gcashV2) gcashV2.addEventListener('click', applyAccountsGcashFilter);
+  const atInvalidV2 = $('#showAtInvalidAccountsOnlyV2');
+  if (atInvalidV2) atInvalidV2.addEventListener('click', applyAccountsAtValidityFilter);
+  $('#atValidityEnabledV2')?.addEventListener('click', () => {
+    AT_VALIDITY_SCHEDULE.enabled = !Boolean(AT_VALIDITY_SCHEDULE.enabled);
+    renderAtValidityScheduleStatus(AT_VALIDITY_SCHEDULE);
+  });
+  $('#btnSaveAtValidityScheduleV2')?.addEventListener('click', event => saveAtValiditySchedule(event.currentTarget));
+  $('#btnRunAtValidityNowV2')?.addEventListener('click', event => runAtValidityNow(event.currentTarget));
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));
 })();
@@ -6251,6 +6353,7 @@ async function selectAndDeleteFreeAccounts() {
     items.forEach(x => ACCOUNT_SELECTED.add(Number(x.id)));
     ACCOUNT_EMAIL_FILTER = emails;
     ACCOUNT_PLAN_FILTER = '';
+    ACCOUNT_AT_VALIDITY_FILTER = '';
     const q = $('#qAccountsV2'); if (q) q.value = '';
     PAGERS.accounts.page = 1;
     renderAccountExactFilter();
@@ -6260,6 +6363,7 @@ async function selectAndDeleteFreeAccounts() {
     setAccountsFilterToggle($('#showHalfTrialAccountsOnlyV2'), false);
     setAccountsFilterToggle($('#showDiscountTrialAccountsOnlyV2'), false);
     setAccountsFilterToggle($('#showNoTrialAccountsOnlyV2'), false);
+    setAccountsFilterToggle($('#showAtInvalidAccountsOnlyV2'), false);
     await loadAccounts();
     updateAccountSelectionUi();
     await purgeSelectionEmails({emails}, () => ACCOUNT_SELECTED.clear());
@@ -8893,11 +8997,13 @@ document.addEventListener('click', (e) => {
 const accountLifetimeHeader = document.querySelector('#accountsPanelV2 thead .col-time');
 if (accountLifetimeHeader) accountLifetimeHeader.textContent = '注册时间';
 loadAccountGroups();
+loadAtValiditySchedule();
 loadSummary();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);
 jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 3000);
 setInterval(loadSummary, 5000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 2000);
+setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) loadAtValiditySchedule(); }, 30000);
 setInterval(() => { if (!$('#tab-outlook').classList.contains('hidden')) loadOutlook(); }, 3000);
 </script>
 </body>

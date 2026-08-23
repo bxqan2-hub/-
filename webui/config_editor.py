@@ -33,6 +33,15 @@ EXPLICIT_EMPTY_LIST_KEYS = {
 # ============================================================
 
 EDITABLE_FIELDS = [
+    # ---- 账号 AT 有效性 ----
+    {
+        "key": "AT_VALIDITY_AUTO_CHECK_ENABLED", "file": "at_validity.py", "type": "bool", "group": "账号 AT 有效性",
+        "label": "启用 AT 定时检测", "help": "使用轻量套餐接口定时验证未归档账号的 Access Token；网络/代理错误与已确认失效分开记录",
+    },
+    {
+        "key": "AT_VALIDITY_CHECK_INTERVAL_MINUTES", "file": "at_validity.py", "type": "int", "group": "账号 AT 有效性",
+        "label": "AT 检测周期（分钟）", "help": "默认 360 分钟；也可直接在账号页顶部修改，范围 1 到 43200 分钟",
+    },
     # ---- WebUI 授权 ----
     {
         "key": "WEBUI_AUTH_CODE", "file": "codex.py", "type": "str", "group": "WebUI 授权",

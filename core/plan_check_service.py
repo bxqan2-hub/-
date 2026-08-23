@@ -11,6 +11,7 @@ from datetime import datetime
 
 from config import proxy as proxy_cfg
 from core import db, detection_proxy
+from core.at_validity import classify_plan_check_result
 from core.chatgpt_plan import check_account_plan
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,9 @@ def _run_plan_check(
             access_token,
             proxy=resolved_proxy,
             timezone_offset_min=resolved_timezone,
-            max_attempts=0,
+            # 账号页人工查询保持“重试直到有结果”；定时任务限定两轮，
+            # 避免单个网络故障账号长期占住周期队列。
+            max_attempts=2 if str(trigger or "").startswith("scheduled-at") else 0,
             fast_mode=True,
             continue_check=lambda: bool(
                 (db.get_account(account_id) or {}).get("plan_check_status") == "running"
@@ -147,6 +150,11 @@ def _run_plan_check(
             result["plan_detection_source"] = "account_access_token"
 
         db.update_account_plan_check(acc_id=account_id, result=result)
+        db.update_account_at_validity(
+            account_id,
+            classify_plan_check_result(result),
+            trigger=trigger,
+        )
         if result.get("has_active_plus_subscription"):
             try:
                 from core.gc_registration_service import close_plus_window_for_account
@@ -187,6 +195,11 @@ def _run_plan_check(
         }
         try:
             db.update_account_plan_check(acc_id=account_id, result=result)
+            db.update_account_at_validity(
+                account_id,
+                classify_plan_check_result(result),
+                trigger=trigger,
+            )
         except Exception:
             logger.exception("[Plan] 写入后台查询异常状态失败: account_id=%s", account_id)
         logger.exception("[Plan] 后台查询异常: %s", email)

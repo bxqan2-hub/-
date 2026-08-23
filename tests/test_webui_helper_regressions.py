@@ -263,6 +263,20 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="showArchivedAccountsV2"', html)
         self.assertIn('>归档分组</button>', html)
 
+    def test_accounts_ui_has_at_validity_schedule_and_problem_filter(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="showAtInvalidAccountsOnlyV2"', html)
+        self.assertIn('>AT失效/错误</button>', html)
+        self.assertIn('id="atValidityIntervalV2"', html)
+        self.assertIn('id="btnSaveAtValidityScheduleV2"', html)
+        self.assertIn('id="btnRunAtValidityNowV2"', html)
+        self.assertIn("ACCOUNT_AT_VALIDITY_FILTER === 'invalid-or-error'", html)
+        self.assertIn("'/api/accounts/at-validity-schedule'", html)
+        self.assertIn("'/api/accounts/at-validity-check-now'", html)
+        self.assertIn("atStatus === 'invalid_confirmed'", html)
+        self.assertIn("atStatus === 'check_error'", html)
+
     def test_accounts_ui_appends_custom_page_size_and_shows_registration_minute(self):
         html = self.client.get("/").get_data(as_text=True)
 

@@ -1979,7 +1979,30 @@ def _account_matches_query(row: dict, q: str | None) -> bool:
         return False
 
 
-def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> list[dict]:
+def _account_matches_at_validity_filter(row: dict, at_filter: str | None) -> bool:
+    value = str(at_filter or "").strip().lower().replace("_", "-")
+    if not value:
+        return True
+    status = str(row.get("at_validity_status") or "unchecked").strip().lower()
+    if value in {"invalid-or-error", "invalid-error", "problem", "problems"}:
+        return status in {"invalid_confirmed", "check_error"}
+    if value in {"invalid", "invalid-confirmed"}:
+        return status == "invalid_confirmed"
+    if value in {"error", "check-error"}:
+        return status == "check_error"
+    if value == "valid":
+        return status == "valid"
+    if value == "unchecked":
+        return status in {"", "unchecked"}
+    return True
+
+
+def _filtered_decorated_accounts(
+    archived: str | bool | None = False,
+    plan_filter: str | None = None,
+    q: str | None = None,
+    at_filter: str | None = None,
+) -> list[dict]:
     rows = _load_accounts()
     if archived in (True, "1", "true", "yes", "only"):
         rows = [r for r in rows if bool(r.get("archived"))]
@@ -1989,11 +2012,12 @@ def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filte
         rows = [r for r in rows if not bool(r.get("archived"))]
     decorated = [_decorate_account(r) for r in rows]
     decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
+    decorated = [r for r in decorated if _account_matches_at_validity_filter(r, at_filter)]
     decorated = [r for r in decorated if _account_matches_query(r, q)]
     return sorted(decorated, key=lambda x: int(x.get("id") or 0), reverse=True)
 
 
-def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> dict:
+def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, at_filter: str | None = None) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
         "id", "email", "archived",
@@ -2008,6 +2032,8 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
+        "at_validity_status", "at_validity_valid", "at_validity_checked_at",
+        "at_validity_http_status", "at_validity_error_code", "at_validity_error", "at_validity_trigger",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
@@ -2028,7 +2054,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
     )
     with _LOCK:
-        all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
         total = len(all_rows)
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
@@ -2073,6 +2099,9 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     "plan_check_completed_at": row.get("plan_check_completed_at"),
                     "plan_checked_at": row.get("plan_checked_at"),
                     "plan_last_success_at": row.get("plan_last_success_at"),
+                    "at_validity_status": row.get("at_validity_status"),
+                    "at_validity_checked_at": row.get("at_validity_checked_at"),
+                    "at_validity_error_code": row.get("at_validity_error_code"),
                     "current_plan_type": row.get("current_plan_type"),
                     "plan_type": row.get("plan_type"),
                     "subscription_plan": row.get("subscription_plan"),
@@ -2106,15 +2135,15 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}:{revision_sig}"}
 
 
-def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> list[dict]:
+def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, at_filter: str | None = None) -> list[dict]:
     with _LOCK:
-        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
         return rows[max(0, int(offset or 0)): max(0, int(offset or 0)) + max(1, int(limit))]
 
 
-def list_accounts_page(limit: int = 50, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> dict:
+def list_accounts_page(limit: int = 50, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, at_filter: str | None = None) -> dict:
     with _LOCK:
-        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
         total = len(rows)
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
@@ -2242,6 +2271,13 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
                 "archived": False,
                 "updated_at": now,
             })
+            # 换绑结果带来的是一枚全新 AT；旧 token 的有效/失效结论不能沿用。
+            row["at_validity_status"] = "unchecked"
+            row["at_validity_valid"] = None
+            row["at_validity_checked_at"] = None
+            row["at_validity_error_code"] = None
+            row["at_validity_error"] = None
+            row["at_validity_http_status"] = None
             row.pop("archived_at", None)
 
             # 分组成员以邮箱保存。先从所有分组清除原/新邮箱，再仅写入当前目标组，
@@ -2335,8 +2371,40 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
             if result.get("proxy_used"):
                 row["live_check_proxy_used"] = result.get("proxy_used")
             row["live_check_error"] = None
+            # 重新登录成功并拿到最新 AT，本身就是一次确定的有效性证明。
+            row["at_validity_status"] = "valid"
+            row["at_validity_valid"] = True
+            row["at_validity_checked_at"] = result.get("checked_at") or now
+            row["at_validity_error_code"] = None
+            row["at_validity_error"] = None
+            row["at_validity_http_status"] = None
+            row["at_validity_trigger"] = "live-check-refresh"
 
         row["copy_line"] = _account_line(row)
+        _save_accounts(rows)
+        return True
+
+
+def update_account_at_validity(acc_id: int, result: dict | None = None, trigger: str = "plan-check") -> bool:
+    """写回独立 AT 有效性结论，不把临时网络错误折叠成失效。"""
+    result = result or {}
+    outcome = str(result.get("outcome") or "check_error").strip().lower()
+    if outcome not in {"valid", "invalid_confirmed", "check_error"}:
+        outcome = "check_error"
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        now = _now()
+        row["at_validity_status"] = outcome
+        row["at_validity_valid"] = True if outcome == "valid" else False if outcome == "invalid_confirmed" else None
+        row["at_validity_checked_at"] = result.get("checked_at") or now
+        row["at_validity_http_status"] = result.get("http_status")
+        row["at_validity_error_code"] = None if outcome == "valid" else str(result.get("error_code") or "check_error")[:100]
+        row["at_validity_error"] = None if outcome == "valid" else str(result.get("error") or "AT 检测失败")[:500]
+        row["at_validity_trigger"] = str(trigger or "plan-check")[:80]
+        row["updated_at"] = now
         _save_accounts(rows)
         return True
 

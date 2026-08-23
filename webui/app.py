@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request
 from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service
+from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, at_validity_scheduler
 from core import integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
@@ -335,6 +335,9 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "mail_plus_subject", "mail_plus_date", "mail_plus_account_id",
         # 查活状态。
         "live_check_status", "live_check_error", "live_checked_at",
+        # AT 定时有效性结论；明确失效与检测错误分开。
+        "at_validity_status", "at_validity_valid", "at_validity_checked_at",
+        "at_validity_http_status", "at_validity_error_code", "at_validity_error", "at_validity_trigger",
         # Codex / Agent 状态提示。
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
@@ -631,6 +634,7 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_gcash = db.recover_interrupted_gcash_checks()
     if recovered_gcash:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 GCash 资格检测状态", recovered_gcash)
+    at_validity_scheduler.ensure_started()
     # ----------------------------------------------------------
     # 页面
     # ----------------------------------------------------------
@@ -685,6 +689,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         plan_filter = str(request.args.get("plan", default="") or "").lower()
         checkout_kind = str(request.args.get("checkout_kind", default="") or "").strip().lower()
         gcash = str(request.args.get("gcash", default="") or "").strip().lower()
+        at_filter = str(request.args.get("at", default="") or "").strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
         group_id = str(request.args.get("group", default="") or "").strip()
         # 新分页接口：传 page/page_size 或 paged=1 时返回 {items,total,page,page_size,...}
@@ -699,7 +704,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         )
         if group_id:
             rows = _filter_account_rows_by_group(
-                db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q),
+                db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter),
                 group_id,
             )
             if checkout_kind:
@@ -717,16 +722,16 @@ def create_app(auth_code: str | None = None) -> Flask:
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
             if checkout_kind or gcash in {"1", "true", "yes"}:
-                rows = [row for row in db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q)
+                rows = [row for row in db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
                         if (not checkout_kind or str(row.get("checkout_kind") or "").strip().lower() == checkout_kind)
                         and (gcash not in {"1", "true", "yes"} or row.get("gcash_eligible") is True)]
                 result = _paginate_items(_compact_accounts_for_list(rows), page=page, page_size=page_size)
             else:
-                result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q)
+                result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
                 result["items"] = _compact_accounts_for_list(result.get("items") or [])
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
-        rows = db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, q=q)
+        rows = db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
         if checkout_kind:
             rows = [row for row in rows if str(row.get("checkout_kind") or "").strip().lower() == checkout_kind]
         rows = apply_gcash_filter(rows)
@@ -840,10 +845,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         plan_filter = str(data.get("plan") or "").lower()
         checkout_kind = str(data.get("checkout_kind") or "").strip().lower()
         gcash = str(data.get("gcash") or "").strip().lower()
+        at_filter = str(data.get("at") or "").strip().lower()
         q = str(data.get("q") or "").strip()
         page = max(1, int(data.get("page") or 1))
         page_size = max(1, min(500, int(data.get("page_size") or 50)))
-        rows = db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q)
+        rows = db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
         rows = [row for row in rows if str(row.get("email") or "").strip().lower() in email_set]
         if checkout_kind:
             rows = [row for row in rows if str(row.get("checkout_kind") or "").strip().lower() == checkout_kind]
@@ -885,6 +891,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         limit = request.args.get("limit", default=5000, type=int)
         archived = str(request.args.get("archived", default="0") or "0").lower()
         plan_filter = str(request.args.get("plan", default="") or "").lower()
+        at_filter = str(request.args.get("at", default="") or "").strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
@@ -892,12 +899,46 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, q=q)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
+
+    @app.get("/api/accounts/at-validity-schedule")
+    def api_account_at_validity_schedule():
+        return jsonify({"ok": True, **at_validity_scheduler.status()})
+
+    @app.post("/api/accounts/at-validity-schedule")
+    def api_account_at_validity_schedule_update():
+        data = request.get_json(silent=True) or {}
+        raw_enabled = data.get("enabled", True)
+        enabled = raw_enabled if isinstance(raw_enabled, bool) else str(raw_enabled).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            interval = int(data.get("interval_minutes") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        if not 1 <= interval <= 43_200:
+            return jsonify({"ok": False, "error": "interval_minutes 必须在 1 到 43200 之间"}), 400
+        try:
+            saved = config_editor.update_config({
+                "AT_VALIDITY_AUTO_CHECK_ENABLED": enabled,
+                "AT_VALIDITY_CHECK_INTERVAL_MINUTES": interval,
+            })
+            import config as _config_pkg
+            _config_pkg.reload_all()
+            at_validity_scheduler.wakeup()
+        except Exception as exc:
+            logger.exception("保存 AT 定时检测配置失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "updated": saved.get("updated") or [], **at_validity_scheduler.status()})
+
+    @app.post("/api/accounts/at-validity-check-now")
+    def api_account_at_validity_check_now():
+        result = at_validity_scheduler.enqueue_accounts(trigger="manual-at")
+        status_code = 409 if result.get("busy") else 200
+        return jsonify({"ok": bool(result.get("accepted")), **result, "schedule": at_validity_scheduler.status()}), status_code
 
 
     @app.get("/api/accounts/<int:acc_id>/secret")

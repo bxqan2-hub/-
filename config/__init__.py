@@ -215,6 +215,7 @@ _RELOADABLE_SUBMODULES = (
     "config.codex",
     "config.sub2api",
     "config.humanize",
+    "config.at_validity",
 )
 
 
@@ -244,9 +245,9 @@ def reload_all() -> list[str]:
 def _refresh_top_level_constants() -> None:
     """把刚 reload 的子模块的常量重新拷一份到 config 包顶层。"""
     import config as _self
-    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, sub2api, humanize, flow_trigger
+    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, sub2api, humanize, flow_trigger, at_validity
     # 简单粗暴：枚举一遍重要常量，覆盖到 _self
-    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, sub2api, humanize, flow_trigger):
+    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, sub2api, humanize, flow_trigger, at_validity):
         for k in dir(src):
             if k.isupper() or k in ("pick_proxy", "pick_browser_profile", "build_browser_environment", "validate_browser_profile"):
                 setattr(_self, k, getattr(src, k))
