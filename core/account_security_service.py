@@ -183,6 +183,19 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         if not access_token:
             raise RuntimeError("浏览器登录成功但没有取得 Access Token")
         _append_log(email, "[安全扩展] 浏览器登录账号已严格匹配")
+        db.update_account_security_setup(
+            account_id,
+            {
+                "ok": False,
+                "status": "running",
+                "stage": "browser_authenticated",
+                "message": "浏览器账号已匹配，正在请求补设密码验证码",
+                "profile_id": opened.profile_id,
+                "password_done": password_done,
+                "totp_done": totp_done,
+            },
+            access_token=access_token,
+        )
 
         # 空字符串表示与直连 Roxy 一致；显式代理则固定复用同一端点。
         session = BrowserSession(proxy=str(client.profile_proxy or ""), detect_exit_geo=False)

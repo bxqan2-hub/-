@@ -13,6 +13,7 @@ from core.generic_api_mail_client import (
     _extract_code,
     _fetch_flysms_otp,
     _parse_flysms_pickup_url,
+    _parse_generic_api_ts,
     fetch_latest_otp,
     snapshot_current_message_ids,
     snapshot_current_otp,
@@ -57,6 +58,46 @@ class FakeSession:
 
 
 class FlysmsPickupTests(unittest.TestCase):
+    def test_parse_localized_detail_page_timestamp(self):
+        value = _parse_generic_api_ts("2026年08月23日 19:58:51 (日本时间)")
+        expected = datetime(2026, 8, 23, 19, 58, 51).timestamp()
+        self.assertEqual(value, expected)
+
+    def test_api798_detail_page_allows_same_code_with_new_page_timestamp(self):
+        received_at = datetime.now().replace(microsecond=0)
+        received_text = received_at.strftime("%Y年%m月%d日 %H:%M:%S (日本时间)")
+        html = f'''\
+        <html><body>
+          <div class="info"><div class="label">邮件时间：</div>
+            <div class="time">{received_text}</div>
+          </div>
+          <iframe id="emailFrame"></iframe>
+          <script>
+            const htmlContent = "&lt;html&gt;&lt;body&gt;Your verification code is 398154&lt;/body&gt;&lt;/html&gt;";
+          </script>
+        </body></html>
+        '''
+
+        class Api798Session:
+            def get(self, *_args, **_kwargs):
+                return FakeResponse(text=html)
+
+            def close(self):
+                pass
+
+        account = GenericApiEmailAccount("a@icloud.com", "https://api798.com/latest/test")
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", Api798Session):
+            code = fetch_latest_otp(
+                account.email,
+                after_ts=received_at.timestamp() - 1,
+                max_wait=5,
+                poll_interval=1,
+                settle_seconds=0,
+                exclude_codes={"398154"},
+            )
+        self.assertEqual(code, "398154")
+
     def test_generic_code_endpoint_fast_fails_after_bounded_transport_errors(self):
         account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")
         session = MagicMock()

@@ -453,6 +453,27 @@ def _parse_generic_api_ts(value) -> float | None:
         return dt.timestamp()
     except Exception:
         pass
+    # api798 等页面会显示本地化时间，例如
+    # ``2026年08月23日 19:58:51 (日本时间)``。页面偶尔以错误的
+    # charset 解码，中文分隔符会变成乱码，因此这里按“非数字分隔符”
+    # 解析同一类年月日时分秒字符串。
+    localized = re.search(
+        r"(?<!\d)(20\d{2})\D+([01]?\d)\D+([0-3]?\d)\D+"
+        r"([0-2]?\d):([0-5]\d)(?::([0-5]\d))?",
+        raw,
+    )
+    if localized:
+        try:
+            return datetime(
+                int(localized.group(1)),
+                int(localized.group(2)),
+                int(localized.group(3)),
+                int(localized.group(4)),
+                int(localized.group(5)),
+                int(localized.group(6) or 0),
+            ).timestamp()
+        except ValueError:
+            pass
     # 常见字符串格式
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
@@ -471,6 +492,34 @@ def _parse_generic_api_ts(value) -> float | None:
     except Exception:
         pass
     return None
+
+
+def _extract_generic_page_timestamp(text: str) -> dict:
+    """提取详情页 ``class=time`` 的邮件时间，供旧码过滤使用。
+
+    api798 的 HTTP 200 响应不是 JSON，而是一个详情 HTML 页面；真实正文和
+    验证码藏在脚本的 ``htmlContent`` 中，外层页面的 ``.time`` 才是该邮件的
+    接收时间。没有这个元数据时，重复验证码会被永久当成旧码。
+    """
+    if not isinstance(text, str) or not text:
+        return {}
+    match = re.search(
+        r"<(?P<tag>[A-Za-z0-9]+)\b[^>]*\bclass\s*=\s*[\"'][^\"']*\btime\b[^\"']*[\"'][^>]*>"
+        r"(?P<value>.*?)</(?P=tag)\s*>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return {}
+    received_at = html_lib.unescape(re.sub(r"<[^>]+>", " ", match.group("value"))).strip()
+    msg_ts = _parse_generic_api_ts(received_at)
+    if not msg_ts:
+        return {}
+    return {
+        "source": "generic_detail_page",
+        "received_at": received_at,
+        "msg_ts": msg_ts,
+    }
 
 
 def _inline_timestamp_is_before(
@@ -1300,6 +1349,14 @@ def fetch_latest_otp(
                     no_code_reason = "邮件列表中尚未出现本次发送之后的新验证码邮件"
                 else:
                     code = _extract_code(text)
+                # 详情型取码页（如 api798）把 OTP 放在脚本嵌入的邮件正文里，
+                # 但把接收时间放在外层 .time 节点。补上这份元数据后，若页面
+                # 已更新到本次请求之后，即使验证码文本与历史值相同也能通过
+                # stale-code 过滤；没有时间的旧页面仍会被拒绝。
+                if code and not structured_meta.get("msg_ts"):
+                    page_meta = _extract_generic_page_timestamp(text)
+                    if page_meta:
+                        structured_meta = {**structured_meta, **page_meta}
                 if excluded_code_is_stale(code, structured_meta):
                     last_error = f"取码接口仍返回已被拒绝的旧验证码 {mask_otp(code)}"
                     logger.debug("[GenericAPI] 跳过已被 OpenAI 拒绝的旧 OTP=%s", mask_otp(code))
