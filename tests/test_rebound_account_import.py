@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import base64
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -11,6 +12,16 @@ from webui.app import _parse_rebound_account_lines, create_app
 
 
 class ReboundAccountImportTests(unittest.TestCase):
+    @staticmethod
+    def _jwt(email: str, plan: str = "plus") -> str:
+        def enc(value):
+            return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
+        return ".".join([
+            enc({"alg": "none"}),
+            enc({"email": email, "https://api.openai.com/auth": {"chatgpt_plan_type": plan}, "exp": 4102444800}),
+            "signature",
+        ])
+
     def _patch_storage(self, root: Path):
         stack = ExitStack()
         stack.enter_context(patch.object(db, "_ACCOUNTS_JSON", root / "accounts.json"))
@@ -116,6 +127,31 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual(account["access_token"], "at-new")
                 self.assertEqual(account["at_validity_status"], "unchecked")
                 self.assertEqual(account["original_email_line"], "new@example.com----https://MAIL.example/new-code?id=99")
+
+    def test_url_format_extracts_real_at_from_full_session_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._seed(root)
+            token = self._jwt("new@example.com")
+            session = json.dumps({
+                "WARNING_BANNER": "do not share",
+                "accessToken": token,
+                "user": {"email": "new@example.com"},
+                "account": {"planType": "plus"},
+            }, separators=(",", ":"))
+            with self._patch_storage(root):
+                client = create_app(auth_code="test-auth").test_client()
+                client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
+                response = client.post("/api/accounts/import-rebound", json={
+                    "group_id": "group-2",
+                    "text": f"old@example.com----new@example.com----https://mail.example/new-code----{session}",
+                })
+                self.assertEqual(response.status_code, 200)
+                account = db.get_account_by_email("new@example.com")
+                self.assertEqual(account["access_token"], token)
+                self.assertNotIn("WARNING_BANNER", account["access_token"])
+                self.assertEqual(account["plan_import_hint"], "plus")
+                self.assertEqual(account["plan_import_hint_source"], "api/auth/session")
 
     def test_existing_rebound_account_is_kept_and_original_account_is_deleted(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -2963,7 +2963,7 @@
       <label class="outlook-import-field">
         <span>换绑完成结果（原邮箱+换绑后邮箱+密码+2FA+AT，或原邮箱+换绑后邮箱+换绑后邮箱URL+AT）</span>
         <textarea id="reboundImportTextV2" placeholder="old@example.com----new@example.com----新OpenAI密码----新MFA Secret----新accessToken&#10;old@example.com----new@example.com----https://换绑后邮箱取码地址----新accessToken"></textarea>
-        <span class="outlook-import-hint">两种格式都只按第一段原邮箱查询。识别成功后删除账号列表中的原邮箱，只保留换绑后的邮箱并替换 AT。</span>
+        <span class="outlook-import-hint">两种格式都只按第一段原邮箱查询。最后一段支持原始 AT 或完整 /api/auth/session JSON；识别成功后删除账号列表中的原邮箱，只保留换绑后的邮箱并替换 AT。</span>
       </label>
     </div>
     <div class="outlook-import-foot">

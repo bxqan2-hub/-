@@ -2339,6 +2339,8 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             old_email_hint = str(raw.get("old_email") or "").strip()
             source_api_url = str(raw.get("source_api_url") or raw.get("api_url") or "").strip()
             access_token = str(raw.get("access_token") or raw.get("at") or "").strip()
+            plan_import_hint = str(raw.get("plan_import_hint") or "").strip().lower()
+            plan_import_hint_source = str(raw.get("plan_import_hint_source") or "").strip()
             normalized_new = new_email.lower()
             credential_mode = bool(password and totp_secret)
             direct_old_email_mode = bool(old_email_hint and "@" in old_email_hint)
@@ -2431,6 +2433,10 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             token_replaced = bool(access_token and access_token != str(target_row.get("access_token") or "").strip())
             if access_token:
                 target_row["access_token"] = access_token
+            if plan_import_hint:
+                target_row["plan_import_hint"] = plan_import_hint
+                target_row["plan_import_hint_source"] = plan_import_hint_source or "access_token_claim"
+                target_row["plan_import_hint_at"] = now
             if token_replaced:
                 # 只有输入实际带来新 AT 时，旧 token 的有效/失效结论才失效。
                 target_row["at_validity_status"] = "unchecked"

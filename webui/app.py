@@ -179,6 +179,23 @@ def _parse_rebound_account_lines(text: str) -> tuple[list[dict], list[dict]]:
         if not str(record.get("access_token") or "").strip():
             invalid.append({"line": number, "email": new_email, "reason": "AT 不能为空"})
             continue
+        # 换绑分站有时把完整 /api/auth/session JSON 放在最后一段，而不是只放
+        # accessToken。这里先抽出真正的 JWT，避免后端把整段 JSON 当 Bearer
+        # token 保存，随后套餐接口返回 “Could not parse authentication token”。
+        raw_access_token = str(record.get("access_token") or "").strip()
+        token_text = _strip_pasted_code_fence(raw_access_token)
+        if token_text[:1] in {"{", "[", '"'}:
+            try:
+                identity = _access_token_identity(token_text)
+            except ValueError as exc:
+                invalid.append({"line": number, "email": new_email, "reason": f"AT/Session JSON 无法识别：{exc}"})
+                continue
+            if str(identity.get("email") or "").strip().casefold() != normalized_new.casefold():
+                invalid.append({"line": number, "email": new_email, "reason": "AT/Session JSON 中的邮箱与换绑后邮箱不一致"})
+                continue
+            record["access_token"] = identity["access_token"]
+            record["plan_import_hint"] = identity.get("plan_import_hint") or None
+            record["plan_import_hint_source"] = identity.get("plan_import_hint_source") or None
         seen_new_emails.add(normalized_new)
         records.append(record)
     return records, invalid
