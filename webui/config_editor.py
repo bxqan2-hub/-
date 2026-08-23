@@ -17,7 +17,7 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
-    "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES",
+    "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES", "AT_VALIDITY_PROXY_PROFILES",
     "CHECKOUT_CHECK_PROXY_PROFILES", "GC_CHECK_PROXY_PROFILES",
     "PAYPAL_OAICS_PROXY_PROFILES",
 }
@@ -36,7 +36,7 @@ EDITABLE_FIELDS = [
     # ---- 账号 AT 有效性 ----
     {
         "key": "AT_VALIDITY_AUTO_CHECK_ENABLED", "file": "at_validity.py", "type": "bool", "group": "账号 AT 有效性",
-        "label": "启用 AT 定时检测", "help": "只调用 AT 会话接口验证未归档账号的 Access Token，不查询套餐或 0 元试用；可使用本地/静态检测代理",
+        "label": "启用 AT 定时检测", "help": "只调用 AT 会话接口验证未归档账号的 Access Token，不查询套餐或 0 元试用；专属池非空时用专属池，空池时用本地代理",
     },
     {
         "key": "AT_VALIDITY_CHECK_INTERVAL_MINUTES", "file": "at_validity.py", "type": "int", "group": "账号 AT 有效性",
@@ -725,21 +725,30 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/AT/Agent网络模式", "help": "用于查套餐、独立 AT 有效性和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
+        "label": "套餐/Agent网络模式", "help": "用于查套餐和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
     },
     {
         "key": "PLAN_CHECK_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/AT/Agent专用代理", "help": "可填写 http://127.0.0.1:端口，供套餐、独立 AT 有效性和 Agent Token 使用；可能包含认证信息，仅保存到 .env",
+        "label": "套餐/Agent专用代理", "help": "可填写 http://127.0.0.1:端口，供套餐和 Agent Token 使用；可能包含认证信息，仅保存到 .env",
         "storage": "env", "secret": True,
     },
     {
         "key": "PLAN_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "套餐/AT检测静态代理池", "help": "由“加入代理池”读取代理用户名中的 region-XX 并自动归类；套餐检测和独立 AT 有效性检测可复用，每个国家可加入多条静态代理",
+        "label": "套餐检测静态代理池", "help": "由“加入代理池”读取代理用户名中的 region-XX 并自动归类；只供套餐/Plus/试用检测使用，每个国家可加入多条静态代理",
         "storage": "runtime_file", "secret": True,
     },
     {
         "key": "PLAN_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/AT检测当前国家", "help": "选择国家后，套餐/Plus/试用与独立 AT 有效性检测会在该国家静态池内随机洗牌取代理",
+        "label": "套餐检测当前国家", "help": "选择国家后，套餐/Plus/试用检测会在该国家静态池内随机洗牌取代理",
+    },
+    {
+        "key": "AT_VALIDITY_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "AT 有效性检测专属代理池", "help": "只供 AT 定时/立即有效性检测使用；非空时只用此池，空池时自动使用本地 PROXY_POOL；不会查询套餐或 0 元试用",
+        "storage": "runtime_file", "secret": True,
+    },
+    {
+        "key": "AT_VALIDITY_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "AT 有效性检测当前国家", "help": "选择国家后，AT 检测会在该国家专属静态池内随机洗牌取代理",
     },
     {
         "key": "CHECKOUT_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",

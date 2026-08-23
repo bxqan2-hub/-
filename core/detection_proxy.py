@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""套餐/AT 与 Checkout 检测使用的按国家静态代理池。"""
+"""套餐、AT 有效性与 Checkout 检测使用的独立按国家静态代理池。"""
 from __future__ import annotations
 
 import calendar
@@ -134,7 +134,12 @@ def configured_detection_proxy_spec(purpose: str) -> str | None:
     if normalized == "checkout":
         entries = getattr(proxy_cfg, "CHECKOUT_CHECK_PROXY_PROFILES", []) or []
         active = str(getattr(proxy_cfg, "CHECKOUT_CHECK_PROXY_ACTIVE", "") or "").strip()
+    elif normalized in {"at", "at-validity", "at_validity"}:
+        normalized = "at"
+        entries = getattr(proxy_cfg, "AT_VALIDITY_PROXY_PROFILES", []) or []
+        active = str(getattr(proxy_cfg, "AT_VALIDITY_PROXY_ACTIVE", "") or "").strip()
     else:
+        normalized = "plan"
         entries = getattr(proxy_cfg, "PLAN_CHECK_PROXY_PROFILES", []) or []
         active = str(getattr(proxy_cfg, "PLAN_CHECK_PROXY_ACTIVE", "") or "").strip()
     groups = detection_proxy_country_groups(entries)

@@ -5606,7 +5606,7 @@ async function saveAtValiditySchedule(button) {
   finally { if (button) { button.disabled = false; button.textContent = old; } }
 }
 async function runAtValidityNow(button) {
-  if (!confirm('立即检测所有未归档且有 AT 的账号吗？\n\n只调用 AT 会话有效性接口，可使用本地/静态检测代理；不会查询套餐、0元试用或触发邮箱 OTP。')) return;
+  if (!confirm('立即检测所有未归档且有 AT 的账号吗？\n\n只调用 AT 会话有效性接口；专属代理池非空时只用专属池，空池时使用本地代理；不会查询套餐、0元试用或触发邮箱 OTP。')) return;
   const old = button?.textContent || '立即检查AT';
   if (button) { button.disabled = true; button.textContent = '入队中…'; }
   try {
@@ -7866,7 +7866,7 @@ function bindProxyApiImportModalV2() {
 
 let DETECTION_PROXY_IMPORT_PURPOSE_V2 = 'plan';
 function openDetectionProxyImportModalV2(purpose) {
-  DETECTION_PROXY_IMPORT_PURPOSE_V2 = purpose === 'checkout' ? 'checkout' : 'plan';
+  DETECTION_PROXY_IMPORT_PURPOSE_V2 = purpose === 'checkout' ? 'checkout' : (purpose === 'at' ? 'at' : 'plan');
   const modal = $('#detectionProxyImportModal');
   const textarea = $('#detectionProxyImportTextV2');
   const result = $('#detectionProxyImportResultV2');
@@ -7874,10 +7874,13 @@ function openDetectionProxyImportModalV2(purpose) {
   const help = $('#detectionProxyImportHelp');
   if (!modal || !textarea) return;
   const isCheckout = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'checkout';
-  if (title) title.textContent = isCheckout ? '加入 Checkout 检测代理池' : '加入套餐检测代理池';
+  const isAt = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'at';
+  if (title) title.textContent = isCheckout ? '加入 Checkout 检测代理池' : (isAt ? '加入 AT 有效性检测专属代理池' : '加入套餐检测代理池');
   if (help) help.textContent = isCheckout
     ? '读取每条代理用户名中的 region-XX，并归入 Checkout 独立池，不会加入套餐检测池。'
-    : '读取每条代理用户名中的 region-XX，并归入套餐独立池，不会加入 Checkout 检测池。';
+    : (isAt
+      ? '读取每条代理用户名中的 region-XX，并归入 AT 有效性检测专属池，不会加入套餐或 Checkout 检测池。'
+      : '读取每条代理用户名中的 region-XX，并归入套餐独立池，不会加入 AT 或 Checkout 检测池。');
   textarea.value = '';
   if (result) result.textContent = '';
   modal.classList.remove('hidden');
@@ -7920,8 +7923,10 @@ async function submitDetectionProxyImportV2() {
 }
 
 async function saveDetectionProxyCountryV2(select) {
-  const purpose = select.dataset.detectionCountrySelect === 'checkout' ? 'checkout' : 'plan';
-  const activeKey = purpose === 'checkout' ? 'CHECKOUT_CHECK_PROXY_ACTIVE' : 'PLAN_CHECK_PROXY_ACTIVE';
+  const requestedPurpose = select.dataset.detectionCountrySelect;
+  const purpose = requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan');
+  const activeKey = purpose === 'checkout' ? 'CHECKOUT_CHECK_PROXY_ACTIVE'
+    : (purpose === 'at' ? 'AT_VALIDITY_PROXY_ACTIVE' : 'PLAN_CHECK_PROXY_ACTIVE');
   const status = document.querySelector(`[data-detection-proxy-status="${purpose}"]`);
   const country = String(select.value || '').toUpperCase();
   if (!country) return;
@@ -8158,6 +8163,7 @@ function renderConfigPlainFieldV2(f) {
   const isLargePool = f.type === 'list_str_multiline' && f.ui_variant === 'large_pool';
   const detectionProfileMap = {
     PLAN_CHECK_PROXY_ACTIVE: 'PLAN_CHECK_PROXY_PROFILES',
+    AT_VALIDITY_PROXY_ACTIVE: 'AT_VALIDITY_PROXY_PROFILES',
     CHECKOUT_CHECK_PROXY_ACTIVE: 'CHECKOUT_CHECK_PROXY_PROFILES',
   };
   if (detectionProfileMap[f.key]) {
@@ -8244,9 +8250,8 @@ function detectionProxyProfileOptionsV2(profileKey) {
   }));
 }
 function refreshDetectionProxySelectV2(profileKey) {
-  const activeKey = profileKey === 'PLAN_CHECK_PROXY_PROFILES'
-    ? 'PLAN_CHECK_PROXY_ACTIVE'
-    : 'CHECKOUT_CHECK_PROXY_ACTIVE';
+  const activeKey = profileKey === 'PLAN_CHECK_PROXY_PROFILES' ? 'PLAN_CHECK_PROXY_ACTIVE'
+    : (profileKey === 'AT_VALIDITY_PROXY_PROFILES' ? 'AT_VALIDITY_PROXY_ACTIVE' : 'CHECKOUT_CHECK_PROXY_ACTIVE');
   const select = document.querySelector(`#configSectionsV2 [data-key="${activeKey}"]`);
   if (!select) return;
   const profiles = detectionProxyProfileOptionsV2(profileKey);
@@ -8283,13 +8288,15 @@ function renderDetectionProxyCountryControlV2(profileField, activeField, purpose
     <div class="detection-proxy-summary-v2" data-detection-proxy-status="${attrEsc(purpose)}">
       ${profiles.length
         ? `已归纳 <strong>${profiles.length}</strong> 个国家、共 <strong>${total}</strong> 条；当前 ${esc(selected?.label || '')}`
-        : '当前没有静态代理；原动态 API 不会被套餐、AT 或 Checkout 检测调用。'}
+        : (purpose === 'at' ? '当前专属池为空；AT 检测将使用本地代理。' : '当前没有静态代理；动态代理 API 不会被检测任务调用。')}
     </div>`;
 }
 function renderDetectionProxyPanelV2(fields) {
   const byKey = Object.fromEntries(fields.map(field => [field.key, field]));
   const planProfiles = byKey.PLAN_CHECK_PROXY_PROFILES;
   const planActive = byKey.PLAN_CHECK_PROXY_ACTIVE;
+  const atProfiles = byKey.AT_VALIDITY_PROXY_PROFILES;
+  const atActive = byKey.AT_VALIDITY_PROXY_ACTIVE;
   const checkoutProfiles = byKey.CHECKOUT_CHECK_PROXY_PROFILES;
   const checkoutActive = byKey.CHECKOUT_CHECK_PROXY_ACTIVE;
   const gcProfiles = byKey.GC_CHECK_PROXY_PROFILES;
@@ -8303,19 +8310,27 @@ function renderDetectionProxyPanelV2(fields) {
   ` : '';
   const planCard = (planProfiles && planActive) ? `
     <section class="detection-proxy-card-v2" aria-label="套餐检测代理">
-      <h4>套餐 / Plus / 试用 / AT 检测代理</h4>
-      <p>套餐检测和独立 AT 有效性检测可复用这里的本地/静态代理；AT 检测只读取会话接口状态，不进入套餐或 0 元试用判断。</p>
+      <h4>套餐 / Plus / 试用检测代理</h4>
+      <p>只用于套餐、Plus 和试用检测；与 AT 有效性和 Checkout 检测完全分离。</p>
       ${renderDetectionProxyCountryControlV2(planProfiles, planActive, 'plan')}
+    </section>
+  ` : '';
+  const atCard = (atProfiles && atActive) ? `
+    <section class="detection-proxy-card-v2" aria-label="AT 有效性检测代理">
+      <h4>AT 定时有效性检测专属代理</h4>
+      <p>专属池非空时只用该池；池为空时使用本地代理。只检测 AT 是否失效，不查询套餐或 0 元试用。</p>
+      ${renderDetectionProxyCountryControlV2(atProfiles, atActive, 'at')}
     </section>
   ` : '';
   return `
     <div class="detection-proxy-panel-v2">
       <div class="detection-proxy-panel-v2-head">
-        <div><b>检测代理（套餐/AT 与 Checkout 完全分离）</b></div>
+        <div><b>检测代理（套餐、AT 与 Checkout 三套独立池）</b></div>
         <span>加入静态代理后自动识别国家；选择国家即可使用该国家代理池</span>
       </div>
       <div class="detection-proxy-grid-v2">
         ${planCard}
+        ${atCard}
         ${checkoutCard}
         <section class="detection-proxy-card-v2" aria-label="GCash 检测代理">
           <h4>GCash 检测代理</h4>
@@ -8332,6 +8347,7 @@ function renderMixedConfigSectionV2(name, fields, intro) {
   const proxyInternalFields = new Set([
     'PROXY_API_URL', 'PROXY_API_PROFILES', 'PROXY_API_ACTIVE',
     'PLAN_CHECK_PROXY_PROFILES', 'PLAN_CHECK_PROXY_ACTIVE',
+    'AT_VALIDITY_PROXY_PROFILES', 'AT_VALIDITY_PROXY_ACTIVE',
     'CHECKOUT_CHECK_PROXY_PROFILES', 'CHECKOUT_CHECK_PROXY_ACTIVE',
   ]);
   const inputs = fields.filter(f => f.type !== 'bool' && !(name === '代理池' && proxyInternalFields.has(f.key)));
@@ -8946,7 +8962,7 @@ function trackConfigFieldChange(e) {
   if (!f) return;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
   if (f.key === 'PROXY_POOL') updateProxyPoolEditorMetaV2(el);
-  if (['PLAN_CHECK_PROXY_PROFILES', 'CHECKOUT_CHECK_PROXY_PROFILES'].includes(f.key)) {
+  if (['PLAN_CHECK_PROXY_PROFILES', 'AT_VALIDITY_PROXY_PROFILES', 'CHECKOUT_CHECK_PROXY_PROFILES'].includes(f.key)) {
     refreshDetectionProxySelectV2(f.key);
     return;
   }

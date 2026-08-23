@@ -3577,10 +3577,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         purpose = str(data.get("purpose") or "").strip().lower()
         field_map = {
             "plan": ("PLAN_CHECK_PROXY_PROFILES", "PLAN_CHECK_PROXY_ACTIVE"),
+            "at": ("AT_VALIDITY_PROXY_PROFILES", "AT_VALIDITY_PROXY_ACTIVE"),
             "checkout": ("CHECKOUT_CHECK_PROXY_PROFILES", "CHECKOUT_CHECK_PROXY_ACTIVE"),
         }
         if purpose not in field_map:
-            return jsonify({"ok": False, "error": "purpose 必须是 plan 或 checkout"}), 400
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at 或 checkout"}), 400
 
         from config import proxy as proxy_cfg
         from core import detection_proxy

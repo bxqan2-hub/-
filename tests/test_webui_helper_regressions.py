@@ -314,6 +314,9 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('data-add-detection-proxy="${attrEsc(purpose)}"', html)
         self.assertIn("renderDetectionProxyCountryControlV2(checkoutProfiles, checkoutActive, 'checkout')", html)
         self.assertIn("renderDetectionProxyCountryControlV2(planProfiles, planActive, 'plan')", html)
+        self.assertIn("renderDetectionProxyCountryControlV2(atProfiles, atActive, 'at')", html)
+        self.assertIn('AT_VALIDITY_PROXY_PROFILES', html)
+        self.assertIn('专属池非空时只用该池；池为空时使用本地代理', html)
         self.assertIn('data-detection-country-select', html)
         self.assertIn('id="detectionProxyImportModal"', html)
         self.assertIn('加入代理池', html)
@@ -321,6 +324,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('随机洗牌', html)
         self.assertNotIn('${renderConfigPlainFieldV2(planProfiles)}', html)
         self.assertNotIn('${renderConfigPlainFieldV2(checkoutProfiles)}', html)
+        self.assertNotIn('${renderConfigPlainFieldV2(atProfiles)}', html)
 
     def test_settings_ui_filters_irrelevant_drivers_and_has_real_status_cards(self):
         html = self.client.get("/").get_data(as_text=True)

@@ -10,12 +10,15 @@ class DetectionProxyProfilesTests(unittest.TestCase):
     def setUp(self):
         detection_proxy._POOL_ROTATIONS.clear()
 
-    def test_plan_and_checkout_profiles_are_independent(self):
+    def test_plan_at_and_checkout_profiles_are_independent(self):
         with patch.object(detection_proxy.proxy_cfg, "PLAN_CHECK_PROXY_PROFILES", [
             "JP|socks5h://jp-one.example:1080",
             "JP|socks5h://jp-two.example:1080",
             "DE|socks5h://de.example:1080",
         ]), patch.object(detection_proxy.proxy_cfg, "PLAN_CHECK_PROXY_ACTIVE", "JP"), \
+             patch.object(detection_proxy.proxy_cfg, "AT_VALIDITY_PROXY_PROFILES", [
+                 "US|socks5h://at-us.example:1080",
+             ]), patch.object(detection_proxy.proxy_cfg, "AT_VALIDITY_PROXY_ACTIVE", "US"), \
              patch.object(detection_proxy.proxy_cfg, "CHECKOUT_CHECK_PROXY_PROFILES", [
                  "DE|http://checkout.example:8080",
              ]), patch.object(detection_proxy.proxy_cfg, "CHECKOUT_CHECK_PROXY_ACTIVE", "DE"):
@@ -27,6 +30,10 @@ class DetectionProxyProfilesTests(unittest.TestCase):
                 "JP|socks5h://jp-one.example:1080",
                 "JP|socks5h://jp-two.example:1080",
             })
+            self.assertEqual(
+                detection_proxy.configured_detection_proxy_spec("at"),
+                "US|socks5h://at-us.example:1080",
+            )
             self.assertEqual(
                 detection_proxy.configured_detection_proxy_spec("checkout"),
                 "DE|http://checkout.example:8080",
@@ -177,6 +184,36 @@ class DetectionProxyImportApiTests(unittest.TestCase):
             "JP|socks5h://old-jp.example:1080",
             "JP|socks5h://jp.example:1080",
             "US|http://us.example:8080",
+        ])
+
+    def test_import_saves_at_validity_dedicated_pool(self):
+        inspection = {
+            "country": "JP",
+            "country_label": "日本",
+            "country_source": "proxy_region_tag",
+            "proxy": "socks5h://at-jp.example:1080",
+            "masked_proxy": "socks5h://at-jp.example:1080",
+            "exit_ip": "",
+            "region": "",
+            "city": "",
+        }
+        with patch.object(detection_proxy.proxy_cfg, "AT_VALIDITY_PROXY_PROFILES", []), \
+             patch.object(detection_proxy.proxy_cfg, "AT_VALIDITY_PROXY_ACTIVE", ""), \
+             patch.object(detection_proxy, "inspect_static_proxy", return_value=inspection), \
+             patch("webui.app.config_editor.update_config", return_value={
+                 "updated": ["AT_VALIDITY_PROXY_PROFILES", "AT_VALIDITY_PROXY_ACTIVE"],
+                 "ignored": [],
+             }) as update, patch("config.reload_all"):
+            response = self.client.post("/api/detection-proxy-pools/import", json={
+                "purpose": "at",
+                "proxies": ["socks5h://at-jp.example:1080"],
+            })
+
+        self.assertEqual(response.status_code, 200)
+        saved = update.call_args.args[0]
+        self.assertEqual(saved["AT_VALIDITY_PROXY_ACTIVE"], "JP")
+        self.assertEqual(saved["AT_VALIDITY_PROXY_PROFILES"], [
+            "JP|socks5h://at-jp.example:1080",
         ])
 
     def test_import_can_grow_existing_pool_beyond_legacy_500_limit(self):

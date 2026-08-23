@@ -17,6 +17,7 @@ _ENV_PATH = _PROJECT_ROOT / ".env"
 _PROXY_POOL_PATH = _PROJECT_ROOT / "data" / "proxy_pool.txt"
 _RUNTIME_LIST_PATHS = {
     "PLAN_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "plan_check_proxy_pool.txt",
+    "AT_VALIDITY_PROXY_PROFILES": _PROJECT_ROOT / "data" / "at_validity_proxy_pool.txt",
     "CHECKOUT_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "checkout_check_proxy_pool.txt",
 }
 _LOADED = False
@@ -24,7 +25,7 @@ _LOADED = False
 # 这些多行列表字段允许用空值显式覆盖为 []。
 # 例如 WebUI 清空代理池后会写入 PROXY_POOL="" / PROXY_POOL="[]"，不能再回退到源码默认本地代理。
 EXPLICIT_EMPTY_LIST_ENV_KEYS = {
-    "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES",
+    "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES", "AT_VALIDITY_PROXY_PROFILES",
     "CHECKOUT_CHECK_PROXY_PROFILES", "PAYPAL_OAICS_PROXY_PROFILES",
 }
 
@@ -38,6 +39,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "REGISTER_PASSWORD": "OpenAI 注册密码",
     "PLAN_CHECK_PROXY": "套餐查询专用代理（可能包含认证信息）",
     "PLAN_CHECK_PROXY_PROFILES": "套餐检测按国家静态代理池",
+    "AT_VALIDITY_PROXY_PROFILES": "AT 有效性检测按国家静态代理池",
     "CHECKOUT_CHECK_PROXY_PROFILES": "Checkout检测按国家静态代理池",
     "PAYPAL_OAICS_PROXY_PROFILES": "PayPal OAICS提链专用代理列表",
     "PAYPAL_OAICS_PROXY_ACTIVE": "PayPal OAICS提链当前代理线路",

@@ -59,10 +59,10 @@ def _result(
 
 
 def _resolve_at_validity_route(explicit_proxy: str | None = None) -> dict[str, Any]:
-    """选择 AT 检测路径；优先静态检测池，也支持已配置的本地专用代理。
+    """选择 AT 检测路径；专属池非空时只用专属池，空池时用本地代理。
 
-    显式空串表示直连。没有静态检测池和 ``PLAN_CHECK_PROXY`` 时也直连，避免
-    AT 周期任务为了取代理而调用动态代理 API。
+    显式空串表示调用方要求直连。周期任务不会读取套餐检测池，也不会调用动态
+    代理 API；本地回退只读取 ``PROXY_POOL`` / 系统代理。
     """
     if explicit_proxy is not None:
         resolved = detection_proxy.resolve_static_detection_proxy(explicit_proxy)
@@ -70,27 +70,24 @@ def _resolve_at_validity_route(explicit_proxy: str | None = None) -> dict[str, A
         route["proxy_source"] = "request" if resolved else None
         return route
 
-    static_spec = detection_proxy.configured_detection_proxy_spec("plan")
+    static_spec = detection_proxy.configured_detection_proxy_spec("at")
     if static_spec is not None:
         resolved = detection_proxy.resolve_static_detection_proxy(static_spec)
+        if not resolved:
+            raise ValueError("AT 有效性检测专属代理池未解析到可用静态代理")
         route = resolve_plan_check_route(explicit_proxy=resolved or "")
-        route["proxy_source"] = "plan_static_pool"
+        route["proxy_source"] = "at_validity_static_pool"
         return route
 
-    configured = str(getattr(proxy_cfg, "PLAN_CHECK_PROXY", "") or "").strip()
-    mode = str(getattr(proxy_cfg, "PLAN_CHECK_PROXY_MODE", "auto") or "auto").strip().lower()
-    if mode not in {"auto", "proxy", "direct"}:
-        raise ValueError(f"PLAN_CHECK_PROXY_MODE={mode!r} 无效，可选 auto / proxy / direct")
-    if configured:
-        # 只验证这是普通静态/本地代理；禁止定时检测间接调用代理 API。
-        detection_proxy.resolve_static_detection_proxy(configured)
-    if configured or mode == "direct":
-        # 这里不会落到代理池或动态 API：configured 非空时解析器会直接使用它，
-        # direct 则明确直连。本地端口不可用时沿用 auto 的直连回退行为。
-        return resolve_plan_check_route()
-    if mode == "proxy":
-        raise ValueError("AT 检测网络模式为 proxy，但未配置本地/静态检测代理")
-    return resolve_plan_check_route(explicit_proxy="")
+    local_proxy = str(proxy_cfg.pick_local_proxy() or "").strip()
+    if not local_proxy:
+        raise ValueError("AT 有效性检测专属代理池为空，且未配置本地代理")
+    resolved = detection_proxy.resolve_static_detection_proxy(local_proxy)
+    if not resolved:
+        raise ValueError("AT 有效性检测本地代理为空或无法识别")
+    route = resolve_plan_check_route(explicit_proxy=resolved)
+    route["proxy_source"] = "local_proxy_fallback"
+    return route
 
 
 def _request_headers(env: BrowserSession, token: str) -> dict[str, str]:

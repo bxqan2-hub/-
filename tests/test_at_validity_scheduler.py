@@ -21,24 +21,52 @@ class AtValidityProbeTests(unittest.TestCase):
         env.session.get.return_value = SimpleNamespace(status_code=status_code)
         return env
 
-    @patch.object(at_validity, "resolve_plan_check_route", return_value={
-        "proxy": "http://127.0.0.1:7890",
-        "network_route": "proxy",
-        "proxy_used": "http://127.0.0.1:7890",
-        "proxy_source": "configured",
-        "proxy_fallback_reason": None,
-    })
-    @patch.object(at_validity.detection_proxy, "resolve_static_detection_proxy", return_value="http://127.0.0.1:7890")
-    @patch.object(at_validity.detection_proxy, "configured_detection_proxy_spec", return_value=None)
-    def test_route_accepts_configured_local_proxy(self, configured_spec, resolve_static, resolve_route):
-        with patch.object(at_validity.proxy_cfg, "PLAN_CHECK_PROXY", "http://127.0.0.1:7890"), \
-             patch.object(at_validity.proxy_cfg, "PLAN_CHECK_PROXY_MODE", "auto"):
+    def test_route_uses_at_dedicated_pool_before_local_proxy(self):
+        with patch.object(
+            at_validity.detection_proxy,
+            "configured_detection_proxy_spec",
+            return_value="JP|socks5h://at-pool.example:1080",
+        ) as configured_spec, patch.object(
+            at_validity.proxy_cfg,
+            "pick_local_proxy",
+            return_value="http://127.0.0.1:7890",
+        ) as pick_local:
             route = at_validity._resolve_at_validity_route()
 
-        configured_spec.assert_called_once_with("plan")
-        resolve_static.assert_called_once_with("http://127.0.0.1:7890")
-        resolve_route.assert_called_once_with()
-        self.assertEqual(route["network_route"], "proxy")
+        configured_spec.assert_called_once_with("at")
+        pick_local.assert_not_called()
+        self.assertEqual(route["proxy"], "socks5h://at-pool.example:1080")
+        self.assertEqual(route["proxy_source"], "at_validity_static_pool")
+
+    def test_route_uses_local_proxy_when_at_pool_is_empty(self):
+        with patch.object(
+            at_validity.detection_proxy,
+            "configured_detection_proxy_spec",
+            return_value=None,
+        ) as configured_spec, patch.object(
+            at_validity.proxy_cfg, "PROXY_POOL", ["http://127.0.0.1:7890"]
+        ), patch.object(
+            at_validity.proxy_cfg, "PROXY_POOL_ACTIVE", ""
+        ), patch.object(
+            at_validity.proxy_cfg, "PROXY_API_ENABLED", True
+        ), patch.object(
+            at_validity.proxy_cfg, "fetch_proxy_from_api"
+        ) as fetch_dynamic:
+            route = at_validity._resolve_at_validity_route()
+
+        configured_spec.assert_called_once_with("at")
+        fetch_dynamic.assert_not_called()
+        self.assertEqual(route["proxy"], "http://127.0.0.1:7890")
+        self.assertEqual(route["proxy_source"], "local_proxy_fallback")
+
+    def test_route_fails_closed_when_at_pool_and_local_proxy_are_empty(self):
+        with patch.object(
+            at_validity.detection_proxy,
+            "configured_detection_proxy_spec",
+            return_value=None,
+        ), patch.object(at_validity.proxy_cfg, "pick_local_proxy", return_value=""):
+            with self.assertRaisesRegex(ValueError, "专属代理池为空"):
+                at_validity._resolve_at_validity_route()
 
     @patch.object(at_validity, "BrowserSession")
     @patch.object(at_validity, "token_claims", return_value={"token_expired": True})

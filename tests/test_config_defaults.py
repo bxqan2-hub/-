@@ -140,6 +140,21 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         self.assertEqual(stored[-1], pool[-1])
         self.assertEqual(env_value, "[]")
 
+    def test_at_validity_pool_uses_own_runtime_file(self):
+        pool = ["JP|socks5h://at-one.example:1080", "US|http://at-two.example:8080"]
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(env_loader._RUNTIME_LIST_PATHS, {
+                 "AT_VALIDITY_PROXY_PROFILES": Path(tmp) / "at_validity_proxy_pool.txt",
+             }), patch("config.env_loader._ENV_PATH", Path(tmp) / ".env"), \
+             patch.dict(os.environ, {}, clear=False):
+            result = config_editor.update_config({"AT_VALIDITY_PROXY_PROFILES": pool})
+            stored = env_loader.read_runtime_list_file("AT_VALIDITY_PROXY_PROFILES")
+            env_value = env_loader.read_env_file()["AT_VALIDITY_PROXY_PROFILES"]
+
+        self.assertEqual(result["runtime_file_updated"], ["AT_VALIDITY_PROXY_PROFILES"])
+        self.assertEqual(stored, pool)
+        self.assertEqual(env_value, "[]")
+
     def test_apply_env_overrides_does_not_let_blank_values_mask_defaults(self):
         old_loaded = env_loader._LOADED
         env_loader._LOADED = True
