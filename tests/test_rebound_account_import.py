@@ -44,23 +44,24 @@ class ReboundAccountImportTests(unittest.TestCase):
 
     def test_parser_accepts_requested_formats_and_redacts_invalid_secrets(self):
         records, invalid = _parse_rebound_account_lines(
-            "old@example.com----new@example.com----Password!----JBSWY3DPEHPK3PXP\n"
-            "api-new@example.com----https://mail.example/code?id=7----at-new\n"
+            "old@example.com----new@example.com----Password!----JBSWY3DPEHPK3PXP----at-password\n"
+            "api-old@example.com----api-new@example.com----https://mail.example/code?id=7----at-url\n"
             "bad@example.com----secret-value"
         )
 
         self.assertEqual([record["import_format"] for record in records], [
-            "old_new_password_2fa",
-            "new_url_at",
+            "old_new_password_2fa_at",
+            "old_new_url_at",
         ])
-        self.assertNotIn("access_token", records[0])
+        self.assertEqual(records[0]["access_token"], "at-password")
         self.assertEqual(records[0]["old_email"], "old@example.com")
         self.assertEqual(records[0]["email"], "new@example.com")
+        self.assertEqual(records[1]["old_email"], "api-old@example.com")
         self.assertEqual(records[1]["source_api_url"], "https://mail.example/code?id=7")
         self.assertEqual(len(invalid), 1)
         self.assertNotIn("secret-value", json.dumps(invalid, ensure_ascii=False))
 
-    def test_requested_old_new_password_2fa_replaces_email_without_replacing_at(self):
+    def test_password_format_matches_only_old_email_and_replaces_result_data(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._seed(root)
@@ -69,23 +70,24 @@ class ReboundAccountImportTests(unittest.TestCase):
                 client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
                 response = client.post("/api/accounts/import-rebound", json={
                     "group_id": "group-2",
-                    "text": "old@example.com----new@example.com----Password!----JBSWY3DPEHPK3PXP",
+                    "text": "old@example.com----new@example.com----ChangedPassword!----GEZDGNBVGY3TQOJQ----at-new",
                 })
 
                 self.assertEqual(response.status_code, 200)
                 payload = response.get_json()
                 self.assertEqual(payload["updated_count"], 1)
-                self.assertEqual(payload["format_counts"], {"old_new_password_2fa": 1})
+                self.assertEqual(payload["format_counts"], {"old_new_password_2fa_at": 1})
                 self.assertEqual(payload["updated"][0]["match_mode"], "old_email")
-                self.assertFalse(payload["updated"][0]["token_replaced"])
+                self.assertTrue(payload["updated"][0]["token_replaced"])
                 self.assertIsNone(db.get_account_by_email("old@example.com"))
                 account = db.get_account_by_email("new@example.com")
                 self.assertEqual(account["id"], 7)
-                self.assertEqual(account["access_token"], "at-old")
-                self.assertEqual(account["at_validity_status"], "valid")
-                self.assertTrue(account["at_validity_valid"])
+                self.assertEqual(account["access_token"], "at-new")
+                self.assertEqual(account["totp_secret"], "GEZDGNBVGY3TQOJQ")
+                self.assertEqual(json.loads(account["extra_json"])["registration_password"], "ChangedPassword!")
+                self.assertEqual(account["at_validity_status"], "unchecked")
 
-    def test_requested_new_url_at_resolves_and_removes_original_email(self):
+    def test_url_format_matches_old_email_not_url_and_keeps_new_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._seed(root)
@@ -100,19 +102,20 @@ class ReboundAccountImportTests(unittest.TestCase):
                 client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
                 response = client.post("/api/accounts/import-rebound", json={
                     "group_id": "group-2",
-                    "text": "new@example.com----https://MAIL.example/code?id=7#fragment----at-new",
+                    "text": "old@example.com----new@example.com----https://MAIL.example/new-code?id=99----at-new",
                 })
 
                 self.assertEqual(response.status_code, 200)
                 payload = response.get_json()
                 self.assertEqual(payload["updated_count"], 1)
-                self.assertEqual(payload["format_counts"], {"new_url_at": 1})
-                self.assertEqual(payload["updated"][0]["match_mode"], "source_url")
+                self.assertEqual(payload["format_counts"], {"old_new_url_at": 1})
+                self.assertEqual(payload["updated"][0]["match_mode"], "old_email")
                 self.assertTrue(payload["updated"][0]["token_replaced"])
                 self.assertIsNone(db.get_account_by_email("old@example.com"))
                 account = db.get_account_by_email("new@example.com")
                 self.assertEqual(account["access_token"], "at-new")
                 self.assertEqual(account["at_validity_status"], "unchecked")
+                self.assertEqual(account["original_email_line"], "new@example.com----https://MAIL.example/new-code?id=99")
 
     def test_existing_rebound_account_is_kept_and_original_account_is_deleted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -133,6 +136,7 @@ class ReboundAccountImportTests(unittest.TestCase):
                     "email": "new@example.com",
                     "password": "Password!",
                     "totp_secret": "JBSWY3DPEHPK3PXP",
+                    "access_token": "at-replacement",
                 }], target_group_id="group-2")
 
                 self.assertEqual(skipped, [])
@@ -141,7 +145,7 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertIsNone(db.get_account(7))
                 kept = db.get_account(8)
                 self.assertEqual(kept["email"], "new@example.com")
-                self.assertEqual(kept["access_token"], "at-existing-new")
+                self.assertEqual(kept["access_token"], "at-replacement")
                 self.assertEqual(kept["plan_type"], "plus")
                 self.assertEqual(len(db.list_accounts()), 1)
 
@@ -151,6 +155,7 @@ class ReboundAccountImportTests(unittest.TestCase):
             self._seed(root)
             with self._patch_storage(root):
                 updated, skipped = db.import_rebound_accounts([{
+                    "old_email": "old@example.com",
                     "email": "new@example.com",
                     "password": "Password!",
                     "totp_secret": "JBSWY3DPEHPK3PXP",
@@ -170,7 +175,7 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual(groups["group-1"]["emails"], [])
                 self.assertEqual(groups["group-2"]["emails"], ["new@example.com"])
 
-    def test_route_accepts_four_column_subsite_export(self):
+    def test_old_shapes_are_rejected_instead_of_guessing_an_account(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._seed(root)
@@ -179,14 +184,13 @@ class ReboundAccountImportTests(unittest.TestCase):
                 client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
                 response = client.post("/api/accounts/import-rebound", json={
                     "group_id": "group-2",
-                    "text": "new@example.com----Password!----JBSWY3DPEHPK3PXP----at-new",
+                    "text": "old@example.com----new@example.com----Password!----JBSWY3DPEHPK3PXP\n"
+                            "new@example.com----https://mail.example/code----at-new",
                 })
-                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.status_code, 400)
                 payload = response.get_json()
-                self.assertEqual(payload["updated_count"], 1)
-                self.assertEqual(payload["updated"][0]["old_email"], "old@example.com")
-                self.assertNotIn("access_token", payload["updated"][0])
-                self.assertNotIn("password", payload["updated"][0])
+                self.assertFalse(payload["ok"])
+                self.assertEqual(len(payload["invalid"]), 2)
 
     def test_email_api_result_matches_original_account_by_old_email(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -207,6 +211,21 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual(groups["group-1"]["emails"], [])
                 self.assertEqual(groups["group-2"]["emails"], ["new@example.com"])
 
+    def test_url_cannot_match_when_first_old_email_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._seed(root)
+            root.joinpath("generic-emails.json").write_text(json.dumps([{
+                "id": 3, "email": "old@example.com", "code_url": "https://mail.example/old-code"
+            }]), encoding="utf-8")
+            with self._patch_storage(root):
+                updated, skipped = db.import_rebound_accounts([{
+                    "old_email": "missing@example.com", "email": "new@example.com",
+                    "source_api_url": "https://mail.example/old-code", "access_token": "at-new",
+                }], target_group_id="group-2")
+                self.assertEqual(updated, [])
+                self.assertIn("原邮箱", skipped[0]["reason"])
+
     def test_route_accepts_email_api_subsite_export(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -216,7 +235,7 @@ class ReboundAccountImportTests(unittest.TestCase):
                 client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
                 response = client.post("/api/accounts/import-rebound", json={
                     "group_id": "group-2",
-                    "text": "new@example.com----old@example.com----https://mail.example/old-code----at-new",
+                    "text": "old@example.com----new@example.com----https://mail.example/new-code----at-new",
                 })
 
                 self.assertEqual(response.status_code, 200)
@@ -231,8 +250,9 @@ class ReboundAccountImportTests(unittest.TestCase):
         self.assertIn('id="reboundImportModal"', template)
         self.assertIn("换绑过后的", template)
         self.assertIn("/api/accounts/import-rebound", template)
-        self.assertIn("原邮箱+换绑后邮箱+密码+2FA", template)
-        self.assertIn("换绑后邮箱+取码URL+AT", template)
+        self.assertIn("原邮箱+换绑后邮箱+密码+2FA+AT", template)
+        self.assertIn("原邮箱+换绑后邮箱+换绑后邮箱URL+AT", template)
+        self.assertIn("两种格式都只按第一段原邮箱查询", template)
         self.assertIn("删除账号列表中的原邮箱", template)
 
 
