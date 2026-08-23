@@ -3477,12 +3477,13 @@ function jobsV2OpIcons() {
 }
 function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),1400); }
 async function copyText(text) {
-  if (!text) return;
+  if (!text) return false;
   try {
     if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
     else { const a=document.createElement('textarea'); a.value=text; a.style.position='fixed'; a.style.opacity='0'; document.body.appendChild(a); a.select(); document.execCommand('copy'); a.remove(); }
     showToast('已复制');
-  } catch(e) { showToast('复制失败'); }
+    return true;
+  } catch(e) { showToast('复制失败'); return false; }
 }
 async function api(url, opts) {
   const input = opts || {};
@@ -4651,8 +4652,7 @@ async function copyAtQualificationEligible() {
     .map(row => `${row.email}----${row.access_token}`);
   if (!lines.length) { showToast('本轮没有可复制的成功资格账号'); return; }
   try {
-    await copyText(lines.join('\n'));
-    showToast(`已复制 ${lines.length} 个成功资格账号和 AT`);
+    if (await copyText(lines.join('\n'))) showToast(`已复制 ${lines.length} 个成功资格账号和 AT`);
   } catch (error) {
     showToast('复制成功资格失败: ' + error.message);
   }
