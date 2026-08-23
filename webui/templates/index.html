@@ -2489,7 +2489,7 @@
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCreateAccountGroupV2" title="新建一个本地账号分组">新建</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnManualAddAccountV2" title="直接添加邮箱+取码URL+AT，或邮箱+密码+2FA+AT，并可立即查询套餐">添加账号</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnBatchReplaceAtV2" title="支持原始 AT、Bearer、邮箱+AT、完整 /api/auth/session JSON 或 JSON 数组，自动识别邮箱并替换">批量导入AT</button>
-            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="导入独立换绑分站结果；替换原账号邮箱和AT，并迁移到当前分组">导入换绑邮箱</button>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="导入独立换绑分站结果；删除原邮箱账号身份、保留换绑后邮箱，并迁移到当前分组">导入换绑邮箱</button>
             <button type="button" class="jobs-tb-btn" id="btnRenameAccountGroupV2" disabled title="修改当前分组名称">重命名</button>
             <button type="button" class="jobs-tb-btn" id="btnDeleteAccountGroupV2" disabled title="仅删除当前分组，不删除其中账号">删除</button>
           </div>
@@ -2951,7 +2951,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="reboundImportTitle">导入换绑邮箱</h3>
-        <p>粘贴独立换绑分站导出的结果。密码账号使用“原密码 + 原2FA”识别；API 原邮箱账号使用“原邮箱”识别，只更新新邮箱和新 AT。</p>
+        <p>粘贴独立换绑分站导出的结果。密码格式直接按原邮箱识别；URL 格式会通过邮箱池中的取码 URL 反查原邮箱。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseReboundImport" aria-label="关闭">×</button>
     </div>
@@ -2961,9 +2961,9 @@
         <span>导入目标：<strong id="reboundImportGroupNameV2">当前分组</strong><br><small>匹配成功后，原邮箱会从全部旧分组清除，新邮箱只显示在这个分组。</small></span>
       </div>
       <label class="outlook-import-field">
-        <span>换绑完成结果（新邮箱+密码+2FA+AT，或新邮箱+原邮箱+原取码URL+AT）</span>
-        <textarea id="reboundImportTextV2" placeholder="new@example.com----原OpenAI密码----原MFA Secret----新accessToken"></textarea>
-        <span class="outlook-import-hint">每行四段：新邮箱----密码----2FA----AT。密码与 2FA 不会改动，只用于精确匹配原账号。</span>
+        <span>换绑完成结果（原邮箱+换绑后邮箱+密码+2FA，或换绑后邮箱+取码URL+AT）</span>
+        <textarea id="reboundImportTextV2" placeholder="old@example.com----new@example.com----原OpenAI密码----原MFA Secret&#10;new@example.com----https://取码地址----新accessToken"></textarea>
+        <span class="outlook-import-hint">识别成功后删除账号列表中的原邮箱，只保留换绑后的邮箱；第一种格式不替换现有 AT，第二种格式使用输入的新 AT。</span>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -4295,7 +4295,7 @@ async function submitReboundImport() {
   const text = $('#reboundImportTextV2')?.value || '';
   const resultEl = $('#reboundImportResultV2');
   const button = $('#btnSubmitReboundImport');
-  if (!text.trim()) { showToast('请粘贴换绑分站导出的四段结果'); return; }
+  if (!text.trim()) { showToast('请粘贴换绑分站导出的换绑结果'); return; }
   if (button) button.disabled = true;
   try {
     const result = await api('/api/accounts/import-rebound', {
@@ -4314,7 +4314,7 @@ async function submitReboundImport() {
       showToast(message);
       setTimeout(closeReboundImportModal, 900);
     } else {
-      showToast('没有匹配到可更新的原账号，请检查密码和2FA');
+      showToast('没有匹配到可更新的原账号，请检查原邮箱或取码 URL');
     }
   } catch (error) {
     if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(error.message)}</div>`;

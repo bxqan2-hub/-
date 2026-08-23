@@ -105,6 +105,101 @@ def _parse_manual_account_lines(text: str) -> tuple[list[dict], list[dict]]:
     return records, invalid
 
 
+def _parse_rebound_account_lines(text: str) -> tuple[list[dict], list[dict]]:
+    """解析换绑分站结果，并优先采用分站当前导出的两种格式。
+
+    当前格式：
+      - 原邮箱----换绑后邮箱----密码----2FA
+      - 换绑后邮箱----取码URL----AT
+
+    旧版四段结果仍继续兼容，避免已经保存的历史导出突然不可导入。错误结果
+    只返回行号、邮箱和原因，不回显密码、2FA、URL 或 AT。
+    """
+    records: list[dict] = []
+    invalid: list[dict] = []
+    seen_new_emails: set[str] = set()
+    for number, raw in enumerate(str(text or "").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        delimiter = "----" if "----" in line else "====" if "====" in line else ""
+        parts = [part.strip() for part in line.split(delimiter)] if delimiter else []
+        record: dict | None = None
+
+        # 新版密码账号：原邮箱、新邮箱、密码、2FA；该格式没有新 AT，原账号
+        # 当前保存的 AT 和套餐状态必须原样保留。
+        if len(parts) == 4 and "@" in parts[0] and "@" in parts[1] and not parts[2].lower().startswith(("http://", "https://")):
+            record = {
+                "old_email": parts[0],
+                "email": parts[1],
+                "password": parts[2],
+                "totp_secret": parts[3],
+                "import_format": "old_new_password_2fa",
+            }
+        # 旧版邮箱 API 四段结果：新邮箱、原邮箱、取码 URL、新 AT。
+        elif len(parts) == 4 and "@" in parts[0] and "@" in parts[1] and parts[2].lower().startswith(("http://", "https://")):
+            record = {
+                "email": parts[0],
+                "old_email": parts[1],
+                "source_api_url": parts[2],
+                "access_token": parts[3],
+                "import_format": "legacy_new_old_url_at",
+            }
+        # 新版邮箱 API：新邮箱、取码 URL、新 AT；后端通过邮箱池里的 URL
+        # 反查原邮箱，不要求导出文件重复携带原邮箱。
+        elif len(parts) == 3 and "@" in parts[0] and parts[1].lower().startswith(("http://", "https://")):
+            record = {
+                "email": parts[0],
+                "source_api_url": parts[1],
+                "access_token": parts[2],
+                "import_format": "new_url_at",
+            }
+        # 旧版密码账号：新邮箱、密码、2FA、新 AT。
+        elif len(parts) == 4 and "@" in parts[0]:
+            record = {
+                "email": parts[0],
+                "password": parts[1],
+                "totp_secret": parts[2],
+                "access_token": parts[3],
+                "import_format": "legacy_new_password_2fa_at",
+            }
+
+        if record is None:
+            invalid.append({
+                "line": number,
+                "reason": "需要：原邮箱----换绑后邮箱----密码----2FA，或 换绑后邮箱----取码URL----AT",
+            })
+            continue
+        new_email = str(record.get("email") or "").strip()
+        normalized_new = new_email.lower()
+        if not new_email or "@" not in new_email:
+            invalid.append({"line": number, "reason": "换绑后邮箱格式无效"})
+            continue
+        if normalized_new in seen_new_emails:
+            invalid.append({"line": number, "email": new_email, "reason": "本次输入的换绑后邮箱重复"})
+            continue
+        source_api_url = str(record.get("source_api_url") or "").strip()
+        if source_api_url:
+            parsed_url = urlparse(source_api_url)
+            if parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.netloc:
+                invalid.append({"line": number, "email": new_email, "reason": "取码 URL 无效"})
+                continue
+        if record["import_format"] == "old_new_password_2fa":
+            old_email = str(record.get("old_email") or "").strip()
+            if "@" not in old_email or not record.get("password") or not record.get("totp_secret"):
+                invalid.append({"line": number, "email": new_email, "reason": "原邮箱、密码和 2FA 不能为空"})
+                continue
+            if old_email.lower() == normalized_new:
+                invalid.append({"line": number, "email": new_email, "reason": "原邮箱和换绑后邮箱不能相同"})
+                continue
+        elif not str(record.get("access_token") or "").strip():
+            invalid.append({"line": number, "email": new_email, "reason": "AT 不能为空"})
+            continue
+        seen_new_emails.add(normalized_new)
+        records.append(record)
+    return records, invalid
+
+
 def _strip_pasted_code_fence(value: str) -> str:
     text = str(value or "").strip().lstrip("\ufeff")
     lines = text.splitlines()
@@ -999,35 +1094,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         data = request.get_json(silent=True) or {}
         text = str(data.get("text") or "")
         group_id = str(data.get("group_id") or "default").strip() or "default"
-        records: list[dict] = []
-        invalid: list[dict] = []
-        for number, raw in enumerate(text.splitlines(), start=1):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            delimiter = "----" if "----" in line else "====" if "====" in line else ""
-            parts = [part.strip() for part in line.split(delimiter)] if delimiter else []
-            if len(parts) < 4:
-                invalid.append({"line": number, "reason": "需要四段换绑结果"})
-                continue
-            if "@" in parts[1] and parts[2].lower().startswith(("http://", "https://")):
-                records.append({
-                    "email": parts[0],
-                    "old_email": parts[1],
-                    "source_api_url": parts[2],
-                    "access_token": parts[3],
-                })
-            else:
-                records.append({
-                    "email": parts[0],
-                    "password": parts[1],
-                    "totp_secret": parts[2],
-                    "access_token": parts[3],
-                })
+        records, invalid = _parse_rebound_account_lines(text)
         if not records:
             return jsonify({
                 "ok": False,
-                "error": "未识别到换绑结果；支持新邮箱+密码+2FA+AT，或新邮箱+原邮箱+原取码URL+AT",
+                "error": "未识别到换绑结果；支持 原邮箱+换绑后邮箱+密码+2FA，或 换绑后邮箱+取码URL+AT",
                 "invalid": invalid,
             }), 400
         if len(records) > 5000:
@@ -1045,6 +1116,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped,
             "skipped_count": len(skipped),
             "group_id": group_id,
+            "format_counts": {
+                name: sum(1 for record in records if record.get("import_format") == name)
+                for name in sorted({str(record.get("import_format") or "unknown") for record in records})
+            },
         })
 
     @app.post("/api/accounts/manual-add")

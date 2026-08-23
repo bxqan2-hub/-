@@ -2321,13 +2321,58 @@ def _stored_registration_password(row: dict) -> str:
     return str(extra.get("registration_password") or extra.get("chatgpt_password") or "").strip()
 
 
+def _normalize_rebound_source_url(value: str) -> str:
+    """规范化换绑导出中的取码 URL，同时保留路径和查询参数的大小写。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    normalized = parsed._replace(
+        scheme=parsed.scheme.lower(),
+        netloc=parsed.netloc.lower(),
+        fragment="",
+    ).geturl()
+    return normalized[:-1] if normalized.endswith("/") and parsed.path in {"", "/"} and not parsed.query else normalized
+
+
+def _rebound_source_url_emails(
+    source_api_url: str,
+    accounts: list[dict],
+    generic_rows: list[dict],
+    domain_rows: list[dict],
+) -> set[str]:
+    """由私有取码 URL 反查其原邮箱；只返回精确 URL 命中的邮箱。"""
+    needle = _normalize_rebound_source_url(source_api_url)
+    if not needle:
+        return set()
+    emails: set[str] = set()
+    for pool_row in [*generic_rows, *domain_rows]:
+        if _normalize_rebound_source_url(str(pool_row.get("code_url") or "")) == needle:
+            email = str(pool_row.get("email") or "").strip().lower()
+            if email:
+                emails.add(email)
+    # 历史账号可能尚未迁移到 JSON 邮箱池，但 original_email_line 中仍保存了
+    # “邮箱----取码URL”。只比较完整字段，避免 URL 子串造成误匹配。
+    for account in accounts:
+        original_line = str(account.get("original_email_line") or "").strip()
+        delimiter = "----" if "----" in original_line else "====" if "====" in original_line else ""
+        fields = [field.strip() for field in original_line.split(delimiter)] if delimiter else []
+        if any(_normalize_rebound_source_url(field) == needle for field in fields[1:]):
+            email = str(account.get("email") or "").strip().lower()
+            if email:
+                emails.add(email)
+    return emails
+
+
 def import_rebound_accounts(records: list[dict], target_group_id: str = "default") -> tuple[list[dict], list[dict]]:
     """导入独立换绑分站结果，并把原账号身份迁移到新邮箱。
 
-    密码账号由 ``原密码 + 原2FA`` 匹配；邮箱 API 登录账号由分站导出的
-    ``原邮箱 + 原取码URL`` 格式识别，并按原邮箱精确匹配。匹配成功后只替换
-    邮箱与 access token，保留账号 ID、套餐、历史和其他业务字段。旧邮箱会从
-    全部自定义分组移除，新邮箱只加入用户当前选择的目标分组。
+    当前密码账号格式按 ``原邮箱 + 新邮箱`` 精确匹配；邮箱 API 格式按取码
+    URL 从邮箱池反查原邮箱。旧版密码/邮箱 API 四段结果继续兼容。匹配成功后
+    删除旧账号身份，只保留换绑后邮箱；只有输入携带新 AT 时才替换 AT 并重置
+    AT 查活状态。账号历史、套餐和其他业务字段保持不变。
     """
     target = str(target_group_id or "default").strip() or "default"
     if target == "archived":
@@ -2336,6 +2381,8 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
     with _LOCK:
         accounts = _load_accounts()
         groups = _load_account_groups()
+        generic_rows = _load_generic_api_emails()
+        domain_rows = _load_domain_pool()
         if target != "default" and not any(
             isinstance(group, dict) and str(group.get("id") or "") == target
             for group in groups
@@ -2357,28 +2404,53 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             access_token = str(raw.get("access_token") or raw.get("at") or "").strip()
             normalized_new = new_email.lower()
             credential_mode = bool(password and totp_secret)
-            email_api_mode = bool(
-                old_email_hint and "@" in old_email_hint
-                and source_api_url.lower().startswith(("http://", "https://"))
-            )
-            if not (new_email and "@" in new_email and access_token and (credential_mode or email_api_mode)):
+            direct_old_email_mode = bool(old_email_hint and "@" in old_email_hint)
+            source_url_mode = bool(_normalize_rebound_source_url(source_api_url))
+            valid_current_password = direct_old_email_mode and credential_mode
+            valid_url_result = source_url_mode and bool(access_token)
+            valid_legacy_password = not direct_old_email_mode and credential_mode and bool(access_token)
+            if not (
+                new_email and "@" in new_email
+                and (valid_current_password or valid_url_result or valid_legacy_password)
+            ):
                 skipped.append({
                     "line": index, "email": new_email,
-                    "reason": "需要：新邮箱----密码----2FA----AT，或 新邮箱----原邮箱----原取码URL----AT",
+                    "reason": "需要：原邮箱----换绑后邮箱----密码----2FA，或 换绑后邮箱----取码URL----AT",
                 })
                 continue
             if normalized_new in seen_new_emails:
                 skipped.append({"line": index, "email": new_email, "reason": "本次导入的新邮箱重复"})
                 continue
 
-            if email_api_mode:
+            match_mode = ""
+            if direct_old_email_mode:
                 normalized_hint = old_email_hint.lower()
                 matches = [
                     row for row in accounts
                     if str(row.get("email") or "").strip().lower() == normalized_hint
+                    or (
+                        str(row.get("email") or "").strip().lower() == normalized_new
+                        and str(row.get("email_rebind_from") or "").strip().lower() == normalized_hint
+                    )
                 ]
                 no_match_reason = "未找到原邮箱完全匹配的主站账号"
                 duplicate_reason = "原邮箱匹配到多个账号，已避免误替换"
+                match_mode = "old_email"
+            elif source_url_mode:
+                source_emails = _rebound_source_url_emails(
+                    source_api_url, accounts, generic_rows, domain_rows,
+                )
+                matches = [
+                    row for row in accounts
+                    if str(row.get("email") or "").strip().lower() in source_emails
+                    or (
+                        str(row.get("email") or "").strip().lower() == normalized_new
+                        and str(row.get("email_rebind_from") or "").strip().lower() in source_emails
+                    )
+                ]
+                no_match_reason = "未找到取码 URL 对应的原邮箱主站账号"
+                duplicate_reason = "取码 URL 对应多个原账号，已避免误替换"
+                match_mode = "source_url"
             else:
                 matches = [
                     row for row in accounts
@@ -2388,6 +2460,7 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
                 ]
                 no_match_reason = "未找到密码和 2FA 同时匹配的原账号"
                 duplicate_reason = "密码和 2FA 匹配到多个账号，已避免误替换"
+                match_mode = "password_2fa"
             if not matches:
                 skipped.append({"line": index, "email": new_email, "reason": no_match_reason})
                 continue
@@ -2395,18 +2468,22 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
                 skipped.append({"line": index, "email": new_email, "reason": duplicate_reason})
                 continue
             row = matches[0]
+            matched_email = str(row.get("email") or "").strip()
+            already_rebound = matched_email.lower() == normalized_new
             conflict = next((
                 other for other in accounts
                 if other is not row and str(other.get("email") or "").strip().lower() == normalized_new
             ), None)
-            if conflict is not None:
-                skipped.append({"line": index, "email": new_email, "reason": "新邮箱已属于另一个主站账号"})
-                continue
-
-            old_email = str(row.get("email") or "").strip()
+            # 分站或其他导入可能已经创建了新邮箱记录。此时按用户要求保留新
+            # 邮箱记录、删除原邮箱记录，而不是因“新邮箱冲突”整行跳过。
+            target_row = conflict if conflict is not None else row
+            if already_rebound:
+                old_email = old_email_hint or str(row.get("email_rebind_from") or "").strip() or matched_email
+            else:
+                old_email = matched_email
             normalized_old = old_email.lower()
             now = _now()
-            raw_extra = row.get("extra_json")
+            raw_extra = target_row.get("extra_json")
             if isinstance(raw_extra, dict):
                 extra = dict(raw_extra)
             else:
@@ -2418,13 +2495,13 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             history = extra.get("email_rebind_history")
             if not isinstance(history, list):
                 history = []
-            history.append({"from": old_email, "to": new_email, "imported_at": now})
+            if not history or history[-1].get("from") != old_email or history[-1].get("to") != new_email:
+                history.append({"from": old_email, "to": new_email, "imported_at": now})
             extra["email_rebind_history"] = history[-20:]
             extra["email_rebind_last"] = {"from": old_email, "to": new_email, "imported_at": now}
 
-            row.update({
+            target_row.update({
                 "email": new_email,
-                "access_token": access_token,
                 "original_email_line": new_email,
                 "extra_json": json.dumps(extra, ensure_ascii=False),
                 "email_rebind_status": "success",
@@ -2434,19 +2511,27 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
                 "archived": False,
                 "updated_at": now,
             })
-            # 换绑结果带来的是一枚全新 AT；旧 token 的有效/失效结论不能沿用。
-            row["at_validity_status"] = "unchecked"
-            row["at_validity_valid"] = None
-            row["at_validity_checked_at"] = None
-            row["at_validity_error_code"] = None
-            row["at_validity_error"] = None
-            row["at_validity_http_status"] = None
-            row["at_validity_network_route"] = None
-            row["at_validity_proxy_used"] = None
-            row["at_validity_proxy_source"] = None
-            row["at_validity_proxy_fallback_reason"] = None
-            row["at_validity_attempt_count"] = None
-            row.pop("archived_at", None)
+            token_replaced = bool(access_token and access_token != str(target_row.get("access_token") or "").strip())
+            if access_token:
+                target_row["access_token"] = access_token
+            if token_replaced:
+                # 只有输入实际带来新 AT 时，旧 token 的有效/失效结论才失效。
+                target_row["at_validity_status"] = "unchecked"
+                target_row["at_validity_valid"] = None
+                target_row["at_validity_checked_at"] = None
+                target_row["at_validity_error_code"] = None
+                target_row["at_validity_error"] = None
+                target_row["at_validity_http_status"] = None
+                target_row["at_validity_network_route"] = None
+                target_row["at_validity_proxy_used"] = None
+                target_row["at_validity_proxy_source"] = None
+                target_row["at_validity_proxy_fallback_reason"] = None
+                target_row["at_validity_attempt_count"] = None
+            target_row.pop("archived_at", None)
+            removed_original_account_id = None
+            if conflict is not None:
+                removed_original_account_id = int(row.get("id") or 0)
+                accounts.remove(row)
 
             # 分组成员以邮箱保存。先从所有分组清除原/新邮箱，再仅写入当前目标组，
             # 因而“分组1旧邮箱 → 当前分组2新邮箱”的迁移不会留下幽灵成员。
@@ -2463,11 +2548,14 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
 
             seen_new_emails.add(normalized_new)
             updated.append({
-                "account_id": int(row.get("id") or 0),
+                "account_id": int(target_row.get("id") or 0),
                 "old_email": old_email,
                 "new_email": new_email,
                 "group_id": target,
                 "label": "换绑过后的",
+                "match_mode": match_mode,
+                "removed_original_account_id": removed_original_account_id,
+                "token_replaced": token_replaced,
             })
 
         if updated:
