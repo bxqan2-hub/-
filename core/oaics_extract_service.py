@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from config import proxy as proxy_cfg
-from core import db
+from core import account_operation_control, db
 from core.integrated_runtime import get_pay153_module
 
 
@@ -91,8 +91,10 @@ def _progress_label(stage: str, detail: str) -> str:
     return stage
 
 
-def _run(account_id: int, access_token: str, proxies: list[str]) -> dict:
+def _run(account_id: int, access_token: str, proxies: list[str], generation: int | None = None) -> dict:
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     try:
+        account_operation_control.raise_if_cancelled(operation_generation)
         if not db.mark_account_oaics_extract_running(account_id):
             return {"ok": False, "error": "账号已删除或提链状态已重置"}
         module = get_pay153_module()
@@ -121,12 +123,22 @@ def _run(account_id: int, access_token: str, proxies: list[str]) -> dict:
             checkout_attempts=5,
             provider_attempts=10,
             log=on_log,
-            is_cancelled=lambda: False,
+            is_cancelled=lambda: account_operation_control.is_cancelled(operation_generation),
         )
+        account_operation_control.raise_if_cancelled(operation_generation)
         result = result if isinstance(result, dict) else {}
         result["ok"] = bool(result.get("paypal_link") or result.get("url"))
         if not result["ok"]:
             result["error"] = result.get("error") or "PayPal OAICS 未返回提链地址"
+        db.update_account_oaics_extract(account_id, result)
+        return result
+    except account_operation_control.AccountOperationStopped:
+        result = {
+            "ok": False,
+            "checked_at": _now(),
+            "error": "OAICS 提链已停止",
+            "stopped": True,
+        }
         db.update_account_oaics_extract(account_id, result)
         return result
     except Exception as exc:
@@ -144,6 +156,7 @@ def _run(account_id: int, access_token: str, proxies: list[str]) -> dict:
 def enqueue(*, account_id: int, access_token: str, trigger: str = "manual", executor=None) -> dict:
     if not access_token:
         return {"accepted": False, "busy": False, "error": "账号缺少 access_token"}
+    operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "OAICS 提链队列已满"}
     try:
@@ -158,7 +171,9 @@ def enqueue(*, account_id: int, access_token: str, trigger: str = "manual", exec
         )
         offset = int(account_id) % len(proxies)
         rotated_proxies = proxies[offset:] + proxies[:offset]
-        (executor or get_executor()).submit(_run, int(account_id), str(access_token), rotated_proxies)
+        (executor or get_executor()).submit(
+            _run, int(account_id), str(access_token), rotated_proxies, operation_generation,
+        )
         return {
             "accepted": True,
             "busy": False,

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from core import db
+from core import account_operation_control, db
 from core.account_liveness import check_account_liveness, log_path
 from core.chatgpt_plan import resolve_plan_check_route
 
@@ -38,8 +38,13 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
         f.write(f"{stamp} [INFO] {line}\n")
 
 
-def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: str) -> dict:
+def _run_live_check(
+    *, account_id: int, email: str, proxy: str | None, trigger: str,
+    generation: int | None = None,
+) -> dict:
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     try:
+        account_operation_control.raise_if_cancelled(operation_generation)
         with _LOCK:
             _RUNNING.add(int(account_id))
         if not db.mark_account_live_check_running(account_id):
@@ -54,7 +59,12 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             f"proxy_mode={route.get('proxy_mode')} proxy_used={route.get('proxy_used') or '-'} "
             f"fallback_reason={route.get('proxy_fallback_reason') or '-'}"
         )
-        result = check_account_liveness(email, proxy=selected_proxy, clear_log=False)
+        result = check_account_liveness(
+            email,
+            proxy=selected_proxy,
+            clear_log=False,
+            should_stop=lambda: account_operation_control.is_cancelled(operation_generation),
+        )
         # 早期 providers/csrf 403 通常是该出口被 CF 拦截，不代表账号死亡。
         # auto/proxy 模式下如果用了代理，额外直连兜底一次，便于和套餐查询的 auto 语义保持接近。
         err_text = str(result.get("error") or "")
@@ -66,7 +76,13 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             and str(route.get("network_route") or "") == "proxy"
         ):
             _append_log(email, "[查活] 代理出口收到 403，尝试直连兜底一次")
-            result = check_account_liveness(email, proxy="", clear_log=False)
+            result = check_account_liveness(
+                email,
+                proxy="",
+                clear_log=False,
+                should_stop=lambda: account_operation_control.is_cancelled(operation_generation),
+            )
+        account_operation_control.raise_if_cancelled(operation_generation)
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")
@@ -74,6 +90,19 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             _append_log(email, f"[查活] 完成：账号已废 {result.get('error') or ''}")
         else:
             _append_log(email, f"[查活] 完成：失败 {result.get('error') or ''}")
+        return result
+    except account_operation_control.AccountOperationStopped:
+        result = {
+            "ok": False,
+            "status": "failed",
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "查活已停止",
+            "stopped": True,
+        }
+        try:
+            db.update_account_liveness(account_id, result)
+        except Exception:
+            logger.exception("[查活] 写入停止状态失败: account_id=%s", account_id)
         return result
     except Exception as exc:
         result = {
@@ -103,6 +132,7 @@ def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "m
     email = str(email or "").strip()
     if not email:
         return {"accepted": False, "busy": False, "error": "email 为空"}
+    operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "queue_full": True, "error": "查活队列已满，请稍后重试"}
     if not db.claim_account_live_check(acc_id=account_id, trigger=trigger):
@@ -117,6 +147,7 @@ def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "m
             email=email,
             proxy=proxy,
             trigger=str(trigger or "manual"),
+            generation=operation_generation,
         )
     except Exception as exc:
         _QUEUE_SLOTS.release()

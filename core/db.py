@@ -1652,6 +1652,61 @@ def recover_interrupted_gcash_checks() -> int:
         return recovered
 
 
+def stop_account_page_operations(reason: str = "账号页操作已停止") -> dict:
+    """把账号页后台队列中尚未完成的项目标记为停止。
+
+    具体 worker 通过 ``core.account_operation_control`` 协作退出；这里先把
+    queued/running 状态置为终态，避免排队任务在停止按钮返回后又被领取。
+    """
+    clean_reason = str(reason or "账号页操作已停止")[:240]
+    specs = (
+        ("plan_check_status", "plan_check_error", "plan_check_completed_at", "failed"),
+        ("checkout_kind_status", "checkout_kind_error", "checkout_kind_completed_at", "failed"),
+        ("gcash_status", "gcash_error", "gcash_completed_at", "failed"),
+        ("oaics_extract_status", "oaics_extract_error", "oaics_extract_completed_at", "failed"),
+        ("live_check_status", "live_check_error", "live_checked_at", "failed"),
+        ("codex_agent_status", "codex_agent_error", "codex_agent_completed_at", "failed"),
+        ("security_setup_status", "security_setup_error", "security_setup_completed_at", "stopped"),
+    )
+    counts = {status_key: 0 for status_key, *_ in specs}
+    with _LOCK:
+        rows = _load_accounts()
+        now = _now()
+        changed = False
+        for row in rows:
+            for status_key, error_key, completed_key, terminal_status in specs:
+                if row.get(status_key) not in {"queued", "running"}:
+                    continue
+                row[status_key] = terminal_status
+                if status_key == "plan_check_status":
+                    row["plan_check_ok"] = False
+                elif status_key == "checkout_kind_status":
+                    row["checkout_kind_ok"] = False
+                elif status_key == "gcash_status":
+                    row["gcash_ok"] = False
+                    row["gcash_eligible"] = False
+                elif status_key == "oaics_extract_status":
+                    row["oaics_extract_ok"] = False
+                    row["oaics_extract_stage"] = "账号页操作已停止"
+                elif status_key == "live_check_status":
+                    row["live_check_ok"] = False
+                elif status_key == "codex_agent_status":
+                    row["codex_agent_ok"] = False
+                elif status_key == "security_setup_status":
+                    row["security_setup_ok"] = False
+                    row["security_setup_stage"] = "stopped"
+                    row["security_setup_message"] = clean_reason
+                row[error_key] = clean_reason
+                row[completed_key] = now
+                row["updated_at"] = now
+                counts[status_key] += 1
+                changed = True
+        if changed:
+            _save_accounts(rows)
+    counts["total"] = sum(counts.values())
+    return counts
+
+
 def claim_account_oaics_extract(acc_id: int, trigger: str = "manual") -> bool:
     with _LOCK:
         accounts = _load_accounts()
@@ -2753,7 +2808,7 @@ def update_account_security_setup(
             row["extra_json"] = json.dumps(extra, ensure_ascii=False)
 
         status = str(result.get("status") or ("success" if result.get("ok") else "failed")).strip().lower()
-        if status not in {"queued", "running", "success", "partial", "failed"}:
+        if status not in {"queued", "running", "success", "partial", "failed", "stopped"}:
             status = "failed"
         row["security_setup_status"] = status
         row["security_setup_ok"] = bool(result.get("ok"))

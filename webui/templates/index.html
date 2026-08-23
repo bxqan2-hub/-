@@ -2541,10 +2541,10 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnUploadSelectedAgentSub2V2" disabled title="把选中账号已生成的 Codex Agent Token 上传到 sub2api">上传sub2</button>
         </div>
         <div class="acc-v2-btn-group">
-          <span class="acc-v2-btn-group-title">接码 / Codex</span>
+          <span class="acc-v2-btn-group-title">停止 / 接码 / Codex</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRetrySelectedCodexV2" disabled title="所选账号重新登录收邮箱 OTP，HeroSMS 自动选择 0.15 上限内的国家和号码，绑定手机后完成 Codex OAuth">一键接码所选账号</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedCpaV2" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载CPA</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" disabled title="停止选中账号中正在补跑的 Codex 授权">停止</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" title="全局停止账号页面的所有后台操作：补密码/2FA、查活、查套餐、GC、Checkout、OAICS、AT 和 Codex">全局停止</button>
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">批量</span>
@@ -3150,6 +3150,8 @@ let JOB_STATUS_COUNTS = {};
 let jobsRenderSignature = '';
 const JOB_SELECTED = new Set();
 let activeLogJob = null, logTimer = null, jobsTimer = null;
+let ACCOUNT_OPERATION_CONTROLLER = new AbortController();
+let ACCOUNT_OPERATION_STOPPING = false;
 
 // ---------- 分页状态 ----------
 function savedPagerSize(id, fallback = 20) {
@@ -3393,10 +3395,19 @@ async function copyText(text) {
 }
 async function api(url, opts) {
   const input = opts || {};
+  const path = String(url || '');
+  const accountOperationRequest = input.accountOperation === true
+    || (input.accountOperation !== false && [
+      '/api/accounts', '/api/account-groups', '/api/codex', '/api/emails', '/api/mail-status',
+    ].some(prefix => path.startsWith(prefix)));
+  const {accountOperation: _accountOperation, ...fetchInput} = input;
   const requestOptions = {
-    ...input,
-    headers: {Accept:'application/json', ...(input.headers || {})},
+    ...fetchInput,
+    headers: {Accept:'application/json', ...(fetchInput.headers || {})},
   };
+  if (accountOperationRequest && !requestOptions.signal) {
+    requestOptions.signal = ACCOUNT_OPERATION_CONTROLLER.signal;
+  }
   const r = await fetch(url, requestOptions);
   const raw = await r.text();
   let payload = {};
@@ -4167,6 +4178,8 @@ function watchPlanChecks(ids, baselines) {
         if (PLAN_STATUS_WATCHES.size > 0) await new Promise(resolve => setTimeout(resolve, 350));
       }
       await loadAccounts();
+    } catch (err) {
+      if (!ACCOUNT_OPERATION_STOPPING) showToast('套餐状态轮询失败: ' + err.message);
     } finally {
       planStatusBurstRunning = false;
       if (PLAN_STATUS_WATCHES.size > 0) watchPlanChecks([], new Map());
@@ -5222,7 +5235,7 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnCheckSelectedPlansV2', 'btnCheckSelectedCheckoutKindV2', 'btnCheckSelectedGcashV2', 'btnCheckSelectedAccountMailV2',
    'btnExtractSelectedOaicsV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
-    'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
+    'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2',
     'btnCopySelectedCredentialsV2', 'btnCopySelectedAccountMailboxV2', 'btnCopySelectedTokensV2', 'btnDownloadSelectedTxtV2',
     'btnArchiveSelectedAccountsV2', 'btnPurgeSelectedAccountsV2',
   ];
@@ -5406,6 +5419,8 @@ function drawAccountTotpCode(id) {
     target.textContent = state ? `${state.code}（${state.remaining}s）` : '';
     target.title = state ? `TOTP 动态码，剩余 ${state.remaining} 秒后自动更换` : '';
   });
+  const stopAllBtn = document.getElementById('btnStopSelectedCodexV2');
+  if (stopAllBtn) stopAllBtn.disabled = false;
   document.querySelectorAll(`[data-account-totp-code="${accountId}"]`).forEach(button => {
     button.textContent = pending ? '获取中…' : state ? '停止' : '验证码';
     button.disabled = pending;
@@ -5466,7 +5481,7 @@ async function pollAccountSecuritySetup(id) {
     }
     showToast('安全设置仍在运行，可稍后刷新账号页查看结果');
   } catch (err) {
-    showToast('读取安全设置状态失败: ' + err.message);
+    if (!ACCOUNT_OPERATION_STOPPING) showToast('读取安全设置状态失败: ' + err.message);
   } finally {
     ACTIVE_SECURITY_SETUP_POLLS.delete(accountId);
   }
@@ -6630,28 +6645,45 @@ async function deleteSelectedAccounts() {
   }
 }
 
+function stopAccountPagePolling() {
+  PLAN_STATUS_WATCHES.clear();
+  planStatusBurstRunning = false;
+  ACTIVE_SECURITY_SETUP_POLLS.clear();
+  PENDING_TOTP_CODES.clear();
+  ACTIVE_TOTP_CODES.forEach(state => { if (state?.timer) clearInterval(state.timer); });
+  ACTIVE_TOTP_CODES.clear();
+}
+
 async function stopSelectedCodex() {
-  const ids = Array.from(ACCOUNT_SELECTED);
-  if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
-  const retrying = selectedAccounts.filter(a => (a.codex_status || '') === 'retrying');
-  if (retrying.length === 0) { showToast('选中账号里没有正在补跑的 Codex'); return; }
-  if (!confirm(`确定停止选中的 ${retrying.length} 个 Codex 补跑吗？\n\n会发送停止信号，并将状态标记为“已停止”。`)) return;
+  if (ACCOUNT_OPERATION_STOPPING) return;
+  if (!confirm('确定停止账号页面的全部后台操作吗？\n\n将停止补密码/2FA、查活、查套餐、GC/GCash、Checkout、OAICS、AT、Codex，并中止页面轮询；GC/Roxy 窗口保留，不执行删除。')) return;
   const btn = $('#btnStopSelectedCodexV2');
-  if (!btn) return;
-  btn.disabled = true;
+  ACCOUNT_OPERATION_STOPPING = true;
+  if (btn) { btn.disabled = true; btn.textContent = '停止中…'; }
   try {
-    const r = await api('/api/codex/stop-bulk', {
+    const r = await api('/api/accounts/stop-all', {
+      accountOperation: false,
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: retrying.map(a => a.id)}),
+      body: '{}',
     });
-    const skippedCount = (r.skipped || []).length;
-    showToast(skippedCount ? `已停止 ${r.stopped_count || 0} 个，跳过 ${skippedCount} 个` : `已停止 ${r.stopped_count || 0} 个`);
-    loadAccounts();
-    if (retryLogEmail) pollRetryLog();
+    ACCOUNT_OPERATION_CONTROLLER.abort();
+    ACCOUNT_OPERATION_CONTROLLER = new AbortController();
+    stopAccountPagePolling();
+    const statusCount = Number(r.account_statuses?.total || 0);
+    const gcCount = Number(r.gc?.stopped_count || 0);
+    const codexCount = Number(r.codex?.stopped_count || 0);
+    showToast(`全局停止已发送：账号操作 ${statusCount} 个，GC ${gcCount} 个，Codex ${codexCount} 个`);
+    await loadAccounts();
+    loadSummary();
   } catch(err) {
-    showToast('停止选中补跑失败: ' + err.message);
+    ACCOUNT_OPERATION_CONTROLLER.abort();
+    ACCOUNT_OPERATION_CONTROLLER = new AbortController();
+    stopAccountPagePolling();
+    showToast('全局停止失败: ' + err.message);
+  } finally {
+    ACCOUNT_OPERATION_STOPPING = false;
+    if (btn) { btn.disabled = false; btn.textContent = '全局停止'; }
     updateAccountSelectionUi();
   }
 }

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from config import proxy as proxy_cfg
-from core import db
+from core import account_operation_control, db
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ def _retryable_agent_error(exc: Exception) -> bool:
     )
 
 
-def _wait_for_rate_slot() -> None:
+def _wait_for_rate_slot(generation: int | None = None) -> None:
     """参考套餐查询：错开 Agent 注册请求启动时间。"""
     global _NEXT_REQUEST_AT
     min_interval = _float_setting("PLAN_CHECK_MIN_INTERVAL", 0.4, 0.0, 30.0)
@@ -101,20 +101,28 @@ def _wait_for_rate_slot() -> None:
         _NEXT_REQUEST_AT = scheduled + min_interval
     wait_seconds = scheduled - now
     if wait_seconds > 0:
-        time.sleep(wait_seconds)
+        if generation is None:
+            time.sleep(wait_seconds)
+        elif not account_operation_control.wait(wait_seconds, generation):
+            account_operation_control.raise_if_cancelled(generation)
 
 
 def _safe_email_filename(email: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("@", ".", "-", "_") else "_" for ch in (email or "account"))
 
 
-def _run_generate(*, account_id: int, email: str, access_token: str, trigger: str, verify_task: bool) -> dict:
+def _run_generate(
+    *, account_id: int, email: str, access_token: str, trigger: str, verify_task: bool,
+    generation: int | None = None,
+) -> dict:
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     env = None
     route_meta: dict = {}
     timeout_seconds = 0.0
     attempts = 0
     attempt_count = 0
     try:
+        account_operation_control.raise_if_cancelled(operation_generation)
         if not db.mark_account_codex_agent_running(account_id):
             return {"ok": False, "error": "账号已删除或 Codex Agent 状态已被重置"}
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -132,7 +140,9 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         auth_json = None
         for attempt in range(1, attempts + 1):
             attempt_count = attempt
-            _wait_for_rate_slot()
+            account_operation_control.raise_if_cancelled(operation_generation)
+            _wait_for_rate_slot(operation_generation if generation is not None else None)
+            account_operation_control.raise_if_cancelled(operation_generation)
             try:
                 env = BrowserSession(proxy=route["proxy"], detect_exit_geo=False)
                 logger.info(
@@ -153,6 +163,7 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
                     env=env,
                     timeout=timeout_seconds,
                 )
+                account_operation_control.raise_if_cancelled(operation_generation)
                 break
             except Exception as exc:
                 last_exc = exc
@@ -173,7 +184,10 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
                     str(exc)[:180],
                 )
                 if wait_seconds > 0:
-                    time.sleep(wait_seconds)
+                    if generation is None:
+                        time.sleep(wait_seconds)
+                    elif not account_operation_control.wait(wait_seconds, operation_generation):
+                        account_operation_control.raise_if_cancelled(operation_generation)
         if not isinstance(auth_json, dict):
             raise RuntimeError(f"Codex Agent 生成未返回 auth_json: {last_exc}")
         identity = auth_json.get("agent_identity") if isinstance(auth_json, dict) else {}
@@ -240,6 +254,7 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
                 }
         except Exception as sub_exc:
             logger.warning("[CodexAgent] 同步 sub2api 失败（不影响 Agent Token）: %s: %s", type(sub_exc).__name__, str(sub_exc)[:180])
+        account_operation_control.raise_if_cancelled(operation_generation)
         result = {
             "ok": True,
             "status": "success",
@@ -264,6 +279,19 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         }
         db.update_account_codex_agent(account_id, result)
         logger.info("[CodexAgent] 生成成功: %s runtime=%s", email, result.get("agent_runtime_id") or "-")
+        return result
+    except account_operation_control.AccountOperationStopped:
+        result = {
+            "ok": False,
+            "status": "failed",
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "Codex Agent 生成已停止",
+            "stopped": True,
+        }
+        try:
+            db.update_account_codex_agent(account_id, result)
+        except Exception:
+            logger.exception("[CodexAgent] 写入停止状态失败: account_id=%s", account_id)
         return result
     except Exception as exc:
         result = {
@@ -299,6 +327,7 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
 def enqueue_account_codex_agent(*, account_id: int, email: str, access_token: str, trigger: str = "manual", verify_task: bool = True) -> dict:
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "Codex Agent 队列已满"}
+    operation_generation = account_operation_control.snapshot()
     try:
         if not db.claim_account_codex_agent(account_id, trigger=trigger):
             _QUEUE_SLOTS.release()
@@ -310,6 +339,7 @@ def enqueue_account_codex_agent(*, account_id: int, email: str, access_token: st
             access_token=access_token,
             trigger=trigger,
             verify_task=verify_task,
+            generation=operation_generation,
         )
         return {"accepted": True, "busy": False, "future": fut}
     except Exception:

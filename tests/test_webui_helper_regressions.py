@@ -278,6 +278,15 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("atStatus === 'invalid_confirmed'", html)
         self.assertIn("atStatus === 'check_error'", html)
 
+    def test_accounts_ui_global_stop_cancels_all_account_operations(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="btnStopSelectedCodexV2"', html)
+        self.assertIn('全局停止账号页面的所有后台操作', html)
+        self.assertIn("'/api/accounts/stop-all'", html)
+        self.assertIn("function stopAccountPagePolling()", html)
+        self.assertIn("ACCOUNT_OPERATION_CONTROLLER.abort()", html)
+
     def test_accounts_ui_appends_custom_page_size_and_shows_registration_minute(self):
         html = self.client.get("/").get_data(as_text=True)
 

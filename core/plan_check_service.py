@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from config import proxy as proxy_cfg
-from core import db, detection_proxy
+from core import account_operation_control, db, detection_proxy
 from core.chatgpt_plan import check_account_plan
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ def get_executor_workers() -> int:
         return _EXECUTOR_WORKERS
 
 
-def _wait_for_rate_slot() -> None:
+def _wait_for_rate_slot(generation: int | None = None) -> None:
     """为所有查询线程分配错开的请求启动时间。"""
     global _NEXT_REQUEST_AT
     min_interval = _float_setting("PLAN_CHECK_MIN_INTERVAL", 0.4, 0.0, 30.0)
@@ -101,7 +101,10 @@ def _wait_for_rate_slot() -> None:
         _NEXT_REQUEST_AT = scheduled + min_interval
     wait_seconds = scheduled - now
     if wait_seconds > 0:
-        time.sleep(wait_seconds)
+        if generation is None:
+            time.sleep(wait_seconds)
+        elif not account_operation_control.wait(wait_seconds, generation):
+            account_operation_control.raise_if_cancelled(generation)
 
 
 def _resolve_plan_check_proxy(spec: str | None, account_id: int) -> str | None:
@@ -120,14 +123,18 @@ def _run_plan_check(
     trigger: str,
     proxy: str | None,
     timezone_offset_min: str,
+    generation: int | None = None,
 ) -> dict:
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     try:
+        account_operation_control.raise_if_cancelled(operation_generation)
         selected_proxy = proxy if proxy is not None else detection_proxy.configured_detection_proxy_spec("plan")
         proxy_country = {"value": detection_proxy.infer_detection_proxy_country(selected_proxy)}
         if not db.mark_account_plan_check_running(account_id, proxy_country=proxy_country["value"]):
             return {"ok": False, "error": "账号已删除或套餐查询状态已被重置"}
 
-        _wait_for_rate_slot()
+        _wait_for_rate_slot(operation_generation if generation is not None else None)
+        account_operation_control.raise_if_cancelled(operation_generation)
         resolved_proxy = _resolve_plan_check_proxy(selected_proxy, account_id)
         resolved_timezone = detection_proxy.infer_timezone_offset_min(selected_proxy, timezone_offset_min)
 
@@ -148,9 +155,10 @@ def _run_plan_check(
             fast_mode=True,
             continue_check=lambda: bool(
                 (db.get_account(account_id) or {}).get("plan_check_status") == "running"
-            ),
+            ) and not account_operation_control.is_cancelled(operation_generation),
             retry_proxy_provider=_retry_proxy,
         )
+        account_operation_control.raise_if_cancelled(operation_generation)
         result["plan_check_proxy_country"] = proxy_country["value"] or None
         if result.get("ok") and not result.get("plan_detection_source"):
             result["plan_detection_source"] = "account_access_token"
@@ -188,6 +196,18 @@ def _run_plan_check(
                 result.get("error") or "未知错误",
             )
         return result
+    except account_operation_control.AccountOperationStopped:
+        result = {
+            "ok": False,
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "套餐查询已停止",
+            "stopped": True,
+        }
+        try:
+            db.update_account_plan_check(acc_id=account_id, result=result)
+        except Exception:
+            logger.exception("[Plan] 写入停止状态失败: account_id=%s", account_id)
+        return result
     except Exception as exc:
         result = {
             "ok": False,
@@ -220,6 +240,7 @@ def enqueue_account_plan_check(
     access_token = str(access_token or "").strip()
     if not access_token:
         return {"accepted": False, "busy": False, "error": "账号缺少 access_token"}
+    operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "queue_full": True, "error": "套餐查询队列已满，请稍后重试"}
 
@@ -236,6 +257,7 @@ def enqueue_account_plan_check(
             trigger=str(trigger or "manual"),
             proxy=proxy,
             timezone_offset_min=str(timezone_offset_min or "-"),
+            generation=operation_generation,
         )
     except Exception as exc:
         _QUEUE_SLOTS.release()

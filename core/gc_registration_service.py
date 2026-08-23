@@ -404,6 +404,18 @@ def stop_plan_poll(job_id: int, *, update_job: bool = True) -> dict:
     return {"ok": True, "job_id": int(job_id), "stopped": bool(event)}
 
 
+def stop_all_plan_polls() -> dict:
+    """停止所有 GC Plus 轮询，窗口保持原状。"""
+    with _POLL_LOCK:
+        job_ids = list(_POLL_EVENTS.keys())
+    stopped = []
+    for job_id in job_ids:
+        result = stop_plan_poll(int(job_id))
+        if result.get("ok"):
+            stopped.append(int(job_id))
+    return {"stopped": stopped, "stopped_count": len(stopped)}
+
+
 def is_polling(job_id: int) -> bool:
     with _POLL_LOCK:
         event = _POLL_EVENTS.get(int(job_id))

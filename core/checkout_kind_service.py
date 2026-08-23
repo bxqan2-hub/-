@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from core import db, detection_proxy
+from core import account_operation_control, db, detection_proxy
 from core.chatgpt_plan import resolve_plan_check_route
 from core.integrated_runtime import get_pay153_module
 
@@ -84,11 +84,25 @@ def check_checkout_kind(access_token: str, *, proxy: str | None = None) -> dict:
     return result
 
 
-def _run(*, account_id: int, access_token: str, proxy: str | None) -> dict:
+def _run(*, account_id: int, access_token: str, proxy: str | None, generation: int | None = None) -> dict:
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     try:
+        account_operation_control.raise_if_cancelled(operation_generation)
         if not db.mark_account_checkout_kind_running(account_id):
             return {"ok": False, "error": "账号已删除或检测状态已重置"}
         result = check_checkout_kind(access_token, proxy=proxy)
+        account_operation_control.raise_if_cancelled(operation_generation)
+        db.update_account_checkout_kind(account_id, result)
+        return result
+    except account_operation_control.AccountOperationStopped:
+        result = {
+            "ok": False,
+            "kind": "unknown",
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "confirm_sent": False,
+            "error": "Checkout 类型检测已停止",
+            "stopped": True,
+        }
         db.update_account_checkout_kind(account_id, result)
         return result
     except Exception as exc:
@@ -117,6 +131,7 @@ def enqueue(
     access_token = str(access_token or "").strip()
     if not access_token:
         return {"accepted": False, "busy": False, "error": "账号缺少 access_token"}
+    operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "Checkout 类型检测队列已满"}
     if not db.claim_account_checkout_kind(account_id, trigger=trigger):
@@ -125,6 +140,7 @@ def enqueue(
     try:
         (executor or get_executor()).submit(
             _run, account_id=account_id, access_token=access_token, proxy=proxy,
+            generation=operation_generation,
         )
     except Exception as exc:
         _QUEUE_SLOTS.release()

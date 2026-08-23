@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import db
+from core import account_operation_control, db
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,8 @@ _QUEUE_LIMIT = 50
 _EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="account-security")
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 _LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
+_ACTIVE_LOCK = threading.RLock()
+_ACTIVE_CONTEXTS: dict[int, dict] = {}
 
 
 def _now() -> str:
@@ -43,6 +45,32 @@ def _append_log(email: str, message: str, *, clear: bool = False) -> None:
     stamp = datetime.now().strftime("%H:%M:%S")
     with path.open(mode, encoding="utf-8") as handle:
         handle.write(f"{stamp} [INFO] {str(message or '')[:1000]}\n")
+
+
+def _set_active_context(account_id: int, *, client=None, opened=None, driver=None) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE_CONTEXTS[int(account_id)] = {"client": client, "opened": opened, "driver": driver}
+
+
+def _clear_active_context(account_id: int) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE_CONTEXTS.pop(int(account_id), None)
+
+
+def stop_all() -> dict:
+    """关闭当前安全设置浏览器；worker 会在停止代次检查点完成收尾。"""
+    with _ACTIVE_LOCK:
+        active = list(_ACTIVE_CONTEXTS.items())
+    closed = 0
+    for _account_id, context in active:
+        driver = context.get("driver")
+        if driver is not None:
+            try:
+                driver.quit()
+                closed += 1
+            except Exception:
+                logger.exception("[安全扩展] 全局停止关闭浏览器失败")
+    return {"active_count": len(active), "closed_count": closed}
 
 
 def _proxy_label(value: str) -> str:
@@ -69,6 +97,7 @@ def _stored_password(account: dict) -> str:
 
 
 def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) -> dict:
+    operation_generation = account_operation_control.snapshot()
     client = None
     opened = None
     driver = None
@@ -80,6 +109,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
     confirmed_secret = ""
     access_token = ""
     try:
+        account_operation_control.raise_if_cancelled(operation_generation)
         account = db.get_account(int(account_id))
         if not account:
             return {"ok": False, "status": "failed", "error": "账号不存在"}
@@ -124,11 +154,14 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         browser_attempts = max(1, min(3, int(getattr(roxy_cfg, "ROXY_CREATE_API_ATTEMPTS", 2) or 2) + 1))
         for browser_attempt in range(1, browser_attempts + 1):
             try:
+                account_operation_control.raise_if_cancelled(operation_generation)
                 # 先做真实出口预检，再创建 Roxy 环境；这样浏览器不会直接吃到刚失效的粘性代理。
                 opened = client.open_profile(headless=False, require_proxy_exit_ip=True)
                 if not db.mark_account_security_setup_running(account_id, profile_id=opened.profile_id):
                     raise RuntimeError("账号已删除或安全设置状态已重置")
                 driver = _build_driver(opened)
+                _set_active_context(account_id, client=client, opened=opened, driver=driver)
+                account_operation_control.raise_if_cancelled(operation_generation)
                 _center_browser_window(driver)
                 driver.set_page_load_timeout(int(roxy_cfg.ROXY_SELENIUM_TIMEOUT))
                 try:
@@ -142,6 +175,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                     f"profile={opened.profile_id} proxy={_proxy_label(client.profile_proxy)}，开始邮箱 OTP 登录",
                 )
                 _fill_email_and_otp(driver, email, wait_for_otp, "https://chatgpt.com/auth/login")
+                account_operation_control.raise_if_cancelled(operation_generation)
                 _append_log(email, "[安全扩展] 邮箱 OTP 登录步骤结束，开始读取 ChatGPT session")
                 session_info = _fetch_chatgpt_session(
                     driver,
@@ -151,6 +185,8 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                 )
                 break
             except Exception as exc:
+                if account_operation_control.is_cancelled(operation_generation):
+                    raise account_operation_control.AccountOperationStopped("账号页操作已停止") from exc
                 _append_log(
                     email,
                     f"[安全扩展] Roxy 尝试 {browser_attempt}/{browser_attempts} 失败："
@@ -180,6 +216,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         if authenticated_email.casefold() != email.casefold():
             raise RuntimeError("浏览器登录账号与目标账号不一致，已停止安全设置")
         access_token = str(session_info.get("accessToken") or access_token).strip()
+        account_operation_control.raise_if_cancelled(operation_generation)
         if not access_token:
             raise RuntimeError("浏览器登录成功但没有取得 Access Token")
         _append_log(email, "[安全扩展] 浏览器登录账号已严格匹配")
@@ -202,6 +239,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         import_browser_cookies(session, driver, require_auth=True)
 
         if not password_done:
+            account_operation_control.raise_if_cancelled(operation_generation)
             desired_password = registration_password()
             password_result = _setup_password_with_driver(
                 driver=driver,
@@ -215,6 +253,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             if not bool(password_result.get("ok")):
                 raise RuntimeError(str(password_result.get("message") or "补设密码未确认成功"))
             confirmed_password = desired_password
+            account_operation_control.raise_if_cancelled(operation_generation)
             password_done = True
             db.save_security_checkpoint(
                 email,
@@ -234,6 +273,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             _append_log(email, f"[安全扩展] 密码已完成 mode={password_mode}")
 
         if not totp_done:
+            account_operation_control.raise_if_cancelled(operation_generation)
             confirmed_secret, refreshed_token, _expires = _setup_totp_with_driver(
                 driver,
                 email,
@@ -242,6 +282,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             )
             access_token = str(refreshed_token or access_token).strip()
             totp_done = True
+            account_operation_control.raise_if_cancelled(operation_generation)
             db.save_security_checkpoint(
                 email,
                 registration_password=confirmed_password,
@@ -262,6 +303,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             _append_log(email, "[安全扩展] TOTP enroll/activate 已完成")
 
         validation_note = ""
+        account_operation_control.raise_if_cancelled(operation_generation)
         try:
             _validate_2fa_token(session, access_token)
         except Exception as exc:
@@ -286,7 +328,60 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         )
         _append_log(email, "[安全扩展] 完成：密码和 2FA 凭据已保存")
         return result
+    except account_operation_control.AccountOperationStopped as exc:
+        result = {
+            "ok": False,
+            "status": "stopped",
+            "stage": "stopped",
+            "message": "密码/2FA 设置已停止",
+            "error": str(exc) or "账号页操作已停止",
+            "profile_id": getattr(opened, "profile_id", None),
+            "password_done": password_done,
+            "totp_done": totp_done,
+            "checked_at": _now(),
+        }
+        try:
+            db.update_account_security_setup(
+                account_id,
+                result,
+                registration_password=confirmed_password or None,
+                totp_secret=confirmed_secret or None,
+                access_token=access_token or None,
+            )
+        except Exception:
+            logger.exception("[安全扩展] 写入停止状态异常 account_id=%s", account_id)
+        if email:
+            _append_log(email, "[安全扩展] 已停止")
+        return result
     except Exception as exc:
+        # A stop can race with the browser-start checkpoint.  Preserve the
+        # terminal stopped state instead of overwriting it with a generic
+        # failure when the DB row was already cancelled by the global button.
+        if account_operation_control.is_cancelled(operation_generation):
+            result = {
+                "ok": False,
+                "status": "stopped",
+                "stage": "stopped",
+                "message": "密码/2FA 设置已停止",
+                "error": "账号页操作已停止",
+                "profile_id": getattr(opened, "profile_id", None),
+                "password_done": password_done,
+                "totp_done": totp_done,
+                "checked_at": _now(),
+            }
+            try:
+                db.update_account_security_setup(
+                    account_id,
+                    result,
+                    registration_password=confirmed_password or None,
+                    totp_secret=confirmed_secret or None,
+                    access_token=access_token or None,
+                )
+            except Exception:
+                logger.exception("[安全扩展] 写入竞态停止状态异常 account_id=%s", account_id)
+            if email:
+                _append_log(email, "[安全扩展] 已停止")
+            return result
         result = {
             "ok": False,
             "status": "partial" if password_done or totp_done else "failed",
@@ -313,6 +408,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         logger.exception("[安全扩展] 任务失败 account_id=%s", account_id)
         return result
     finally:
+        _clear_active_context(account_id)
         if session is not None:
             try:
                 session.close()
@@ -383,4 +479,4 @@ def queue_settings() -> dict:
     return {"workers": _WORKERS, "queue_limit": _QUEUE_LIMIT}
 
 
-__all__ = ["enqueue_account_security_setup", "log_path", "queue_settings"]
+__all__ = ["enqueue_account_security_setup", "log_path", "queue_settings", "stop_all"]

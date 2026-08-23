@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
-from core import db
+from core import account_operation_control, db
 from core.integrated_runtime import get_pay153_module
 
 
@@ -149,11 +149,25 @@ def check_gcash(access_token: str, *, proxy: str | None = None) -> dict:
     return result
 
 
-def _run(*, account_id: int, access_token: str, proxy: str | None) -> dict:
+def _run(*, account_id: int, access_token: str, proxy: str | None, generation: int | None = None) -> dict:
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     try:
+        account_operation_control.raise_if_cancelled(operation_generation)
         if not db.mark_account_gcash_running(account_id):
             return {"ok": False, "gcash": False, "error": "账号已删除或检测状态已重置"}
         result = check_gcash(access_token, proxy=proxy)
+        account_operation_control.raise_if_cancelled(operation_generation)
+        db.update_account_gcash(account_id, result)
+        return result
+    except account_operation_control.AccountOperationStopped:
+        result = {
+            "ok": False,
+            "gcash": False,
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "confirm_sent": False,
+            "error": "GCash 检测已停止",
+            "stopped": True,
+        }
         db.update_account_gcash(account_id, result)
         return result
     except Exception as exc:
@@ -170,13 +184,14 @@ def _run(*, account_id: int, access_token: str, proxy: str | None) -> dict:
         _QUEUE_SLOTS.release()
 
 
-def _run_with_proxy_retry(
+def _run_with_proxy_retry_impl(
     *,
     account_id: int,
     access_token: str,
     proxies: list[str],
     max_retries: int | None = None,
     total_timeout: float | None = PROBE_TOTAL_TIMEOUT,
+    generation: int | None = None,
 ) -> dict:
     """Try candidate proxies until GCash detection reaches a definitive answer.
 
@@ -190,6 +205,7 @@ def _run_with_proxy_retry(
     long-lived proxy pool of short-lived sessions (e.g. ``-t-15``) cannot pin
     worker threads forever.
     """
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     attempts: list[str] = []
     pool = [p for p in (proxies or []) if p]
     # None → 遍历整个池（每条代理至多一次）；指定数字 → 试探 min(n, 池长) 条。
@@ -206,12 +222,14 @@ def _run_with_proxy_retry(
     last_result: dict = {"ok": False, "gcash": False}
     timed_out = False
     for idx in range(total):
+        account_operation_control.raise_if_cancelled(operation_generation)
         if deadline is not None and time.monotonic() >= deadline:
             timed_out = True
             break
         proxy = pool[idx] if pool else None
         try:
             result = check_gcash(access_token, proxy=proxy)
+            account_operation_control.raise_if_cancelled(operation_generation)
         except Exception as exc:
             result = {
                 "ok": False,
@@ -236,7 +254,14 @@ def _run_with_proxy_retry(
                     timed_out = True
                     break
                 delay = min(delay, remaining)
-            time.sleep(delay)
+            # Direct callers (including the legacy synchronous API) do not
+            # provide a generation and retain the original single sleep call;
+            # queued account-page workers pass a generation and get a
+            # stop-aware wait instead.
+            if generation is None:
+                time.sleep(delay)
+            elif not account_operation_control.wait(delay, operation_generation):
+                account_operation_control.raise_if_cancelled(operation_generation)
     # 整个池子都试完 / 总时长超时仍失败：记录尝试过的代理，方便用户看。
     result = dict(last_result)
     result.setdefault("ok", False)
@@ -253,6 +278,23 @@ def _run_with_proxy_retry(
     return result
 
 
+def _run_with_proxy_retry(**kwargs) -> dict:
+    """带全局停止结果落库的代理轮换包装器。"""
+    try:
+        return _run_with_proxy_retry_impl(**kwargs)
+    except account_operation_control.AccountOperationStopped:
+        account_id = int(kwargs.get("account_id") or 0)
+        result = {
+            "ok": False,
+            "gcash": False,
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "GCash 检测已停止",
+            "stopped": True,
+        }
+        db.update_account_gcash(account_id, result)
+        return result
+
+
 def enqueue(
     *,
     account_id: int,
@@ -267,6 +309,7 @@ def enqueue(
     access_token = str(access_token or "").strip()
     if not access_token:
         return {"accepted": False, "busy": False, "error": "账号缺少 access_token"}
+    operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "GCash 检测队列已满"}
     if not db.claim_account_gcash(account_id, trigger=trigger):
@@ -281,10 +324,12 @@ def enqueue(
                 _run_with_proxy_retry,
                 account_id=account_id, access_token=access_token,
                 proxies=proxy_candidates, max_retries=max_retries,
+                generation=operation_generation,
             )
         else:
             (executor or get_executor()).submit(
                 _run, account_id=account_id, access_token=access_token, proxy=None,
+                generation=operation_generation,
             )
     except Exception as exc:
         _QUEUE_SLOTS.release()

@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from config import at_validity as validity_cfg
-from core import db
+from core import account_operation_control, db
 from core.at_validity import check_access_token_validity
 
 
@@ -42,7 +42,7 @@ _RATE_LOCK = threading.Lock()
 _NEXT_REQUEST_AT = 0.0
 
 
-def _wait_for_rate_slot() -> None:
+def _wait_for_rate_slot(generation: int | None = None) -> None:
     global _NEXT_REQUEST_AT
     min_interval = _float_setting("AT_VALIDITY_MIN_INTERVAL", 0.4, 0.0, 30.0)
     jitter = _float_setting("AT_VALIDITY_JITTER", 0.2, 0.0, 30.0)
@@ -51,7 +51,11 @@ def _wait_for_rate_slot() -> None:
         scheduled = max(now, _NEXT_REQUEST_AT) + (random.uniform(0.0, jitter) if jitter else 0.0)
         _NEXT_REQUEST_AT = scheduled + min_interval
     if scheduled > now:
-        time.sleep(scheduled - now)
+        delay = scheduled - now
+        if generation is None:
+            time.sleep(delay)
+        elif not account_operation_control.wait(delay, generation):
+            account_operation_control.raise_if_cancelled(generation)
 
 
 def _run_at_validity_check(
@@ -61,15 +65,20 @@ def _run_at_validity_check(
     access_token: str,
     trigger: str,
     proxy: str | None,
+    generation: int | None = None,
 ) -> dict:
+    operation_generation = account_operation_control.snapshot() if generation is None else int(generation)
     try:
-        _wait_for_rate_slot()
+        account_operation_control.raise_if_cancelled(operation_generation)
+        _wait_for_rate_slot(operation_generation if generation is not None else None)
+        account_operation_control.raise_if_cancelled(operation_generation)
         result = check_access_token_validity(
             access_token,
             proxy=proxy,
             max_attempts=_int_setting("AT_VALIDITY_REQUEST_ATTEMPTS", 5, 1, 10),
             retry_delay=_float_setting("AT_VALIDITY_RETRY_DELAY", 1.0, 0.0, 30.0),
         )
+        account_operation_control.raise_if_cancelled(operation_generation)
         db.update_account_at_validity(account_id, result, trigger=trigger)
         logger.info(
             "[AT检测] 完成: email=%s outcome=%s route=%s trigger=%s",
@@ -78,6 +87,19 @@ def _run_at_validity_check(
             result.get("network_route") or "unknown",
             trigger,
         )
+        return result
+    except account_operation_control.AccountOperationStopped:
+        result = {
+            "outcome": "check_error",
+            "valid": None,
+            "error_code": "stopped",
+            "error": "AT 检测已停止",
+            "stopped": True,
+        }
+        try:
+            db.update_account_at_validity(account_id, result, trigger=trigger)
+        except Exception:
+            logger.exception("[AT检测] 写入停止状态失败: account_id=%s", account_id)
         return result
     except Exception as exc:
         result = {
@@ -113,6 +135,7 @@ def enqueue_account_at_validity_check(
     access_token = str(access_token or "").strip()
     if not access_token:
         return {"accepted": False, "busy": False, "error": "账号缺少 access_token"}
+    operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "queue_full": True, "error": "AT 检测队列已满，请稍后重试"}
     with _RUNNING_LOCK:
@@ -129,6 +152,7 @@ def enqueue_account_at_validity_check(
             access_token=access_token,
             trigger=str(trigger or "manual-at"),
             proxy=proxy,
+            generation=operation_generation,
         )
     except Exception as exc:
         with _RUNNING_LOCK:

@@ -212,6 +212,26 @@ def request_stop(email: str) -> dict:
     return {"ok": True, "message": "已发送停止信号", "state": "stopped", "running": True, "injected": injected}
 
 
+def request_stop_all() -> dict:
+    """停止账号页中所有正在补跑的 Codex 授权。"""
+    with _RETRYING_LOCK:
+        targets = set(_RETRYING) | set(_STOP_REQUESTED)
+    try:
+        targets.update(
+            str(row.get("email") or "").strip().lower()
+            for row in db.list_accounts(limit=1_000_000, archived="all")
+            if str(row.get("codex_status") or "").lower() == "retrying"
+        )
+    except Exception:
+        logger.exception("[Codex 补跑] 读取全局停止目标失败")
+    target_list = [email for email in sorted(targets) if email]
+    results = [request_stop(email) for email in target_list]
+    return {
+        "stopped": [email for email, result in zip(target_list, results) if result.get("ok")],
+        "stopped_count": sum(1 for result in results if result.get("ok")),
+    }
+
+
 def run_worker(
     email: str,
     *,

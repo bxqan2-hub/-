@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request
 from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, at_validity_scheduler
+from core import account_operation_control, codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, at_validity_scheduler
 from core import chatgpt_plan, integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
@@ -1183,6 +1183,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             ) if check_plan else 0
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
+        operation_generation = account_operation_control.snapshot()
 
         accounts: list[dict] = []
         skipped = list(invalid)
@@ -3103,7 +3104,16 @@ def create_app(auth_code: str | None = None) -> Flask:
         def check_one(entry: dict) -> dict:
             email = entry.get("email") or ""
             try:
+                account_operation_control.raise_if_cancelled(operation_generation)
                 result = detect_mailbox_status(entry.get("code_url") or "", limit=50)
+                account_operation_control.raise_if_cancelled(operation_generation)
+            except account_operation_control.AccountOperationStopped:
+                result = {
+                    "status": "error", "label": "已停止", "evidence": "",
+                    "error": "邮箱检测已停止", "message_count": 0,
+                    "subject": "", "mail_date": "", "mail_id": "", "mail_source": "",
+                    "stopped": True,
+                }
             except Exception as exc:
                 result = {
                     "status": "error", "label": "检测失败", "evidence": "",
@@ -3697,6 +3707,24 @@ def create_app(auth_code: str | None = None) -> Flask:
             **queued,
             "queue": account_security_service.queue_settings(),
         }), 202
+
+    @app.post("/api/accounts/stop-all")
+    def api_accounts_stop_all():
+        """全局停止账号页后台操作，不关闭 GC/Roxy 窗口。"""
+        generation = account_operation_control.request_stop_all()
+        account_statuses = db.stop_account_page_operations()
+        security = account_security_service.stop_all()
+        gc = gc_registration_service.stop_all_plan_polls()
+        codex = codex_retry_service.request_stop_all()
+        return jsonify({
+            "ok": True,
+            "generation": generation,
+            "message": "账号页全部后台操作已发送停止信号",
+            "account_statuses": account_statuses,
+            "security": security,
+            "gc": gc,
+            "codex": codex,
+        })
 
     @app.get("/api/accounts/<int:account_id>/security-setup")
     def api_account_security_setup_status(account_id: int):
