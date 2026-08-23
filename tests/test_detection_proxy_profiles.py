@@ -58,6 +58,30 @@ class DetectionProxyProfilesTests(unittest.TestCase):
             [("JP", 2), ("US", 1)],
         )
 
+    def test_detection_proxy_country_prefers_profile_label(self):
+        self.assertEqual(
+            detection_proxy.infer_detection_proxy_country(
+                "ph|socks5h://proxy.example:1080"
+            ),
+            "PH",
+        )
+
+    def test_detection_proxy_country_falls_back_to_region_username(self):
+        self.assertEqual(
+            detection_proxy.infer_detection_proxy_country(
+                "socks5h://user-region-jp:pass@proxy.example:1080"
+            ),
+            "JP",
+        )
+
+    def test_detection_proxy_country_is_empty_for_unlabelled_local_route(self):
+        self.assertEqual(
+            detection_proxy.infer_detection_proxy_country(
+                "socks5h://127.0.0.1:1080"
+            ),
+            "",
+        )
+
     @patch("curl_cffi.requests.Session")
     def test_proxy_region_tag_is_used_without_network_probe(self, session_cls):
         fixtures = [

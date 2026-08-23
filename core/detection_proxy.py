@@ -251,6 +251,17 @@ def infer_static_proxy_country(spec: str) -> str:
     return country if _COUNTRY_CODE_RE.fullmatch(country) else ""
 
 
+def infer_detection_proxy_country(spec: str | None) -> str:
+    """读取检测代理的国家标签；无标签时再尝试静态代理用户名。"""
+    if spec is None:
+        return ""
+    label, _value = _split_label(str(spec))
+    country = str(label or "").strip().upper()
+    if _COUNTRY_CODE_RE.fullmatch(country):
+        return country
+    return infer_static_proxy_country(str(spec))
+
+
 def inspect_static_proxy(spec: str, *, timeout: float = 12.0) -> dict[str, str]:
     """优先读取代理自带地区；没有 ``region-XX`` 时才探测实际出口。"""
     proxy = resolve_static_detection_proxy(spec)
@@ -341,6 +352,7 @@ def pool_spec_for_index(specs: list[str], index: int) -> str | None:
 
 __all__ = [
     "infer_timezone_offset_min",
+    "infer_detection_proxy_country",
     "configured_detection_proxy_spec",
     "detection_proxy_country_groups",
     "detection_proxy_profiles",

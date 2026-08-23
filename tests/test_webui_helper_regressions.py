@@ -374,6 +374,19 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="showNoTrialAccountsOnlyV2"', html)
         self.assertIn("applyAccountsPlanFilter('no-trial')", html)
         self.assertIn("ACCOUNT_PLAN_FILTER === 'no-trial'", html)
+        self.assertIn("plan_check_proxy_country", html)
+        self.assertIn('class="plan-proxy-country-v2"', html)
+        self.assertIn("套餐查询代理地区", html)
+        self.assertIn("${esc(proxyCountry)}", html)
+
+    def test_account_list_exposes_plan_check_proxy_country(self):
+        compact = _compact_account_for_list({
+            "id": 8,
+            "email": "proxy-region@test.com",
+            "plan_check_proxy_country": "PH",
+        })
+
+        self.assertEqual(compact["plan_check_proxy_country"], "PH")
 
     @patch("webui.app.gc_registration_service.close_job_window")
     @patch("webui.app.db.get_job")

@@ -122,13 +122,24 @@ def _run_plan_check(
     timezone_offset_min: str,
 ) -> dict:
     try:
-        if not db.mark_account_plan_check_running(account_id):
+        selected_proxy = proxy if proxy is not None else detection_proxy.configured_detection_proxy_spec("plan")
+        proxy_country = {"value": detection_proxy.infer_detection_proxy_country(selected_proxy)}
+        if not db.mark_account_plan_check_running(account_id, proxy_country=proxy_country["value"]):
             return {"ok": False, "error": "账号已删除或套餐查询状态已被重置"}
 
         _wait_for_rate_slot()
-        selected_proxy = proxy if proxy is not None else detection_proxy.configured_detection_proxy_spec("plan")
         resolved_proxy = _resolve_plan_check_proxy(selected_proxy, account_id)
         resolved_timezone = detection_proxy.infer_timezone_offset_min(selected_proxy, timezone_offset_min)
+
+        def _retry_proxy() -> str | None:
+            next_proxy = (
+                detection_proxy.configured_detection_proxy_spec("plan")
+                if proxy is None
+                else selected_proxy
+            )
+            proxy_country["value"] = detection_proxy.infer_detection_proxy_country(next_proxy)
+            return _resolve_plan_check_proxy(next_proxy, account_id)
+
         result = check_account_plan(
             access_token,
             proxy=resolved_proxy,
@@ -138,11 +149,9 @@ def _run_plan_check(
             continue_check=lambda: bool(
                 (db.get_account(account_id) or {}).get("plan_check_status") == "running"
             ),
-            retry_proxy_provider=lambda: _resolve_plan_check_proxy(
-                detection_proxy.configured_detection_proxy_spec("plan") if proxy is None else selected_proxy,
-                account_id,
-            ),
+            retry_proxy_provider=_retry_proxy,
         )
+        result["plan_check_proxy_country"] = proxy_country["value"] or None
         if result.get("ok") and not result.get("plan_detection_source"):
             result["plan_detection_source"] = "account_access_token"
 

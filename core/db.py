@@ -1033,7 +1033,7 @@ _POOL_ACCOUNT_PLAN_FIELDS = (
     "plus_trial_eligible", "plan_check_status", "plan_check_ok", "plan_check_error",
     "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
     "plan_check_completed_at", "plan_check_network_route", "plan_check_proxy_used",
-    "plan_check_proxy_fallback_reason",
+    "plan_check_proxy_fallback_reason", "plan_check_proxy_country",
     "plan_checked_at", "plan_last_success_at", "plan_expires_at", "plan_renews_at",
     "billing_period", "billing_currency", "discount_amount", "discount_type",
     "discount_expires_at", "discount_promo_campaign_id",
@@ -1816,12 +1816,13 @@ def claim_account_plan_check(
         row["plan_check_started_at"] = None
         row["plan_check_completed_at"] = None
         row["plan_check_error"] = None
+        row["plan_check_proxy_country"] = None
         row["updated_at"] = now
         _save_accounts(accounts)
         return True
 
 
-def mark_account_plan_check_running(acc_id: int) -> bool:
+def mark_account_plan_check_running(acc_id: int, proxy_country: str | None = None) -> bool:
     """把已排队的套餐查询标记为执行中。"""
     with _LOCK:
         accounts = _load_accounts()
@@ -1831,6 +1832,12 @@ def mark_account_plan_check_running(acc_id: int) -> bool:
         row["plan_check_status"] = "running"
         row["plan_check_started_at"] = _now()
         row["plan_check_error"] = None
+        normalized_country = str(proxy_country or "").strip().upper()
+        row["plan_check_proxy_country"] = (
+            normalized_country
+            if len(normalized_country) == 2 and normalized_country.isalpha()
+            else None
+        )
         row["updated_at"] = _now()
         _save_accounts(accounts)
         return True
@@ -1961,6 +1968,13 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
         row["plan_check_network_route"] = result.get("network_route")
         row["plan_check_proxy_used"] = result.get("proxy_used")
         row["plan_check_proxy_fallback_reason"] = result.get("proxy_fallback_reason")
+        if "plan_check_proxy_country" in result:
+            normalized_country = str(result.get("plan_check_proxy_country") or "").strip().upper()
+            row["plan_check_proxy_country"] = (
+                normalized_country
+                if len(normalized_country) == 2 and normalized_country.isalpha()
+                else None
+            )
         row["token_expired"] = result.get("token_expired")
         row["token_expires_at"] = result.get("token_expires_at")
         row["plan_check_result_json"] = json.dumps(result, ensure_ascii=False)
@@ -2032,6 +2046,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
+        "plan_check_proxy_country",
         "at_validity_status", "at_validity_valid", "at_validity_checked_at",
         "at_validity_http_status", "at_validity_error_code", "at_validity_error", "at_validity_trigger",
         "at_validity_network_route", "at_validity_proxy_used", "at_validity_proxy_source",
@@ -2101,6 +2116,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     "plan_check_completed_at": row.get("plan_check_completed_at"),
                     "plan_checked_at": row.get("plan_checked_at"),
                     "plan_last_success_at": row.get("plan_last_success_at"),
+                    "plan_check_proxy_country": row.get("plan_check_proxy_country"),
                     "at_validity_status": row.get("at_validity_status"),
                     "at_validity_checked_at": row.get("at_validity_checked_at"),
                     "at_validity_error_code": row.get("at_validity_error_code"),

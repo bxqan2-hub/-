@@ -157,6 +157,14 @@
       color: var(--red); font-size: 12px; line-height: 1.35;
       max-width: 260px; white-space: normal; overflow-wrap: anywhere;
     }
+    .plan-result-region-v2 { display:inline-flex; align-items:center; gap:5px; max-width:100%; }
+    .plan-proxy-country-v2 {
+      display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto;
+      min-width:30px; height:20px; padding:0 7px; border:1px solid #a0cfff;
+      border-radius:999px; background:linear-gradient(135deg, #ecf5ff, #d9ecff);
+      color:#337ecc; font-size:11px; font-weight:800; letter-spacing:.4px;
+      box-shadow:0 1px 3px rgba(51,126,204,.15);
+    }
     .agent-token-cell { margin-top: 4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
     .agent-token-cell button { min-height:24px; border:1px solid #b9dfc9; border-radius:999px; background:#f0fbf5; color:#166534; padding:0 9px; font-size:12px; font-weight:800; cursor:pointer; }
     .agent-token-cell .agent-download { border-color:#bdd0ff; background:#f3f7ff; color:#1d4ed8; }
@@ -4531,18 +4539,27 @@ function _planCell(r) {
   const detectedPlus = r.has_active_plus_subscription === true;
   const hasPlus = detectedPlus;
   const checked = r.plan_checked_at ? `查询: ${esc(r.plan_checked_at)}` : '未查询实时套餐';
+  const proxyCountry = (r.plan_check_proxy_country || '').toString().trim().toUpperCase();
+  const proxyCountryName = proxyCountry ? proxyRegionLabelV2(proxyCountry) : '';
+  const proxyCountryDetail = proxyCountry ? `代理地区: ${proxyCountryName}（${proxyCountry}）` : '';
+  const proxyCountryBadge = proxyCountry
+    ? `<span class="plan-proxy-country-v2" title="套餐查询代理地区：${esc(proxyCountryName)}（${esc(proxyCountry)}）">${esc(proxyCountry)}</span>`
+    : '';
+  const withProxyCountry = html => proxyCountryBadge
+    ? `<span class="plan-result-region-v2">${html}${proxyCountryBadge}</span>`
+    : html;
   const route = (r.plan_check_network_route || '').toString();
   const routeLabel = route === 'proxy' ? `网络: 代理${r.plan_check_proxy_used ? ` (${r.plan_check_proxy_used})` : ''}` :
     route === 'direct_fallback' ? `网络: 直连回退${r.plan_check_proxy_fallback_reason ? ` (${r.plan_check_proxy_fallback_reason})` : ''}` :
     route === 'direct' ? '网络: 直连' : '';
-  const title = [err ? esc(err) : checked, routeLabel].filter(Boolean).join('；');
+  const title = [err ? esc(err) : checked, routeLabel, proxyCountryDetail].filter(Boolean).join('；');
   if (['queued','running'].includes(r.plan_check_status)) {
     const automatic = r.plan_check_trigger === 'registration_auto';
     const queued = r.plan_check_status === 'queued';
     const label = automatic ? (queued ? '自动查询排队中' : '自动查询中') : (queued ? '查询排队中' : '查询中');
     const stamp = queued ? r.plan_check_queued_at : r.plan_check_started_at;
     const detail = stamp ? `${queued ? '入队' : '开始'}: ${esc(stamp)}` : '';
-    return `<span class="pill status-running" title="${detail}">${label}</span>`;
+    return withProxyCountry(`<span class="pill status-running" title="${esc([detail, proxyCountryDetail].filter(Boolean).join('；'))}">${label}</span>`);
   }
   // 套餐探针与严格匹配当前 workspace 的邮件确认都可作为 Plus 证据；
   // 瞬时失败只显示错误，不会清空上一次已确认结果。
@@ -4563,21 +4580,21 @@ function _planCell(r) {
       expireRaw ? `到期时间: ${expireRaw}` : '',
       err ? `最近复检: ${err}` : '',
     ].filter(Boolean).join('；');
-    return `<span class="pill status-success" title="${esc(detail)}">Plus${parts.length ? ` ${esc(parts.join('/'))}` : ''}</span>`;
+    return withProxyCountry(`<span class="pill status-success" title="${esc([detail, proxyCountryDetail].filter(Boolean).join('；'))}">Plus${parts.length ? ` ${esc(parts.join('/'))}` : ''}</span>`);
   }
   if (err || r.plan_check_status === 'failed') {
     let reason = (err || '套餐查询失败，未返回具体原因').replace(/[，,]?已保留上次结果\s*$/, '');
     if (reason === '实时套餐接口均未返回可确认的类型') {
       reason = '历史查询未保存具体报错，请重新检测套餐';
     }
-    return `<div class="plan-error-detail" title="${esc(reason)}">${esc(reason)}</div>`;
+    return withProxyCountry(`<div class="plan-error-detail" title="${esc([reason, proxyCountryDetail].filter(Boolean).join('；'))}">${esc(reason)}</div>`);
   }
   const lower = plan.toLowerCase();
 
   if (lower === 'free') {
     const checkedOk = ok === true || r.plan_check_status === 'success';
     if (!checkedOk) {
-      return `<span class="pill status-running" title="${title}">${esc(plan)}（待检测）</span>`;
+      return withProxyCountry(`<span class="pill status-running" title="${title}">${esc(plan)}（待检测）</span>`);
     }
     const trialEligible = r.plus_trial_eligible === true;
     const offer = _trialOfferView(r);
@@ -4591,7 +4608,7 @@ function _planCell(r) {
           r.plus_trial_offer_evidence ? `判定依据: ${r.plus_trial_offer_evidence}` : '',
         ].filter(Boolean).join('；')
       : '本次账号状态接口未返回 Plus 试用活动';
-    return `<span class="pill trial-offer-pill trial-offer-pill--${offer.tone}" title="${esc([title, trialDetail].filter(Boolean).join('；'))}"><span class="trial-offer-plan">Free</span><span class="trial-offer-divider">·</span><span>${esc(offer.label)}</span>${offer.duration ? `<span class="trial-offer-divider">·</span><span>${esc(offer.duration)}</span>` : ''}</span>`;
+    return withProxyCountry(`<span class="pill trial-offer-pill trial-offer-pill--${offer.tone}" title="${esc([title, trialDetail].filter(Boolean).join('；'))}"><span class="trial-offer-plan">Free</span><span class="trial-offer-divider">·</span><span>${esc(offer.label)}</span>${offer.duration ? `<span class="trial-offer-divider">·</span><span>${esc(offer.duration)}</span>` : ''}</span>`);
   }
 
   const cls = 'status-success';
@@ -4610,7 +4627,7 @@ function _planCell(r) {
   if (r.plan_renews_at) detail.push(`续费时间: ${r.plan_renews_at}`);
   if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
-  return `<span class="pill ${cls}" title="${esc(detail.join('；'))}">${esc(text)}</span>`;
+  return withProxyCountry(`<span class="pill ${cls}" title="${esc(detail.join('；'))}">${esc(text)}</span>`);
 }
 function _planAction(r) {
   if (['queued','running'].includes(r.plan_check_status)) {

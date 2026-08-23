@@ -201,6 +201,20 @@ class AccountPlanFilterTests(unittest.TestCase):
         self.assertEqual(row["plus_trial_offer_percentage"], 50)
         self.assertEqual(row["plus_trial_summary"], "First month promotional price")
 
+    def test_plan_check_persists_normalized_proxy_country(self):
+        rows = [{"id": 7, "email": "region@test.com", "plan_check_status": "queued"}]
+
+        with patch.object(db, "_load_accounts", return_value=rows), \
+             patch.object(db, "_save_accounts"):
+            self.assertTrue(db.mark_account_plan_check_running(7, proxy_country="ph"))
+            self.assertEqual(rows[0]["plan_check_proxy_country"], "PH")
+            self.assertTrue(db.update_account_plan_check(acc_id=7, result={
+                "ok": True,
+                "plan_check_proxy_country": "jp",
+            }))
+
+        self.assertEqual(rows[0]["plan_check_proxy_country"], "JP")
+
     def test_accounts_check_never_borrows_default_workspace(self):
         with self.assertRaisesRegex(ValueError, "JWT 当前 workspace"):
             chatgpt_plan.parse_accounts_check({
@@ -349,6 +363,61 @@ class PlanCheckWorkerTests(unittest.TestCase):
         self.assertEqual(check.call_args.kwargs["max_attempts"], 0)
         self.assertTrue(callable(check.call_args.kwargs["continue_check"]))
         self.assertTrue(callable(check.call_args.kwargs["retry_proxy_provider"]))
+        _mark.assert_called_once_with(1, proxy_country="JP")
+        self.assertEqual(
+            _update.call_args.kwargs["result"]["plan_check_proxy_country"],
+            "JP",
+        )
+
+    def test_plan_probe_persists_country_of_retry_proxy(self):
+        def check_with_retry(*_args, **kwargs):
+            self.assertEqual(kwargs["retry_proxy_provider"](), "proxy-ph")
+            return {"ok": True, "current_plan_type": "free"}
+
+        with patch.object(
+            plan_check_service.detection_proxy,
+            "configured_detection_proxy_spec",
+            side_effect=[
+                "JP|socks5h://jp.example:1080",
+                "PH|socks5h://ph.example:1080",
+            ],
+        ), patch.object(
+            plan_check_service.detection_proxy,
+            "resolve_static_detection_proxy",
+            side_effect=["proxy-jp", "proxy-ph"],
+        ), patch.object(
+            plan_check_service.detection_proxy,
+            "infer_timezone_offset_min",
+            return_value="-540",
+        ), patch.object(
+            plan_check_service.db,
+            "mark_account_plan_check_running",
+            return_value=True,
+        ) as mark, patch.object(
+            plan_check_service.db,
+            "update_account_plan_check",
+        ) as update, patch.object(
+            plan_check_service,
+            "check_account_plan",
+            side_effect=check_with_retry,
+        ):
+            plan_check_service._QUEUE_SLOTS.acquire()
+            result = plan_check_service._run_plan_check(
+                account_id=9,
+                email="retry@example.test",
+                access_token="at-test",
+                trigger="manual",
+                proxy=None,
+                timezone_offset_min="-",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["plan_check_proxy_country"], "PH")
+        mark.assert_called_once_with(9, proxy_country="JP")
+        self.assertEqual(
+            update.call_args.kwargs["result"]["plan_check_proxy_country"],
+            "PH",
+        )
 
     def test_account_page_rejects_dynamic_proxy_api(self):
         with patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True), \
