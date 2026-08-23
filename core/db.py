@@ -24,6 +24,7 @@ from email.utils import parsedate_to_datetime
 from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
@@ -2171,6 +2172,29 @@ def get_account_by_email(email: str) -> dict | None:
         return _decorate_account(row) if row else None
 
 
+def reset_account_at_validity(acc_id: int) -> bool:
+    """新 AT 落库后清除旧 token 的有效性结论，等待下一次独立 AT 检测。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        row["at_validity_status"] = "unchecked"
+        row["at_validity_valid"] = None
+        row["at_validity_checked_at"] = None
+        row["at_validity_error_code"] = None
+        row["at_validity_error"] = None
+        row["at_validity_http_status"] = None
+        row["at_validity_network_route"] = None
+        row["at_validity_proxy_used"] = None
+        row["at_validity_proxy_source"] = None
+        row["at_validity_proxy_fallback_reason"] = None
+        row["at_validity_attempt_count"] = None
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
 def _stored_registration_password(row: dict) -> str:
     """读取账号已确认的 OpenAI 密码，供换绑结果按“密码 + 2FA”匹配原账号。"""
     raw = row.get("extra_json")
@@ -3207,6 +3231,36 @@ def import_generic_api_emails(records: list[dict]) -> tuple[int, int]:
             inserted += 1
         _save_generic_api_emails(rows)
         return inserted, skipped
+
+
+def upsert_manual_email_url(email: str, code_url: str) -> dict:
+    """保存手动添加账号的取码 URL；已有邮箱只更新用户本次明确提供的 URL。"""
+    normalized_email = str(email or "").strip()
+    normalized_url = str(code_url or "").strip()
+    if not normalized_email or "@" not in normalized_email:
+        raise ValueError("邮箱格式无效")
+    parsed = urlparse(normalized_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("取码 URL 必须是有效的 http(s) 地址")
+    with _LOCK:
+        rows = _load_generic_api_emails()
+        row = _find_by_email(rows, normalized_email)
+        if row is None:
+            row = {
+                "id": _next_id(rows),
+                "email": normalized_email,
+                "status": "available",
+                "used_at": None,
+                "note": None,
+                "imported_at": _now(),
+            }
+            rows.append(row)
+        row["code_url"] = normalized_url
+        row["provider"] = "generic_api"
+        row["updated_at"] = _now()
+        row["copy_line"] = _generic_api_email_line(row)
+        _save_generic_api_emails(rows)
+        return dict(row)
 
 
 def quarantine_exhausted_generic_api_emails(

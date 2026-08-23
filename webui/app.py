@@ -48,6 +48,63 @@ def _positive_worker_count(value, default: int = 10) -> int:
     return workers
 
 
+def _parse_manual_account_lines(text: str) -> tuple[list[dict], list[dict]]:
+    """解析账号页手动添加格式，不把凭据回显到错误结果。"""
+    records: list[dict] = []
+    invalid: list[dict] = []
+    seen: set[str] = set()
+    for number, raw in enumerate(str(text or "").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        delimiter = "----" if "----" in line else "====" if "====" in line else ""
+        parts = [part.strip() for part in line.split(delimiter)] if delimiter else []
+        email = parts[0] if parts else ""
+        normalized_email = email.lower()
+        if not email or "@" not in email:
+            invalid.append({"line": number, "reason": "邮箱格式无效"})
+            continue
+        if normalized_email in seen:
+            invalid.append({"line": number, "email": email, "reason": "本次输入邮箱重复"})
+            continue
+
+        if len(parts) == 3 and parts[1].lower().startswith(("http://", "https://")):
+            parsed_url = urlparse(parts[1])
+            if not parsed_url.netloc:
+                invalid.append({"line": number, "email": email, "reason": "取码 URL 无效"})
+                continue
+            record = {
+                "email": email,
+                "code_url": parts[1],
+                "access_token": parts[2],
+                "mode": "email_url",
+            }
+        elif len(parts) == 4:
+            record = {
+                "email": email,
+                "password": parts[1],
+                "totp_secret": parts[2],
+                "access_token": parts[3],
+                "mode": "password_2fa",
+            }
+        else:
+            invalid.append({
+                "line": number,
+                "email": email,
+                "reason": "需要 邮箱+取码URL+AT，或 邮箱+密码+2FA+AT",
+            })
+            continue
+        if not record["access_token"]:
+            invalid.append({"line": number, "email": email, "reason": "AT 不能为空"})
+            continue
+        if record["mode"] == "password_2fa" and not (record["password"] and record["totp_secret"]):
+            invalid.append({"line": number, "email": email, "reason": "密码和 2FA 不能为空"})
+            continue
+        seen.add(normalized_email)
+        records.append(record)
+    return records, invalid
+
+
 def _rewrite_integrated_location(value: str, prefix: str) -> str:
     location = str(value or "")
     if location.startswith("/") and not location.startswith(prefix + "/"):
@@ -838,6 +895,129 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped_count": len(skipped),
             "group_id": group_id,
         })
+
+    @app.post("/api/accounts/manual-add")
+    def api_accounts_manual_add():
+        """直接添加邮箱取码 URL 或密码/2FA 账号，并可用所给 AT 立即查询套餐。"""
+        data = request.get_json(silent=True) or {}
+        records, invalid = _parse_manual_account_lines(str(data.get("text") or ""))
+        if not records:
+            return jsonify({
+                "ok": False,
+                "error": "未识别到账号；支持 邮箱+取码URL+AT，或 邮箱+密码+2FA+AT",
+                "skipped": invalid,
+            }), 400
+        if len(records) > 500:
+            return jsonify({"ok": False, "error": "单次最多添加 500 个账号"}), 400
+
+        group_id = str(data.get("group_id") or "default").strip() or "default"
+        if group_id == "archived":
+            return jsonify({"ok": False, "error": "归档分组不能作为添加目标"}), 400
+        if group_id != "default" and not any(
+            str(group.get("id") or "") == group_id for group in db.list_account_groups()
+        ):
+            return jsonify({"ok": False, "error": "目标分组不存在"}), 400
+
+        check_plan = bool(data.get("check_plan", True))
+        try:
+            workers = _positive_worker_count(
+                data.get("workers"),
+                plan_check_service.get_executor_workers(),
+            ) if check_plan else 0
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
+
+        accounts: list[dict] = []
+        skipped = list(invalid)
+        for record in records:
+            email = str(record.get("email") or "").strip()
+            existed = db.get_account_by_email(email) is not None
+            try:
+                if record["mode"] == "email_url":
+                    db.upsert_manual_email_url(email, record["code_url"])
+                extra = {"imported_registered": True, "manual_added": True}
+                if record.get("password"):
+                    extra["registration_password"] = record["password"]
+                account_id = db.insert_account(
+                    email=email,
+                    access_token=record["access_token"],
+                    totp_secret=record.get("totp_secret"),
+                    email_source="generic_api" if record["mode"] == "email_url" else "manual",
+                    extra=extra,
+                )
+                db.reset_account_at_validity(account_id)
+            except (OSError, ValueError) as exc:
+                skipped.append({"email": email, "reason": str(exc)})
+                continue
+            accounts.append({
+                "id": int(account_id),
+                "email": email,
+                "mode": record["mode"],
+                "created": not existed,
+                "access_token": record["access_token"],
+            })
+
+        if not accounts:
+            return jsonify({
+                "ok": False,
+                "error": "账号均未能保存",
+                "skipped": skipped,
+            }), 400
+
+        account_ids = [item["id"] for item in accounts]
+        if group_id == "default":
+            db.move_accounts_to_default_group(account_ids)
+        else:
+            group, group_skipped = db.add_accounts_to_group(group_id, account_ids)
+            if group is None:
+                return jsonify({"ok": False, "error": "目标分组不存在"}), 409
+            skipped.extend(group_skipped)
+
+        started: list[dict] = []
+        busy: list[dict] = []
+        failed: list[dict] = []
+        if check_plan:
+            executor = plan_check_service.get_executor(max_workers=workers)
+            for item in accounts:
+                queued = plan_check_service.enqueue_account_plan_check(
+                    account_id=item["id"],
+                    email=item["email"],
+                    access_token=item.pop("access_token"),
+                    trigger="manual_add",
+                    proxy=None,
+                    timezone_offset_min=str(data.get("timezone_offset_min") or "-"),
+                    executor=executor,
+                )
+                result = {"id": item["id"], "email": item["email"], **queued}
+                if queued.get("accepted"):
+                    started.append(result)
+                elif queued.get("busy"):
+                    busy.append(result)
+                else:
+                    failed.append(result)
+        else:
+            for item in accounts:
+                item.pop("access_token", None)
+
+        payload = {
+            "ok": True,
+            "accounts": accounts,
+            "added_count": len(accounts),
+            "created_count": sum(1 for item in accounts if item["created"]),
+            "updated_count": sum(1 for item in accounts if not item["created"]),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            "group_id": group_id,
+            "plan_check_requested": check_plan,
+            "started": started,
+            "started_count": len(started),
+            "busy": busy,
+            "busy_count": len(busy),
+            "failed": failed,
+            "failed_count": len(failed),
+            "workers": workers,
+        }
+        return jsonify(payload), 202 if started else 200
 
     @app.post("/api/accounts/filter-emails")
     def api_accounts_filter_emails():

@@ -1705,6 +1705,7 @@
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden),
     #reboundImportModal:not(.hidden),
+    #manualAccountAddModal:not(.hidden),
     #proxyApiImportModal:not(.hidden),
     #detectionProxyImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
@@ -2476,6 +2477,7 @@
               <option value="archived">归档分组</option>
             </select>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCreateAccountGroupV2" title="新建一个本地账号分组">新建</button>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnManualAddAccountV2" title="直接添加邮箱+取码URL+AT，或邮箱+密码+2FA+AT，并可立即查询套餐">添加账号</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="导入独立换绑分站结果；替换原账号邮箱和AT，并迁移到当前分组">导入换绑邮箱</button>
             <button type="button" class="jobs-tb-btn" id="btnRenameAccountGroupV2" disabled title="修改当前分组名称">重命名</button>
             <button type="button" class="jobs-tb-btn" id="btnDeleteAccountGroupV2" disabled title="仅删除当前分组，不删除其中账号">删除</button>
@@ -2956,6 +2958,36 @@
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelReboundImport">取消</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitReboundImport">识别、替换并迁移分组</button>
+    </div>
+  </div>
+</div>
+<div id="manualAccountAddModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="manualAccountAddTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="manualAccountAddTitle">添加账号</h3>
+        <p>支持邮箱取码 URL 账号或密码 + 2FA 账号。保存时直接写入账号页，套餐查询只使用这一行提供的 AT。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseManualAccountAdd" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="outlook-import-result" id="manualAccountAddResultV2"></div>
+      <div class="outlook-import-check">
+        <span>添加目标：<strong id="manualAccountAddGroupNameV2">当前分组</strong></span>
+      </div>
+      <label class="outlook-import-field">
+        <span>账号资料</span>
+        <textarea id="manualAccountAddTextV2" rows="8" placeholder="email@example.com----https://取码地址----accessToken&#10;email@example.com----OpenAI密码----MFA Secret----accessToken"></textarea>
+        <span class="outlook-import-hint">每行一种格式：邮箱----取码URL----AT，或 邮箱----密码----2FA----AT；也兼容 ==== 分隔符。</span>
+      </label>
+      <label class="outlook-import-check">
+        <input id="manualAccountCheckPlanV2" type="checkbox" checked>
+        <span>添加后立即使用本行提供的 AT 查询套餐（并发使用账号页顶部“线程”设置）</span>
+      </label>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelManualAccountAdd">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitManualAccountAdd">添加账号</button>
     </div>
   </div>
 </div>
@@ -3728,6 +3760,7 @@ function updateModalScrollLock() {
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden')
     || !$('#reboundImportModal').classList.contains('hidden')
+    || !$('#manualAccountAddModal').classList.contains('hidden')
     || !$('#proxyApiImportModal').classList.contains('hidden')
     || !$('#detectionProxyImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
@@ -4265,6 +4298,77 @@ function bindReboundImportModal() {
   modal.addEventListener('click', event => { if (event.target === modal) closeReboundImportModal(); });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeReboundImportModal();
+  });
+}
+function openManualAccountAddModal() {
+  if (ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID) {
+    showToast('请先选择默认组或一个普通账号分组');
+    return;
+  }
+  const modal = $('#manualAccountAddModal');
+  if (!modal) return;
+  const groupName = $('#manualAccountAddGroupNameV2');
+  if (groupName) groupName.textContent = activeAccountGroupLabel();
+  const result = $('#manualAccountAddResultV2');
+  if (result) result.innerHTML = '';
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+  setTimeout(() => $('#manualAccountAddTextV2')?.focus(), 50);
+}
+function closeManualAccountAddModal() {
+  $('#manualAccountAddModal')?.classList.add('hidden');
+  updateModalScrollLock();
+}
+async function submitManualAccountAdd() {
+  const text = $('#manualAccountAddTextV2')?.value || '';
+  const resultEl = $('#manualAccountAddResultV2');
+  const button = $('#btnSubmitManualAccountAdd');
+  if (!text.trim()) { showToast('请粘贴账号资料'); return; }
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/accounts/manual-add', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        text,
+        group_id:ACTIVE_ACCOUNT_GROUP_ID,
+        check_plan:Boolean($('#manualAccountCheckPlanV2')?.checked),
+        workers:getCodexBulkWorkers(),
+      }),
+    });
+    const ids = (result.accounts || []).map(item => Number(item.id)).filter(Number.isFinite);
+    const message = `已添加 ${result.added_count || 0} 个账号到“${activeAccountGroupLabel()}”` +
+      (result.plan_check_requested ? `；套餐查询已入队 ${result.started_count || 0} 个` : '') +
+      ((result.skipped_count || 0) ? `；跳过 ${result.skipped_count} 行` : '');
+    if (resultEl) resultEl.innerHTML = `<div class="banner ${(result.added_count || 0) ? 'info' : 'warn'}">${esc(message)}</div>`;
+    ACCOUNT_SELECTED.clear();
+    ids.forEach(id => ACCOUNT_SELECTED.add(id));
+    PAGERS.accounts.page = 1;
+    await loadAccountGroups();
+    await loadAccounts();
+    await loadSummary();
+    if (result.started_count) watchPlanChecks(ids, new Map(ids.map(id => [id, ''])));
+    showToast(message);
+    if (!(result.skipped_count || 0)) {
+      $('#manualAccountAddTextV2').value = '';
+      setTimeout(closeManualAccountAddModal, 900);
+    }
+  } catch (error) {
+    if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(error.message)}</div>`;
+    else showToast('添加账号失败: ' + error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+function bindManualAccountAddModal() {
+  const modal = $('#manualAccountAddModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  $('#btnCloseManualAccountAdd')?.addEventListener('click', closeManualAccountAddModal);
+  $('#btnCancelManualAccountAdd')?.addEventListener('click', closeManualAccountAddModal);
+  $('#btnSubmitManualAccountAdd')?.addEventListener('click', submitManualAccountAdd);
+  modal.addEventListener('click', event => { if (event.target === modal) closeManualAccountAddModal(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeManualAccountAddModal();
   });
 }
 async function loadAccounts() {
@@ -6437,6 +6541,7 @@ async function findSelectedAccountsInEmailPool() {
     if (el) el.addEventListener('click', fn);
   };
   bind('btnCreateAccountGroupV2', createAccountGroup);
+  bind('btnManualAddAccountV2', openManualAccountAddModal);
   bind('btnRenameAccountGroupV2', renameActiveAccountGroup);
   bind('btnDeleteAccountGroupV2', deleteActiveAccountGroup);
   bind('btnAddSelectedToAccountGroupV2', addSelectedAccountsToGroup);
@@ -6468,6 +6573,7 @@ async function findSelectedAccountsInEmailPool() {
     {account_ids:Array.from(ACCOUNT_SELECTED)}, () => ACCOUNT_SELECTED.clear()
   ));
   bindReboundImportModal();
+  bindManualAccountAddModal();
 })();
 
 // ---------- Plus 邮件检测 ----------
