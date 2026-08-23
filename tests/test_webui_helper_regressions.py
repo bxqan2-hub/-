@@ -286,6 +286,11 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("'/api/accounts/stop-all'", html)
         self.assertIn("function stopAccountPagePolling()", html)
         self.assertIn("ACCOUNT_OPERATION_CONTROLLER.abort()", html)
+        self.assertIn('id="btnAtQualificationCheckV2"', html)
+        self.assertIn('AT检测大全', html)
+        self.assertIn('id="atQualificationModal"', html)
+        self.assertIn("/api/accounts/at-qualification-check", html)
+        self.assertIn("renderAtQualificationResults(payload)", html)
 
     def test_accounts_ui_appends_custom_page_size_and_shows_registration_minute(self):
         html = self.client.get("/").get_data(as_text=True)

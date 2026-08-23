@@ -2072,6 +2072,121 @@ def create_app(auth_code: str | None = None) -> Flask:
             "message": "每个账号只创建一次 PH/PHP Checkout 并从创建响应直读 GCash；不识别 OAICS 类型，代理/风控类失败自动换代理重试",
         }), 202
 
+    @app.post("/api/accounts/at-qualification-check")
+    def api_accounts_at_qualification_check():
+        """Use the existing qualification detector for pasted ATs.
+
+        This endpoint deliberately does not create or update an account row;
+        it only returns a per-token result with the email extracted from the
+        token claims so multiple pasted ATs remain distinguishable.
+        """
+        from core import detection_proxy
+        from config import proxy as proxy_cfg
+        import random
+
+        data = request.get_json(silent=True) or {}
+        qualification = str(data.get("qualification") or "gcash").strip().lower()
+        if qualification != "gcash":
+            return jsonify({"ok": False, "error": "当前仅支持 GCash 资格检测"}), 400
+        source = data.get("text")
+        if source in (None, ""):
+            source = data.get("access_tokens") or data.get("access_token") or data.get("at") or ""
+        if isinstance(source, list):
+            entries = list(source)
+            skipped = []
+        else:
+            entries, skipped = _parse_at_import_text(str(source or ""))
+        if not entries:
+            return jsonify({"ok": False, "error": "请输入至少一个 AT/access_token", "invalid": skipped}), 400
+        if len(entries) > 100:
+            return jsonify({"ok": False, "error": "单次最多检测 100 个 AT", "invalid": skipped}), 400
+
+        tokens: list[dict] = []
+        invalid = list(skipped)
+        for index, entry in enumerate(entries, start=1):
+            try:
+                identity = _access_token_identity(entry)
+            except (TypeError, ValueError) as exc:
+                invalid.append({"index": index, "reason": str(exc)[:240]})
+                continue
+            tokens.append({
+                "index": index,
+                "email": identity.get("email") or "未识别邮箱",
+                "access_token": identity["access_token"],
+            })
+        if not tokens:
+            return jsonify({"ok": False, "error": "没有可检测的有效 AT", "invalid": invalid}), 400
+
+        pool_specs = detection_proxy.parse_detection_proxy_pool(
+            getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
+        )
+        if not pool_specs:
+            return jsonify({"ok": False, "error": "尚未配置 gc查询代理池（PH 出口代理）", "invalid": invalid}), 409
+        proxy_urls: list[str] = []
+        for spec in pool_specs:
+            try:
+                url = detection_proxy.resolve_detection_proxy(spec) or ""
+            except Exception:
+                continue
+            if url:
+                proxy_urls.append(url)
+        if not proxy_urls:
+            return jsonify({"ok": False, "error": "gc查询代理池全部无法解析", "invalid": invalid}), 409
+
+        generation = account_operation_control.snapshot()
+        workers = max(1, min(8, len(tokens)))
+        executor = gcash_service.get_executor(workers)
+        futures = {}
+        for item in tokens:
+            shuffled = list(proxy_urls)
+            random.shuffle(shuffled)
+            futures[executor.submit(
+                gcash_service.probe_access_token,
+                item["access_token"],
+                proxies=shuffled,
+                max_retries=gcash_service.MAX_PROXY_RETRIES,
+                generation=generation,
+            )] = item
+
+        results = []
+        for future in as_completed(futures):
+            item = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = {"ok": False, "gcash": False, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
+            detection_outcome = str(result.get("detection_outcome") or "").strip()
+            checked_without_eligibility = bool(result.get("ok")) or detection_outcome in {
+                "no_cpmt_after_full_probe", "no_gcash_in_create_response",
+            }
+            status = (
+                "eligible" if result.get("gcash") else
+                "not_eligible" if checked_without_eligibility else
+                "failed"
+            )
+            results.append({
+                "index": item["index"],
+                "email": item["email"],
+                "qualification": qualification,
+                "status": status,
+                "gcash": bool(result.get("gcash")),
+                "ok": bool(result.get("ok") or result.get("gcash")),
+                "checked_at": result.get("checked_at"),
+                "attempt_count": result.get("attempt_count"),
+                "detection_outcome": detection_outcome,
+                "error": result.get("error"),
+            })
+        results.sort(key=lambda row: int(row.get("index") or 0))
+        return jsonify({
+            "ok": True,
+            "qualification": qualification,
+            "count": len(results),
+            "results": results,
+            "invalid": invalid,
+            "confirm_sent": False,
+            "message": "已使用现有 GCash 检测方式完成 AT 资格检测；不会写入账号记录或执行支付确认",
+        })
+
     @app.post("/api/accounts/extract-oaics-bulk")
     def api_accounts_extract_oaics_bulk():
         data = request.get_json(silent=True) or {}

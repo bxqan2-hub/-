@@ -186,7 +186,7 @@ def _run(*, account_id: int, access_token: str, proxy: str | None, generation: i
 
 def _run_with_proxy_retry_impl(
     *,
-    account_id: int,
+    account_id: int | None,
     access_token: str,
     proxies: list[str],
     max_retries: int | None = None,
@@ -245,7 +245,9 @@ def _run_with_proxy_retry_impl(
             if result.get("gcash") or result.get("ok"):
                 result["retried_proxies"] = attempts
                 result["attempt_count"] = idx + 1
-            return db.update_account_gcash(account_id, result) and result
+            if account_id is not None:
+                return db.update_account_gcash(account_id, result) and result
+            return result
         delay = _retry_delay_seconds(result, idx)
         if delay > 0 and idx + 1 < total:
             if deadline is not None:
@@ -274,7 +276,8 @@ def _run_with_proxy_retry_impl(
     else:
         result["error"] = (f"已尝试 {len(attempts)} 个代理仍失败；最后一个错误："
                            + str(result.get("error") or "未知"))
-    db.update_account_gcash(account_id, result)
+    if account_id is not None:
+        db.update_account_gcash(account_id, result)
     return result
 
 
@@ -291,8 +294,28 @@ def _run_with_proxy_retry(**kwargs) -> dict:
             "error": "GCash 检测已停止",
             "stopped": True,
         }
-        db.update_account_gcash(account_id, result)
+        if account_id:
+            db.update_account_gcash(account_id, result)
         return result
+
+
+def probe_access_token(
+    access_token: str,
+    *,
+    proxies: list[str] | None = None,
+    max_retries: int | None = MAX_PROXY_RETRIES,
+    total_timeout: float | None = PROBE_TOTAL_TIMEOUT,
+    generation: int | None = None,
+) -> dict:
+    """Run the existing GCash detector for a raw AT without creating an account row."""
+    return _run_with_proxy_retry(
+        account_id=None,
+        access_token=str(access_token or "").strip(),
+        proxies=[str(value).strip() for value in (proxies or []) if str(value).strip()],
+        max_retries=max_retries,
+        total_timeout=total_timeout,
+        generation=generation,
+    )
 
 
 def enqueue(
@@ -353,6 +376,6 @@ def queue_settings() -> dict:
 
 
 __all__ = [
-    "DEFAULT_WORKERS", "MAX_WORKERS", "check_gcash", "enqueue",
+    "DEFAULT_WORKERS", "MAX_WORKERS", "check_gcash", "enqueue", "probe_access_token",
     "get_executor", "proxy_transport_candidates", "queue_settings",
 ]

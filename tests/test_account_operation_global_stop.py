@@ -40,3 +40,54 @@ def test_accounts_stop_all_route_stops_all_account_page_services():
     security.assert_called_once_with()
     gc.assert_called_once_with()
     codex.assert_called_once_with()
+
+
+def test_at_qualification_route_accepts_multiple_tokens_and_returns_each_email():
+    with patch("webui.app.at_validity_scheduler.ensure_started"):
+        app = create_app(auth_code="test-auth")
+    client = app.test_client()
+    headers = {"X-Auth-Code": "test-auth"}
+
+    def identity(value):
+        token = str(value).strip()
+        return {"access_token": token, "email": f"{token}@example.com"}
+
+    def probe(token, **kwargs):
+        return {
+            "ok": True,
+            "gcash": str(token) == "token-1",
+            "checked_at": "2026-08-23T12:00:00",
+            "attempt_count": 1,
+            "detection_outcome": "no_gcash_in_create_response" if str(token) != "token-1" else "gcash_found",
+        }
+
+    with patch("webui.app._access_token_identity", side_effect=identity), \
+         patch("core.detection_proxy.parse_detection_proxy_pool", return_value=["ph-spec"]), \
+         patch("core.detection_proxy.resolve_detection_proxy", return_value="http://ph.example:80"), \
+         patch("webui.app.gcash_service.probe_access_token", side_effect=probe) as probe_mock:
+        response = client.post(
+            "/api/accounts/at-qualification-check",
+            headers=headers,
+            json={"text": "token-1\ntoken-2", "qualification": "gcash"},
+        )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["count"] == 2
+    assert [item["email"] for item in body["results"]] == [
+        "token-1@example.com", "token-2@example.com",
+    ]
+    assert [item["status"] for item in body["results"]] == ["eligible", "not_eligible"]
+    assert probe_mock.call_count == 2
+
+
+def test_at_qualification_route_rejects_unknown_qualification():
+    with patch("webui.app.at_validity_scheduler.ensure_started"):
+        app = create_app(auth_code="test-auth")
+    response = app.test_client().post(
+        "/api/accounts/at-qualification-check",
+        headers={"X-Auth-Code": "test-auth"},
+        json={"text": "token-1", "qualification": "plus"},
+    )
+    assert response.status_code == 400
+    assert "仅支持 GCash" in response.get_json()["error"]

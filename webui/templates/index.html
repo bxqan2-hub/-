@@ -1724,6 +1724,7 @@
     #reboundImportModal:not(.hidden),
     #manualAccountAddModal:not(.hidden),
     #atReplaceModal:not(.hidden),
+    #atQualificationModal:not(.hidden),
     #proxyApiImportModal:not(.hidden),
     #detectionProxyImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
@@ -2464,6 +2465,7 @@
           <button type="button" class="acc-v2-toggle" id="showOaicsAccountsOnlyV2" aria-pressed="false" title="只显示 Checkout 类型已检测为 OAICS 的账号">OAICS</button>
           <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">GC资格</button>
           <button type="button" class="acc-v2-toggle" id="showAtInvalidAccountsOnlyV2" aria-pressed="false" title="只显示 AT 已确认失效或检测遇到错误的账号；检测只验证 AT，不查询套餐或 0 元试用，网络错误不会误标成失效">AT失效/错误</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnAtQualificationCheckV2" title="粘贴一个或多个 AT，选择资格并显示每个 AT 对应的邮箱与结果">AT检测大全</button>
           <button type="button" class="acc-v2-toggle" id="atValidityEnabledV2" aria-pressed="true" title="启用或停用 AT 定时有效性检测；修改后点击保存">定时AT检测</button>
           <label class="acc-v2-inline" title="AT 定时有效性检测周期，单位为分钟">周期
             <span class="el-input-number">
@@ -3041,6 +3043,36 @@
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelAtReplace">取消</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitAtReplace">识别邮箱并替换</button>
+    </div>
+  </div>
+</div>
+<div id="atQualificationModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="atQualificationTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="atQualificationTitle">AT检测大全</h3>
+        <p>粘贴一个或多个 AT，选择要检测的资格。当前开放 GCash 资格；结果会逐条显示 AT 对应的邮箱，AT 本身不会回显或保存。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseAtQualification" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="outlook-import-result" id="atQualificationResultV2"></div>
+      <label class="outlook-import-field">
+        <span>检测资格</span>
+        <select id="atQualificationKindV2" class="jobs-tb-select">
+          <option value="gcash">GCash 资格</option>
+        </select>
+        <span class="outlook-import-hint">后续可在这里继续增加 Plus、试用等资格；当前 GCash 调用账号页已有的 PH/PHP Checkout 检测方式。</span>
+      </label>
+      <label class="outlook-import-field">
+        <span>AT 列表</span>
+        <textarea id="atQualificationTextV2" rows="9" placeholder="每行一个 AT / Bearer AT&#10;也支持：邮箱----AT&#10;或粘贴 /api/auth/session JSON、JSON 数组" autocomplete="off" spellcheck="false"></textarea>
+        <span class="outlook-import-hint">支持多条输入；结果表会显示每条 AT 的邮箱、GCash 结果、检测时间和失败原因。</span>
+      </label>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelAtQualification">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitAtQualification">开始检测</button>
     </div>
   </div>
 </div>
@@ -3827,6 +3859,7 @@ function updateModalScrollLock() {
     || !$('#reboundImportModal').classList.contains('hidden')
     || !$('#manualAccountAddModal').classList.contains('hidden')
     || !$('#atReplaceModal').classList.contains('hidden')
+    || !$('#atQualificationModal').classList.contains('hidden')
     || !$('#proxyApiImportModal').classList.contains('hidden')
     || !$('#detectionProxyImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
@@ -4528,6 +4561,73 @@ function bindAtReplaceModal() {
   modal.addEventListener('click', event => { if (event.target === modal) closeAtReplaceModal(); });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeAtReplaceModal();
+  });
+}
+function openAtQualificationModal() {
+  const modal = $('#atQualificationModal');
+  if (!modal) return;
+  const result = $('#atQualificationResultV2');
+  if (result) result.innerHTML = '';
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+  setTimeout(() => $('#atQualificationTextV2')?.focus(), 50);
+}
+function closeAtQualificationModal() {
+  $('#atQualificationModal')?.classList.add('hidden');
+  updateModalScrollLock();
+}
+function renderAtQualificationResults(payload) {
+  const resultEl = $('#atQualificationResultV2');
+  if (!resultEl) return;
+  const rows = Array.isArray(payload?.results) ? payload.results : [];
+  const invalid = Array.isArray(payload?.invalid) ? payload.invalid : [];
+  const statusLabel = {eligible:'有 GCash 资格', not_eligible:'无 GCash 资格', failed:'检测失败'};
+  const statusClass = {eligible:'info', not_eligible:'muted', failed:'warn'};
+  const body = rows.map(row => {
+    const status = String(row.status || 'failed');
+    const detail = [
+      row.checked_at ? `时间：${row.checked_at}` : '',
+      row.attempt_count ? `代理尝试：${row.attempt_count}` : '',
+      row.error || '',
+    ].filter(Boolean).join('；');
+    return `<tr><td>${esc(row.index ?? '')}</td><td>${esc(row.email || '未识别邮箱')}</td><td><span class="pill ${status === 'eligible' ? 'status-success' : status === 'not_eligible' ? 'status-muted' : 'status-failed'}">${esc(statusLabel[status] || status)}</span></td><td>${esc(detail)}</td></tr>`;
+  }).join('');
+  const invalidHtml = invalid.length
+    ? `<div class="banner warn">跳过 ${invalid.length} 条：${esc(invalid.map(item => item.reason || '格式无效').join('；'))}</div>`
+    : '';
+  resultEl.innerHTML = `${invalidHtml}${rows.length ? `<div class="outlook-import-hint">共完成 ${rows.length} 条检测，邮箱与结果已逐条对应。</div><div class="accounts-table-v2-wrap"><table class="accounts-table-v2"><thead><tr><th>#</th><th>邮箱</th><th>GCash</th><th>详情</th></tr></thead><tbody>${body}</tbody></table></div>` : ''}`;
+}
+async function submitAtQualification() {
+  const text = $('#atQualificationTextV2')?.value || '';
+  const qualification = $('#atQualificationKindV2')?.value || 'gcash';
+  const resultEl = $('#atQualificationResultV2');
+  const button = $('#btnSubmitAtQualification');
+  if (!text.trim()) { showToast('请粘贴一个或多个 AT'); return; }
+  if (button) { button.disabled = true; button.textContent = '检测中…'; }
+  if (resultEl) resultEl.innerHTML = '<div class="banner info">正在按 AT 逐条检测，请稍候…</div>';
+  try {
+    const payload = await api('/api/accounts/at-qualification-check', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text, qualification}),
+    });
+    renderAtQualificationResults(payload);
+    showToast(`AT检测完成：${payload.count || 0} 条`);
+  } catch (error) {
+    if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(error.message)}</div>`;
+    else showToast('AT检测失败: ' + error.message);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = '开始检测'; }
+  }
+}
+function bindAtQualificationModal() {
+  const modal = $('#atQualificationModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  $('#btnCloseAtQualification')?.addEventListener('click', closeAtQualificationModal);
+  $('#btnCancelAtQualification')?.addEventListener('click', closeAtQualificationModal);
+  $('#btnSubmitAtQualification')?.addEventListener('click', submitAtQualification);
+  modal.addEventListener('click', event => { if (event.target === modal) closeAtQualificationModal(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeAtQualificationModal();
   });
 }
 async function loadAccounts() {
@@ -6823,6 +6923,7 @@ async function findSelectedAccountsInEmailPool() {
   bind('btnDeleteAccountGroupV2', deleteActiveAccountGroup);
   bind('btnAddSelectedToAccountGroupV2', addSelectedAccountsToGroup);
   bind('btnImportReboundAccountsV2', openReboundImportModal);
+  bind('btnAtQualificationCheckV2', openAtQualificationModal);
   $('#accountGroupSelectV2')?.addEventListener('change', e => applyAccountGroup(e.target.value));
   $('#accountGroupTargetV2')?.addEventListener('change', e => {
     TARGET_ACCOUNT_GROUP_ID = e.target.value || '';
@@ -6852,6 +6953,7 @@ async function findSelectedAccountsInEmailPool() {
   bindReboundImportModal();
   bindManualAccountAddModal();
   bindAtReplaceModal();
+  bindAtQualificationModal();
 })();
 
 // ---------- Plus 邮件检测 ----------
