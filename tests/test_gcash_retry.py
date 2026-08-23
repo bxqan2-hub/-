@@ -209,7 +209,9 @@ class GcashBulkApiTests(unittest.TestCase):
         self.client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
 
     def test_bulk_api_defaults_to_eight_workers(self):
-        profiles = [f"PH|http://proxy-{index}.example:8080" for index in range(8)]
+        # A small proxy pool must not silently lower account concurrency; the
+        # single proxy can serve multiple direct one-request Checkout probes.
+        profiles = ["PH|http://proxy.example:8080"]
         with patch.object(proxy_cfg, "GC_CHECK_PROXY_PROFILES", profiles), \
              patch.object(
                  detection_proxy,

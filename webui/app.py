@@ -1461,9 +1461,6 @@ def create_app(auth_code: str | None = None) -> Flask:
         )
         if not pool_specs:
             return jsonify({"ok": False, "error": "尚未配置 gc查询代理池（PH 出口代理）"}), 409
-        if len(pool_specs) < workers:
-            workers = len(pool_specs)
-
         executor = gcash_service.get_executor(workers)
         # 解析整个代理池一次：每个账号拿到一个随机起点，失败时按池顺序换代理重试。
         proxy_urls: list[str] = []
