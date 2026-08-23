@@ -161,12 +161,6 @@ PAY.153 已由主站进程内加载，不需要单独配置 systemd、Gunicorn �
 
 提交代码前应继续检查环境变量、调试输出和测试文件，避免将运行凭据写入 Git 历史。
 
-## 与协议支付项目的关系
-
-本仓库负责生成支付链接或二维码；PayPal BA 链生成后，可以交给独立的协议支付服务继续处理：
-
-https://github.com/1537271403/paypal-agreement-protocol
-
 ## 更新流程
 
 ```bash

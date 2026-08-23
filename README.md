@@ -879,10 +879,9 @@ ROXY_OPEN_HEADLESS = False
 MIT
 # 集成提链中心
 
-当前 WebUI 已内置以下两个项目：
+当前 WebUI 只内置以下提链运行时：
 
 - [PAY.153 Checkout Link Router](https://github.com/1537271403/pay153-checkout-link)：主界面的“提链中心”直接加载完整多通道提链工作台。
-- [PayPal Agreement Protocol](https://github.com/1537271403/paypal-agreement-protocol)：从 PAY.153 顶部的“PayPal 协议支付”进入。
 
 账号页面不再提供 GCash、PIX、PP、KK 提链或资格检测入口，所有提链统一在“提链中心”完成。Kakao 的 `oaics_*` 路径在 PAY.153 内部参考并署名
 [kakao_oaics_source](https://github.com/m1243808154/kakao_oaics_source)，不会作为第三个服务运行。
@@ -894,7 +893,7 @@ MIT
 换电脑复制整个项目文件夹后，直接双击根目录的 `一键安装.bat`。脚本会
 检查 Python 3.10+ 和 Node.js 18+；缺少时优先调用 Windows `winget` 安装
 Python 3.12 与 Node.js LTS，然后重新创建可迁移的 `.venv`、安装本站
-与两个开源项目的全部 Python 依赖、安装锁定的 Node/jsdom Sentinel 运行
+与 PAY.153 的 Python 依赖、安装锁定的 Node/jsdom Sentinel 运行
 环境、安装 Playwright Chromium，并实际启动一次 Chromium 完成自检。
 
 命令行执行方式：
@@ -909,10 +908,9 @@ install-integrations.bat
 start-webui.bat
 ```
 
-两个开源项目现在和主站运行在同一个 Python 进程、同一个 WebUI 端口，通过已登录的同源路径访问：
+PAY.153 现在和主站运行在同一个 Python 进程、同一个 WebUI 端口，通过已登录的同源路径访问：
 
 - `/pay153/`
-- `/paypal-pay/`
 
 不会监听任何提链辅助端口，也没有独立提链子进程。账号 OAICS/CSLIVE 检测直接调用同进程 PAY.153 实现，不再受内部 HTTP 读超时影响。停止 WebUI 即同时停止全部功能。
 

@@ -4,9 +4,6 @@ flask>=3.0.0
 requests>=2.31.0
 pycryptodome>=3.23.0
 selenium>=4.20.0
-httpx[http2,socks]>=0.27,<1
-loguru>=0.7,<1
-pproxy>=2.7,<3
 qrcode[pil]>=7.4,<9
 
 cryptography>=41

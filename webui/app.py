@@ -557,11 +557,6 @@ def create_app(auth_code: str | None = None) -> Flask:
             target += "?" + request.query_string.decode("utf-8", errors="ignore")
         return redirect(target, code=302)
 
-    @app.route("/paypal-pay/", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
-    @app.route("/paypal-pay/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
-    def integrated_paypal_agreement(subpath: str):
-        return _dispatch_integrated_request("paypal-agreement", "/paypal-pay", subpath)
-
     @app.get("/api/integrations/health")
     def api_integrations_health():
         return jsonify({"ok": True, "services": integrated_runtime.status()})

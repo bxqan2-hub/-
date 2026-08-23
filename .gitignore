@@ -102,10 +102,6 @@ webui.pid
 logs/
 run/
 
-# PayPal 协议运行时断点（包含 BA / Payer 数据）
-integrations/paypal_agreement_protocol/data/authorization_checkpoints.json
-integrations/paypal_agreement_protocol/data/authorization_checkpoints.json.tmp
-
 # Local traffic captures and delivery verification artifacts
 /are-capture-*.jsonl
 /Default-all-domains-*.json

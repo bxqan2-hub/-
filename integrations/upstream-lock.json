@@ -5,12 +5,6 @@
       "url": "https://github.com/1537271403/pay153-checkout-link",
       "commit": "e8b36626162f09363f29b85af42de98cc8114c9b",
       "path": "integrations/pay153_checkout"
-    },
-    {
-      "name": "paypal-agreement-protocol",
-      "url": "https://github.com/1537271403/paypal-agreement-protocol",
-      "commit": "4719066ec6fd56b57a5bd9599758366836c9dc0a",
-      "path": "integrations/paypal_agreement_protocol"
     }
   ],
   "reference_projects": [

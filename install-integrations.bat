@@ -39,10 +39,10 @@ if not errorlevel 1 (
 )
 if errorlevel 1 exit /b 1
 
-echo [2/6] Installing Python dependencies for the site and both integrations...
+echo [2/6] Installing Python dependencies for the site and PAY153 integration...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
-".venv\Scripts\python.exe" -m pip install -r requirements.txt -r integrations\pay153_checkout\requirements.txt -r integrations\paypal_agreement_protocol\requirements.txt
+".venv\Scripts\python.exe" -m pip install -r requirements.txt -r integrations\pay153_checkout\requirements.txt
 if errorlevel 1 exit /b 1
 ".venv\Scripts\python.exe" -m pip install pytest
 if errorlevel 1 exit /b 1

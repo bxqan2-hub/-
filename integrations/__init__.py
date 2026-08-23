@@ -1,1 +1,1 @@
-"""Bundled payment extraction and PayPal agreement services."""
+"""Bundled PAY.153 payment-link extraction service."""

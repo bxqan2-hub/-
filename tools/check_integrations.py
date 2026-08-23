@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-fast runtime check for the two bundled payment integrations."""
+"""Fail-fast runtime check for the bundled PAY.153 extraction integration."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PAY153 = ROOT / "integrations" / "pay153_checkout"
-PAYPAL = ROOT / "integrations" / "paypal_agreement_protocol"
 
 
 def fail(message: str) -> None:
@@ -30,13 +29,11 @@ def check_files() -> None:
         PAY153 / "paypal_oaics_adapter.py",
         PAY153 / "paypal_oaics_link_pp" / "engine.py",
         PAY153 / "paypal_oaics_link_pp" / "protocol" / "stripe_checkout.py",
-        PAYPAL / "web.py",
-        PAYPAL / "paypal" / "flow.py",
     )
     missing = [str(path.relative_to(ROOT)) for path in required if not path.is_file()]
     if missing:
         fail("集成文件缺失：" + ", ".join(missing))
-    print("[OK] 两个 PAY153 开源项目文件完整")
+    print("[OK] PAY.153 开源提链项目文件完整")
 
 
 def check_python() -> None:
@@ -45,10 +42,7 @@ def check_python() -> None:
     modules = {
         "flask": "Flask",
         "curl_cffi": "curl_cffi",
-        "httpx": "httpx",
-        "loguru": "loguru",
         "playwright": "playwright",
-        "pproxy": "pproxy",
     }
     missing: list[str] = []
     for module, package in modules.items():
@@ -168,7 +162,9 @@ def check_apps() -> None:
     }
     if failed:
         fail("单端口集成加载失败：" + json.dumps(failed, ensure_ascii=False))
-    print("[OK] PAY153 Checkout 与 PayPal Agreement 可在主进程加载")
+    if set(health) != {"pay153"}:
+        fail("集成健康状态包含非 PAY.153 服务：" + ", ".join(sorted(health)))
+    print("[OK] PAY.153 Checkout 可在主进程加载")
 
 
 def main() -> int:
@@ -189,7 +185,7 @@ def main() -> int:
         print(f"[ERR] {exc}", file=sys.stderr)
         print("请运行项目根目录的 一键安装.bat 修复运行环境。", file=sys.stderr)
         return 1
-    print("[OK] 两个开源项目的运行环境全部通过自检")
+    print("[OK] PAY.153 开源提链项目运行环境全部通过自检")
     return 0
 
 
