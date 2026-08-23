@@ -550,6 +550,37 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(password, "Password1!")
         self.assertEqual(checkpoints, [("mail@example.test", "Password1!")])
 
+    def test_missing_password_input_reuses_attempt_after_form_rehydrates(self):
+        driver = MagicMock()
+        checkpoints = []
+        with patch("core.roxy_registration._submit_signup_password_direct", side_effect=[
+            {"ok": False, "reason": "missing_password_input"},
+            {"ok": True, "reason": "submitted_password"},
+        ]) as submit_password, \
+             patch("core.roxy_registration._is_email_verification_page", side_effect=lambda *_args: submit_password.call_count >= 2), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration._is_login_password_page", return_value=False), \
+             patch("core.roxy_registration._password_page_state", return_value={
+                 "url": "https://auth.openai.com/create-account/password",
+                 "errors": [],
+                 "inputs": [{"visible": True, "type": "password", "autocomplete": "new-password"}],
+             }), \
+             patch("core.roxy_registration._registration_password", return_value="Password1!"), \
+             patch("core.roxy_registration.time.sleep"), \
+             patch("core.roxy_registration.human_delay"):
+            password = roxy_registration._fill_password_page_if_present(
+                driver,
+                "mail@example.test",
+                timeout=1,
+                allow_passwordless=False,
+                on_confirmed=lambda *args: checkpoints.append(args),
+            )
+
+        self.assertEqual(password, "Password1!")
+        self.assertEqual(submit_password.call_count, 2)
+        self.assertEqual(checkpoints, [("mail@example.test", "Password1!")])
+
     def test_email_already_verified_page_is_success_not_invalid_otp(self):
         driver = MagicMock()
         verified = {
