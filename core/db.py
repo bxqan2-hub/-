@@ -2307,11 +2307,11 @@ def _normalize_rebound_source_url(value: str) -> str:
 
 
 def import_rebound_accounts(records: list[dict], target_group_id: str = "default") -> tuple[list[dict], list[dict]]:
-    """导入独立换绑分站结果，并把原账号身份迁移到新邮箱。
+    """按第一段原邮箱删除旧账号，再用本行资料创建一个全新的账号。
 
-    两种格式都按第一段 ``原邮箱`` 精确匹配；密码、2FA、换绑后邮箱 URL 和
-    AT 都是换绑结果数据，不参与查找原账号。匹配成功后删除旧账号身份，只
-    保留换绑后邮箱并替换 AT，同时保留账号历史、套餐和其他业务字段。
+    这不是对旧账号行做字段替换：旧邮箱会从账号、全部分组和邮箱池删除；
+    新邮箱使用本行 URL 或密码/2FA/AT 创建，不继承旧账号套餐、检测状态、
+    历史或其他业务字段，并只加入调用方指定的当前分组。
     """
     target = str(target_group_id or "default").strip() or "default"
     if target == "archived":
@@ -2320,7 +2320,9 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
     with _LOCK:
         accounts = _load_accounts()
         groups = _load_account_groups()
+        outlook_rows = _load_outlook()
         generic_rows = _load_generic_api_emails()
+        domain_rows = _load_domain_pool()
         if target != "default" and not any(
             isinstance(group, dict) and str(group.get("id") or "") == target
             for group in groups
@@ -2329,11 +2331,13 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
 
         original_accounts = copy.deepcopy(accounts)
         original_groups = copy.deepcopy(groups)
+        original_outlook_rows = copy.deepcopy(outlook_rows)
         original_generic_rows = copy.deepcopy(generic_rows)
+        original_domain_rows = copy.deepcopy(domain_rows)
         updated: list[dict] = []
         skipped: list[dict] = []
         seen_new_emails: set[str] = set()
-        email_pool_changed = False
+        next_account_id = _next_id(accounts)
 
         for index, raw in enumerate(records or [], start=1):
             new_email = str(raw.get("email") or raw.get("new_email") or "").strip()
@@ -2367,10 +2371,6 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             matches = [
                 row for row in accounts
                 if str(row.get("email") or "").strip().lower() == normalized_hint
-                or (
-                    str(row.get("email") or "").strip().lower() == normalized_new
-                    and str(row.get("email_rebind_from") or "").strip().lower() == normalized_hint
-                )
             ]
             no_match_reason = "未找到原邮箱完全匹配的主站账号"
             duplicate_reason = "原邮箱匹配到多个账号，已避免误替换"
@@ -2381,114 +2381,74 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             if len(matches) > 1:
                 skipped.append({"line": index, "email": new_email, "reason": duplicate_reason})
                 continue
-            row = matches[0]
-            matched_email = str(row.get("email") or "").strip()
-            already_rebound = matched_email.lower() == normalized_new
-            conflict = next((
-                other for other in accounts
-                if other is not row and str(other.get("email") or "").strip().lower() == normalized_new
-            ), None)
-            # 分站或其他导入可能已经创建了新邮箱记录。此时按用户要求保留新
-            # 邮箱记录、删除原邮箱记录，而不是因“新邮箱冲突”整行跳过。
-            target_row = conflict if conflict is not None else row
-            if already_rebound:
-                old_email = old_email_hint or str(row.get("email_rebind_from") or "").strip() or matched_email
-            else:
-                old_email = matched_email
+            old_row = matches[0]
+            old_email = str(old_row.get("email") or "").strip()
             normalized_old = old_email.lower()
             now = _now()
-            raw_extra = target_row.get("extra_json")
-            if isinstance(raw_extra, dict):
-                extra = dict(raw_extra)
-            else:
-                try:
-                    decoded = json.loads(str(raw_extra or "{}"))
-                    extra = dict(decoded) if isinstance(decoded, dict) else {}
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    extra = {}
-            history = extra.get("email_rebind_history")
-            if not isinstance(history, list):
-                history = []
-            if not history or history[-1].get("from") != old_email or history[-1].get("to") != new_email:
-                history.append({"from": old_email, "to": new_email, "imported_at": now})
-            extra["email_rebind_history"] = history[-20:]
-            extra["email_rebind_last"] = {"from": old_email, "to": new_email, "imported_at": now}
-            if credential_mode:
-                # 密码和 2FA 是换绑后账号的新资料，只保存到匹配到的原账号，
-                # 绝不拿它们反查其他账号。
-                extra["registration_password"] = password
-
-            target_row.update({
+            old_account_id = int(old_row.get("id") or 0)
+            removed_new_ids = [
+                int(item.get("id") or 0) for item in accounts
+                if item is not old_row and str(item.get("email") or "").strip().lower() == normalized_new
+            ]
+            # 先删除原账号；若新邮箱已经有残留账号，也删除后按本行数据重新建，
+            # 防止继续继承旧套餐、旧 AT 或旧检测结论。
+            accounts[:] = [
+                item for item in accounts
+                if str(item.get("email") or "").strip().lower() not in {normalized_old, normalized_new}
+            ]
+            new_row = {
+                "id": next_account_id,
                 "email": new_email,
+                "access_token": access_token,
                 "original_email_line": (
                     f"{new_email}----{source_api_url}" if source_url_mode else new_email
                 ),
-                "extra_json": json.dumps(extra, ensure_ascii=False),
-                "email_rebind_status": "success",
-                "email_rebind_label": "换绑过后的",
-                "email_rebind_from": old_email,
-                "email_rebound_at": now,
+                "email_source": "generic_api" if source_url_mode else "manual",
+                "import_source": "delete_old_add_new",
+                "at_validity_status": "unchecked",
+                "at_validity_valid": None,
+                "at_validity_checked_at": None,
                 "archived": False,
+                "created_at": now,
                 "updated_at": now,
-            })
+            }
             if credential_mode:
-                target_row["totp_secret"] = totp_secret
-            token_replaced = bool(access_token and access_token != str(target_row.get("access_token") or "").strip())
-            if access_token:
-                target_row["access_token"] = access_token
+                new_row["totp_secret"] = totp_secret
+                new_row["extra_json"] = json.dumps({"registration_password": password}, ensure_ascii=False)
             if plan_import_hint:
-                target_row["plan_import_hint"] = plan_import_hint
-                target_row["plan_import_hint_source"] = plan_import_hint_source or "access_token_claim"
-                target_row["plan_import_hint_at"] = now
-            if token_replaced:
-                # 只有输入实际带来新 AT 时，旧 token 的有效/失效结论才失效。
-                target_row["at_validity_status"] = "unchecked"
-                target_row["at_validity_valid"] = None
-                target_row["at_validity_checked_at"] = None
-                target_row["at_validity_error_code"] = None
-                target_row["at_validity_error"] = None
-                target_row["at_validity_http_status"] = None
-                target_row["at_validity_network_route"] = None
-                target_row["at_validity_proxy_used"] = None
-                target_row["at_validity_proxy_source"] = None
-                target_row["at_validity_proxy_fallback_reason"] = None
-                target_row["at_validity_attempt_count"] = None
-            target_row.pop("archived_at", None)
-            removed_original_account_id = None
-            if conflict is not None:
-                removed_original_account_id = int(row.get("id") or 0)
-                accounts.remove(row)
+                new_row["plan_import_hint"] = plan_import_hint
+                new_row["plan_import_hint_source"] = plan_import_hint_source or "access_token_claim"
+                new_row["plan_import_hint_at"] = now
+            new_row["copy_line"] = _account_line(new_row)
+            accounts.append(new_row)
+            next_account_id += 1
 
-            # URL 格式中的地址属于换绑后邮箱。同步迁移通用邮箱池，保证账号页
-            # “复制邮箱+URL”与后续收信都能按新邮箱取得该 URL；这里不使用 URL
-            # 查找原账号，原账号仍只由第一段 old_email 决定。
+            # 全局清除原邮箱的邮箱池身份。URL 格式再为新邮箱创建一条全新的
+            # 通用邮箱记录；它只使用本行 URL 和 AT。
+            outlook_rows[:] = [item for item in outlook_rows if str(item.get("email") or "").strip().lower() != normalized_old]
+            domain_rows[:] = [item for item in domain_rows if str(item.get("email") or "").strip().lower() != normalized_old]
+            generic_rows[:] = [
+                item for item in generic_rows
+                if str(item.get("email") or "").strip().lower()
+                not in ({normalized_old, normalized_new} if source_url_mode else {normalized_old})
+            ]
             if source_url_mode:
-                pool_row = _find_by_email(generic_rows, normalized_new) or _find_by_email(generic_rows, normalized_old)
-                if pool_row is None:
-                    pool_row = {
-                        "id": _next_id(generic_rows),
-                        "created_at": now,
-                        "imported_at": now,
-                        "note": None,
-                    }
-                    generic_rows.append(pool_row)
-                generic_rows[:] = [
-                    item for item in generic_rows
-                    if item is pool_row
-                    or str(item.get("email") or "").strip().lower() not in {normalized_old, normalized_new}
-                ]
-                pool_row.update({
+                pool_row = {
+                    "id": _next_id(generic_rows),
                     "email": new_email,
                     "code_url": source_api_url,
                     "provider": "generic_api",
                     "status": "used",
-                    "used_at": pool_row.get("used_at") or now,
-                    "registered_account_id": int(target_row.get("id") or 0),
+                    "used_at": now,
+                    "registered_account_id": int(new_row["id"]),
                     "access_token": access_token,
+                    "created_at": now,
+                    "imported_at": now,
                     "updated_at": now,
-                })
+                    "note": None,
+                }
                 pool_row["copy_line"] = _generic_api_email_line(pool_row)
-                email_pool_changed = True
+                generic_rows.append(pool_row)
 
             # 分组成员以邮箱保存。先从所有分组清除原/新邮箱，再仅写入当前目标组，
             # 因而“分组1旧邮箱 → 当前分组2新邮箱”的迁移不会留下幽灵成员。
@@ -2505,28 +2465,31 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
 
             seen_new_emails.add(normalized_new)
             updated.append({
-                "account_id": int(target_row.get("id") or 0),
+                "account_id": int(new_row["id"]),
                 "old_email": old_email,
                 "new_email": new_email,
                 "group_id": target,
-                "label": "换绑过后的",
+                "operation": "delete_old_add_new",
                 "match_mode": match_mode,
-                "removed_original_account_id": removed_original_account_id,
-                "token_replaced": token_replaced,
+                "removed_original_account_id": old_account_id,
+                "removed_existing_new_account_ids": removed_new_ids,
+                "token_replaced": True,
             })
 
         if updated:
             try:
                 _save_accounts(accounts)
                 _save_account_groups(groups)
-                if email_pool_changed:
-                    _save_generic_api_emails(generic_rows)
+                _save_outlook(outlook_rows)
+                _save_generic_api_emails(generic_rows)
+                _save_domain_pool(domain_rows)
             except Exception:
                 # 不创建本地备份文件；用内存中的提交前状态恢复持久化对象。
                 _save_accounts(original_accounts)
                 _save_account_groups(original_groups)
-                if email_pool_changed:
-                    _save_generic_api_emails(original_generic_rows)
+                _save_outlook(original_outlook_rows)
+                _save_generic_api_emails(original_generic_rows)
+                _save_domain_pool(original_domain_rows)
                 raise
         return updated, skipped
 

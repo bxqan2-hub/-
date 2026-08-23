@@ -89,14 +89,17 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual(payload["updated_count"], 1)
                 self.assertEqual(payload["format_counts"], {"old_new_password_2fa_at": 1})
                 self.assertEqual(payload["updated"][0]["match_mode"], "old_email")
+                self.assertEqual(payload["updated"][0]["operation"], "delete_old_add_new")
                 self.assertTrue(payload["updated"][0]["token_replaced"])
                 self.assertIsNone(db.get_account_by_email("old@example.com"))
                 account = db.get_account_by_email("new@example.com")
-                self.assertEqual(account["id"], 7)
+                self.assertEqual(account["id"], 8)
                 self.assertEqual(account["access_token"], "at-new")
                 self.assertEqual(account["totp_secret"], "GEZDGNBVGY3TQOJQ")
                 self.assertEqual(json.loads(account["extra_json"])["registration_password"], "ChangedPassword!")
                 self.assertEqual(account["at_validity_status"], "unchecked")
+                self.assertIsNone(account.get("plan_type"))
+                self.assertNotIn("email_rebind_from", account)
 
     def test_url_format_matches_old_email_not_url_and_keeps_new_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -131,7 +134,7 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual([row["email"] for row in pool], ["new@example.com"])
                 self.assertEqual(pool[0]["code_url"], "https://MAIL.example/new-code?id=99")
                 self.assertEqual(pool[0]["status"], "used")
-                copied = client.post("/api/emails/copy-mailbox-lines", json={"account_ids": [7]})
+                copied = client.post("/api/emails/copy-mailbox-lines", json={"account_ids": [account["id"]]})
                 self.assertEqual(copied.status_code, 200)
                 self.assertEqual(copied.get_json()["lines"], [
                     "new@example.com----https://MAIL.example/new-code?id=99"
@@ -181,7 +184,7 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual(account["plan_import_hint"], "plus")
                 self.assertEqual(account["plan_import_hint_source"], "api/auth/session")
 
-    def test_existing_rebound_account_is_kept_and_original_account_is_deleted(self):
+    def test_existing_new_account_and_original_are_deleted_before_fresh_insert(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._seed(root)
@@ -204,13 +207,15 @@ class ReboundAccountImportTests(unittest.TestCase):
                 }], target_group_id="group-2")
 
                 self.assertEqual(skipped, [])
-                self.assertEqual(updated[0]["account_id"], 8)
+                self.assertEqual(updated[0]["account_id"], 9)
                 self.assertEqual(updated[0]["removed_original_account_id"], 7)
+                self.assertEqual(updated[0]["removed_existing_new_account_ids"], [8])
                 self.assertIsNone(db.get_account(7))
-                kept = db.get_account(8)
+                self.assertIsNone(db.get_account(8))
+                kept = db.get_account(9)
                 self.assertEqual(kept["email"], "new@example.com")
                 self.assertEqual(kept["access_token"], "at-replacement")
-                self.assertEqual(kept["plan_type"], "plus")
+                self.assertIsNone(kept.get("plan_type"))
                 self.assertEqual(len(db.list_accounts()), 1)
 
     def test_import_replaces_identity_and_moves_from_group_one_to_group_two(self):
@@ -227,13 +232,14 @@ class ReboundAccountImportTests(unittest.TestCase):
                 }], target_group_id="group-2")
 
                 self.assertEqual(skipped, [])
-                self.assertEqual(updated[0]["account_id"], 7)
-                account = db.get_account(7)
+                self.assertEqual(updated[0]["account_id"], 8)
+                account = db.get_account(8)
                 self.assertEqual(account["email"], "new@example.com")
                 self.assertEqual(account["access_token"], "at-new")
                 self.assertEqual(account["totp_secret"], "JBSWY3DPEHPK3PXP")
-                self.assertEqual(account["plan_type"], "free")
-                self.assertEqual(account["email_rebind_label"], "换绑过后的")
+                self.assertIsNone(account.get("plan_type"))
+                self.assertEqual(account["import_source"], "delete_old_add_new")
+                self.assertNotIn("email_rebind_label", account)
                 self.assertEqual(root.joinpath("accounts.txt").read_text(encoding="utf-8"), "new@example.com\n")
                 groups = {group["id"]: group for group in db.list_account_groups()}
                 self.assertEqual(groups["group-1"]["emails"], [])
@@ -270,7 +276,7 @@ class ReboundAccountImportTests(unittest.TestCase):
 
                 self.assertEqual(skipped, [])
                 self.assertEqual(updated[0]["old_email"], "old@example.com")
-                self.assertEqual(db.get_account(7)["email"], "new@example.com")
+                self.assertEqual(db.get_account_by_email("new@example.com")["id"], 8)
                 groups = {group["id"]: group for group in db.list_account_groups()}
                 self.assertEqual(groups["group-1"]["emails"], [])
                 self.assertEqual(groups["group-2"]["emails"], ["new@example.com"])
@@ -306,18 +312,18 @@ class ReboundAccountImportTests(unittest.TestCase):
                 payload = response.get_json()
                 self.assertEqual(payload["updated_count"], 1)
                 self.assertEqual(payload["updated"][0]["old_email"], "old@example.com")
-                self.assertEqual(db.get_account(7)["email"], "new@example.com")
+                self.assertEqual(db.get_account_by_email("new@example.com")["id"], 8)
 
     def test_template_exposes_rebound_import_controls_and_label(self):
         template = Path("webui/templates/index.html").read_text(encoding="utf-8")
         self.assertIn('id="btnImportReboundAccountsV2"', template)
         self.assertIn('id="reboundImportModal"', template)
-        self.assertIn("换绑过后的", template)
+        self.assertIn("删除原邮箱并添加新邮箱", template)
         self.assertIn("/api/accounts/import-rebound", template)
-        self.assertIn("原邮箱+换绑后邮箱+密码+2FA+AT", template)
-        self.assertIn("原邮箱+换绑后邮箱+换绑后邮箱URL+AT", template)
-        self.assertIn("两种格式都只按第一段原邮箱查询", template)
-        self.assertIn("删除账号列表中的原邮箱", template)
+        self.assertIn("原邮箱+新邮箱+密码+2FA+AT", template)
+        self.assertIn("原邮箱+新邮箱+新邮箱URL+AT", template)
+        self.assertIn("全局删除原邮箱", template)
+        self.assertIn("新账号不继承原账号套餐、检测状态或历史", template)
 
 
 if __name__ == "__main__":

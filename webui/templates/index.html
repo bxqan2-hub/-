@@ -2489,7 +2489,7 @@
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCreateAccountGroupV2" title="新建一个本地账号分组">新建</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnManualAddAccountV2" title="直接添加邮箱+取码URL+AT，或邮箱+密码+2FA+AT，并可立即查询套餐">添加账号</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnBatchReplaceAtV2" title="支持原始 AT、Bearer、邮箱+AT、完整 /api/auth/session JSON 或 JSON 数组，自动识别邮箱并替换">批量导入AT</button>
-            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="导入独立换绑分站结果；删除原邮箱账号身份、保留换绑后邮箱，并迁移到当前分组">导入换绑邮箱</button>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="按第一段原邮箱全局删除旧账号，再用本行资料向当前分组添加新邮箱">导入新邮箱</button>
             <button type="button" class="jobs-tb-btn" id="btnRenameAccountGroupV2" disabled title="修改当前分组名称">重命名</button>
             <button type="button" class="jobs-tb-btn" id="btnDeleteAccountGroupV2" disabled title="仅删除当前分组，不删除其中账号">删除</button>
           </div>
@@ -2950,8 +2950,8 @@
   <div class="outlook-import-dialog" role="document">
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
-        <h3 id="reboundImportTitle">导入换绑邮箱</h3>
-        <p>粘贴独立换绑分站导出的结果。两种格式都只查询第一段原邮箱；密码、2FA、换绑后邮箱 URL 和 AT 不参与匹配。</p>
+        <h3 id="reboundImportTitle">删除原邮箱并添加新邮箱</h3>
+        <p>两种格式都只查询第一段原邮箱；找到后全局删除原邮箱，再用本行的新邮箱、URL 或密码/2FA 和 AT 创建全新账号。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseReboundImport" aria-label="关闭">×</button>
     </div>
@@ -2961,14 +2961,14 @@
         <span>导入目标：<strong id="reboundImportGroupNameV2">当前分组</strong><br><small>匹配成功后，原邮箱会从全部旧分组清除，新邮箱只显示在这个分组。</small></span>
       </div>
       <label class="outlook-import-field">
-        <span>换绑完成结果（原邮箱+换绑后邮箱+密码+2FA+AT，或原邮箱+换绑后邮箱+换绑后邮箱URL+AT）</span>
+        <span>新邮箱结果（原邮箱+新邮箱+密码+2FA+AT，或原邮箱+新邮箱+新邮箱URL+AT）</span>
         <textarea id="reboundImportTextV2" placeholder="old@example.com----new@example.com----新OpenAI密码----新MFA Secret----新accessToken&#10;old@example.com----new@example.com----https://换绑后邮箱取码地址----新accessToken"></textarea>
-        <span class="outlook-import-hint">两种格式都只按第一段原邮箱查询。最后一段支持原始 AT 或完整 /api/auth/session JSON；识别成功后删除账号列表中的原邮箱，只保留换绑后的邮箱并替换 AT。</span>
+        <span class="outlook-import-hint">最后一段支持原始 AT 或完整 /api/auth/session JSON。新账号不继承原账号套餐、检测状态或历史，只使用本行资料并加入当前分组。</span>
       </label>
     </div>
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelReboundImport">取消</button>
-      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitReboundImport">识别、替换并迁移分组</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitReboundImport">删除原邮箱并添加新邮箱</button>
     </div>
   </div>
 </div>
