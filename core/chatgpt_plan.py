@@ -191,8 +191,8 @@ def token_claims(token: str) -> dict:
         expired = datetime.now(tz=timezone.utc).timestamp() >= float(exp)
     return {
         "payload": payload,
-        "email": profile.get("email"),
-        "user_name": profile.get("name"),
+        "email": payload.get("email") or profile.get("email"),
+        "user_name": payload.get("name") or profile.get("name"),
         "user_id": auth.get("chatgpt_user_id") or auth.get("user_id"),
         "account_id": auth.get("chatgpt_account_id"),
         "claim_plan_type": auth.get("chatgpt_plan_type"),

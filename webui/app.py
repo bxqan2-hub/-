@@ -25,7 +25,7 @@ from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, at_validity_scheduler
-from core import integrated_runtime
+from core import chatgpt_plan, integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
 from core.mail_status_detector import detect_mailbox_status
@@ -103,6 +103,28 @@ def _parse_manual_account_lines(text: str) -> tuple[list[dict], list[dict]]:
         seen.add(normalized_email)
         records.append(record)
     return records, invalid
+
+
+def _access_token_identity(raw_token: str) -> dict:
+    """本地解析 OpenAI AT 的邮箱和到期时间；凭据只留在进程内。"""
+    token = chatgpt_plan.normalize_token(str(raw_token or ""))
+    if not token:
+        raise ValueError("AT 不能为空")
+    if len(token) > 32_768:
+        raise ValueError("AT 长度异常")
+    if len(token.split(".")) != 3:
+        raise ValueError("AT 不是有效的 JWT 格式")
+    claims = chatgpt_plan.token_claims(token)
+    email = str(claims.get("email") or "").strip()
+    if not email or "@" not in email:
+        raise ValueError("AT 中未识别到邮箱信息")
+    return {
+        "access_token": token,
+        "email": email,
+        "token_expires_at": claims.get("token_expires_at"),
+        "token_expired": claims.get("token_expired"),
+        "exp": claims.get("exp"),
+    }
 
 
 def _rewrite_integrated_location(value: str, prefix: str) -> str:
@@ -1018,6 +1040,95 @@ def create_app(auth_code: str | None = None) -> Flask:
             "workers": workers,
         }
         return jsonify(payload), 202 if started else 200
+
+    @app.post("/api/accounts/<int:acc_id>/replace-at")
+    def api_account_replace_at(acc_id: int):
+        """替换指定账号的 AT；JWT 内邮箱必须与该账号一致。"""
+        account = db.get_account(acc_id)
+        if not account:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        data = request.get_json(silent=True) or {}
+        try:
+            identity = _access_token_identity(data.get("access_token") or data.get("token") or "")
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        account_email = str(account.get("email") or "").strip()
+        if identity["email"].casefold() != account_email.casefold():
+            return jsonify({
+                "ok": False,
+                "error": f"AT 邮箱 {identity['email']} 与当前账号 {account_email} 不一致",
+            }), 409
+        updated, skipped = db.replace_account_access_tokens([{
+            **identity,
+            "account_id": acc_id,
+            "source": "single_replace",
+        }])
+        if not updated:
+            return jsonify({
+                "ok": False,
+                "error": (skipped[0].get("reason") if skipped else "AT 替换失败"),
+            }), 404
+        return jsonify({"ok": True, "updated": updated[0]})
+
+    @app.post("/api/accounts/replace-at-bulk")
+    def api_accounts_replace_at_bulk():
+        """解析每个 AT 的邮箱 claim，自动匹配现有账号并替换。"""
+        data = request.get_json(silent=True) or {}
+        lines = [line.strip() for line in str(data.get("text") or "").splitlines() if line.strip()]
+        if not lines:
+            return jsonify({"ok": False, "error": "请粘贴至少一个 AT"}), 400
+        if len(lines) > 5000:
+            return jsonify({"ok": False, "error": "单次最多导入 5000 个 AT"}), 400
+
+        candidates: dict[str, dict] = {}
+        skipped: list[dict] = []
+        for line_number, raw_token in enumerate(lines, start=1):
+            try:
+                identity = _access_token_identity(raw_token)
+            except ValueError as exc:
+                skipped.append({"line": line_number, "reason": str(exc)})
+                continue
+            normalized_email = identity["email"].casefold()
+            identity.update({"line": line_number, "source": "bulk_claim_email"})
+            previous = candidates.get(normalized_email)
+            if previous is not None:
+                previous_exp = previous.get("exp")
+                current_exp = identity.get("exp")
+                previous_rank = float(previous_exp) if isinstance(previous_exp, (int, float)) else -1
+                current_rank = float(current_exp) if isinstance(current_exp, (int, float)) else -1
+                if current_rank >= previous_rank:
+                    skipped.append({
+                        "line": previous.get("line"),
+                        "email": previous.get("email"),
+                        "reason": "同邮箱存在多个 AT，已采用到期时间较晚的一条",
+                    })
+                    candidates[normalized_email] = identity
+                else:
+                    skipped.append({
+                        "line": line_number,
+                        "email": identity.get("email"),
+                        "reason": "同邮箱存在多个 AT，已采用到期时间较晚的一条",
+                    })
+                continue
+            candidates[normalized_email] = identity
+
+        if not candidates:
+            return jsonify({
+                "ok": False,
+                "error": "没有识别到包含邮箱信息的有效 AT",
+                "skipped": skipped,
+                "skipped_count": len(skipped),
+            }), 400
+        updated, db_skipped = db.replace_account_access_tokens(list(candidates.values()))
+        skipped.extend(db_skipped)
+        return jsonify({
+            "ok": True,
+            "parsed_count": len(candidates),
+            "updated": updated,
+            "updated_count": len(updated),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+        })
 
     @app.post("/api/accounts/filter-emails")
     def api_accounts_filter_emails():

@@ -786,6 +786,9 @@
       display: flex; flex-direction: column; align-items: center;
       justify-content: center; gap: 5px; width: 100%; min-width: 0;
     }
+    #accountsPanelV2 .account-token-actions {
+      display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap;
+    }
     #accountsPanelV2 .acc-v2-twofa,
     .plus-pool-table .acc-v2-twofa {
       display: flex; flex-direction: column; align-items: center; gap: 3px;
@@ -1000,6 +1003,12 @@
     }
     .accounts-table-v2 .acc-v2-token-copy:disabled {
       opacity: .55; cursor: not-allowed;
+    }
+    .accounts-table-v2 .acc-v2-token-replace {
+      color: #377DFF; background: #ecf5ff; border-color: #a0cfff;
+    }
+    .accounts-table-v2 .acc-v2-token-replace:hover:not(:disabled) {
+      color: #fff; background: #377DFF; border-color: #377DFF;
     }
     .accounts-table-v2 .acc-v2-codex {
       font-size: 13px; font-weight: 500;
@@ -1706,6 +1715,7 @@
     #outlookImportModal:not(.hidden),
     #reboundImportModal:not(.hidden),
     #manualAccountAddModal:not(.hidden),
+    #atReplaceModal:not(.hidden),
     #proxyApiImportModal:not(.hidden),
     #detectionProxyImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
@@ -2478,6 +2488,7 @@
             </select>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCreateAccountGroupV2" title="新建一个本地账号分组">新建</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnManualAddAccountV2" title="直接添加邮箱+取码URL+AT，或邮箱+密码+2FA+AT，并可立即查询套餐">添加账号</button>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnBatchReplaceAtV2" title="批量粘贴 AT，读取每个 JWT 内的邮箱并自动替换现有账号 AT">批量导入AT</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="导入独立换绑分站结果；替换原账号邮箱和AT，并迁移到当前分组">导入换绑邮箱</button>
             <button type="button" class="jobs-tb-btn" id="btnRenameAccountGroupV2" disabled title="修改当前分组名称">重命名</button>
             <button type="button" class="jobs-tb-btn" id="btnDeleteAccountGroupV2" disabled title="仅删除当前分组，不删除其中账号">删除</button>
@@ -2988,6 +2999,29 @@
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelManualAccountAdd">取消</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitManualAccountAdd">添加账号</button>
+    </div>
+  </div>
+</div>
+<div id="atReplaceModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="atReplaceTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="atReplaceTitle">批量导入 AT</h3>
+        <p id="atReplaceDescription">每行粘贴一个 AT。系统读取 JWT 内的邮箱，匹配账号页现有邮箱并替换 AT。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseAtReplace" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="outlook-import-result" id="atReplaceResultV2"></div>
+      <label class="outlook-import-field">
+        <span id="atReplaceFieldLabelV2">AT 列表</span>
+        <textarea id="atReplaceTextV2" rows="10" placeholder="eyJ...&#10;eyJ..." autocomplete="off" spellcheck="false"></textarea>
+        <span class="outlook-import-hint" id="atReplaceHintV2">每行一个 AT；支持带 Bearer 或 Authorization: 前缀。重复邮箱自动采用到期时间较晚的 AT。</span>
+      </label>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelAtReplace">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitAtReplace">识别邮箱并替换</button>
     </div>
   </div>
 </div>
@@ -3761,6 +3795,7 @@ function updateModalScrollLock() {
     || !$('#outlookImportModal').classList.contains('hidden')
     || !$('#reboundImportModal').classList.contains('hidden')
     || !$('#manualAccountAddModal').classList.contains('hidden')
+    || !$('#atReplaceModal').classList.contains('hidden')
     || !$('#proxyApiImportModal').classList.contains('hidden')
     || !$('#detectionProxyImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
@@ -4371,6 +4406,95 @@ function bindManualAccountAddModal() {
     if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeManualAccountAddModal();
   });
 }
+let AT_REPLACE_ACCOUNT_ID = null;
+function openAtReplaceModal(accountId = null) {
+  const modal = $('#atReplaceModal');
+  if (!modal) return;
+  AT_REPLACE_ACCOUNT_ID = Number.isFinite(Number(accountId)) && Number(accountId) > 0 ? Number(accountId) : null;
+  const account = AT_REPLACE_ACCOUNT_ID ? ACCOUNTS.find(item => Number(item.id) === AT_REPLACE_ACCOUNT_ID) : null;
+  if (AT_REPLACE_ACCOUNT_ID && !account) {
+    showToast('账号不存在或当前页已刷新');
+    AT_REPLACE_ACCOUNT_ID = null;
+    return;
+  }
+  const single = Boolean(account);
+  $('#atReplaceTitle').textContent = single ? '替换账号 AT' : '批量导入 AT';
+  $('#atReplaceDescription').textContent = single
+    ? `当前账号：${account.email}。系统会校验 AT 内邮箱，匹配后再替换。`
+    : '每行粘贴一个 AT。系统读取 JWT 内的邮箱，匹配账号页现有邮箱并替换 AT。';
+  $('#atReplaceFieldLabelV2').textContent = single ? '新的 AT' : 'AT 列表';
+  $('#atReplaceHintV2').textContent = single
+    ? '粘贴一个 AT；JWT 内邮箱必须与当前账号一致。'
+    : '每行一个 AT；支持带 Bearer 或 Authorization: 前缀。重复邮箱自动采用到期时间较晚的 AT。';
+  $('#btnSubmitAtReplace').textContent = single ? '校验并替换' : '识别邮箱并替换';
+  const text = $('#atReplaceTextV2');
+  if (text) {
+    text.value = '';
+    text.rows = single ? 5 : 10;
+    text.placeholder = single ? 'eyJ...' : 'eyJ...\neyJ...';
+  }
+  const result = $('#atReplaceResultV2');
+  if (result) result.innerHTML = '';
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+  setTimeout(() => text?.focus(), 50);
+}
+function closeAtReplaceModal() {
+  $('#atReplaceModal')?.classList.add('hidden');
+  AT_REPLACE_ACCOUNT_ID = null;
+  updateModalScrollLock();
+}
+async function submitAtReplace() {
+  const text = $('#atReplaceTextV2')?.value || '';
+  const resultEl = $('#atReplaceResultV2');
+  const button = $('#btnSubmitAtReplace');
+  if (!text.trim()) { showToast('请粘贴 AT'); return; }
+  if (button) button.disabled = true;
+  try {
+    let result;
+    let message;
+    if (AT_REPLACE_ACCOUNT_ID) {
+      result = await api(`/api/accounts/${encodeURIComponent(AT_REPLACE_ACCOUNT_ID)}/replace-at`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({access_token:text.trim()}),
+      });
+      message = `已替换 ${result.updated?.email || '当前账号'} 的 AT`;
+      ACCOUNT_SELECTED.clear();
+      ACCOUNT_SELECTED.add(Number(result.updated?.id || AT_REPLACE_ACCOUNT_ID));
+    } else {
+      result = await api('/api/accounts/replace-at-bulk', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text}),
+      });
+      message = `已按 AT 邮箱自动替换 ${result.updated_count || 0} 个账号` +
+        ((result.skipped_count || 0) ? `；跳过 ${result.skipped_count} 条` : '');
+      ACCOUNT_SELECTED.clear();
+      (result.updated || []).forEach(item => ACCOUNT_SELECTED.add(Number(item.id)));
+    }
+    if (resultEl) resultEl.innerHTML = `<div class="banner ${(result.updated?.id || result.updated_count) ? 'info' : 'warn'}">${esc(message)}</div>`;
+    await loadAccounts();
+    await loadSummary();
+    showToast(message);
+    const fullyDone = AT_REPLACE_ACCOUNT_ID || !(result.skipped_count || 0);
+    if (fullyDone) setTimeout(closeAtReplaceModal, 900);
+  } catch (error) {
+    if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(error.message)}</div>`;
+    else showToast('替换 AT 失败: ' + error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+function bindAtReplaceModal() {
+  const modal = $('#atReplaceModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  $('#btnCloseAtReplace')?.addEventListener('click', closeAtReplaceModal);
+  $('#btnCancelAtReplace')?.addEventListener('click', closeAtReplaceModal);
+  $('#btnSubmitAtReplace')?.addEventListener('click', submitAtReplace);
+  modal.addEventListener('click', event => { if (event.target === modal) closeAtReplaceModal(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeAtReplaceModal();
+  });
+}
 async function loadAccounts() {
   if (accountsLoading) return;
   accountsLoading = true;
@@ -4838,10 +4962,11 @@ function _tokenCellV2(r) {
     atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#e6a23c">${errorLabel}</div>`;
   }
   const twoFaHtml = _twoFaCellV2(r);
+  const replaceButton = `<button type="button" class="acc-v2-token-copy acc-v2-token-replace" data-account-replace-at="${esc(r.id)}" title="粘贴并替换这个账号的 AT；会校验 JWT 内邮箱与当前账号一致">替换 AT</button>`;
   if (r.has_access_token) {
-    return `<div class="account-token-stack"><button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制 AT</button>${twoFaHtml}${atHtml}${liveHtml}</div>`;
+    return `<div class="account-token-stack"><div class="account-token-actions"><button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制 AT</button>${replaceButton}</div>${twoFaHtml}${atHtml}${liveHtml}</div>`;
   }
-  return `<div class="account-token-stack"><span class="pill status-failed">无 AT</span>${twoFaHtml}${atHtml}${liveHtml}</div>`;
+  return `<div class="account-token-stack"><div class="account-token-actions"><span class="pill status-failed">无 AT</span>${replaceButton}</div>${twoFaHtml}${atHtml}${liveHtml}</div>`;
 }
 function _accountsV2MoreMenu(r) {
   const parts = [
@@ -5313,6 +5438,12 @@ async function onAccountsBodyClick(e) {
   const mailCheckBtn = e.target.closest('[data-account-mail-check]');
   if (mailCheckBtn) {
     await checkAccountMailbox(Number(mailCheckBtn.dataset.accountMailCheck), mailCheckBtn);
+    return;
+  }
+
+  const replaceAtBtn = e.target.closest('[data-account-replace-at]');
+  if (replaceAtBtn) {
+    openAtReplaceModal(Number(replaceAtBtn.dataset.accountReplaceAt));
     return;
   }
 
@@ -6542,6 +6673,7 @@ async function findSelectedAccountsInEmailPool() {
   };
   bind('btnCreateAccountGroupV2', createAccountGroup);
   bind('btnManualAddAccountV2', openManualAccountAddModal);
+  bind('btnBatchReplaceAtV2', () => openAtReplaceModal());
   bind('btnRenameAccountGroupV2', renameActiveAccountGroup);
   bind('btnDeleteAccountGroupV2', deleteActiveAccountGroup);
   bind('btnAddSelectedToAccountGroupV2', addSelectedAccountsToGroup);
@@ -6574,6 +6706,7 @@ async function findSelectedAccountsInEmailPool() {
   ));
   bindReboundImportModal();
   bindManualAccountAddModal();
+  bindAtReplaceModal();
 })();
 
 // ---------- Plus 邮件检测 ----------

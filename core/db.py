@@ -2172,6 +2172,21 @@ def get_account_by_email(email: str) -> dict | None:
         return _decorate_account(row) if row else None
 
 
+def _reset_account_at_validity_fields(row: dict) -> None:
+    row["at_validity_status"] = "unchecked"
+    row["at_validity_valid"] = None
+    row["at_validity_checked_at"] = None
+    row["at_validity_error_code"] = None
+    row["at_validity_error"] = None
+    row["at_validity_http_status"] = None
+    row["at_validity_trigger"] = None
+    row["at_validity_network_route"] = None
+    row["at_validity_proxy_used"] = None
+    row["at_validity_proxy_source"] = None
+    row["at_validity_proxy_fallback_reason"] = None
+    row["at_validity_attempt_count"] = None
+
+
 def reset_account_at_validity(acc_id: int) -> bool:
     """新 AT 落库后清除旧 token 的有效性结论，等待下一次独立 AT 检测。"""
     with _LOCK:
@@ -2179,20 +2194,76 @@ def reset_account_at_validity(acc_id: int) -> bool:
         row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
         if row is None:
             return False
-        row["at_validity_status"] = "unchecked"
-        row["at_validity_valid"] = None
-        row["at_validity_checked_at"] = None
-        row["at_validity_error_code"] = None
-        row["at_validity_error"] = None
-        row["at_validity_http_status"] = None
-        row["at_validity_network_route"] = None
-        row["at_validity_proxy_used"] = None
-        row["at_validity_proxy_source"] = None
-        row["at_validity_proxy_fallback_reason"] = None
-        row["at_validity_attempt_count"] = None
+        _reset_account_at_validity_fields(row)
         row["updated_at"] = _now()
         _save_accounts(accounts)
         return True
+
+
+def replace_account_access_tokens(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    """按账号 ID 或 token claim 邮箱批量替换 AT，并同步关联邮箱池。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        outlook_rows = _load_outlook()
+        generic_rows = _load_generic_api_emails()
+        domain_rows = _load_domain_pool()
+        accounts_by_id = {int(row.get("id") or 0): row for row in accounts}
+        accounts_by_email = {
+            str(row.get("email") or "").strip().lower(): row
+            for row in accounts
+            if str(row.get("email") or "").strip()
+        }
+        updated: list[dict] = []
+        skipped: list[dict] = []
+        seen_ids: set[int] = set()
+        now = _now()
+
+        for raw in records or []:
+            token = str(raw.get("access_token") or "").strip()
+            email_hint = str(raw.get("email") or "").strip()
+            try:
+                account_id = int(raw.get("account_id")) if raw.get("account_id") is not None else 0
+            except (TypeError, ValueError):
+                account_id = 0
+            row = accounts_by_id.get(account_id) if account_id else accounts_by_email.get(email_hint.lower())
+            if row is None:
+                skipped.append({"email": email_hint or None, "reason": "未找到现有账号"})
+                continue
+            row_id = int(row.get("id") or 0)
+            if row_id in seen_ids:
+                skipped.append({"id": row_id, "email": row.get("email"), "reason": "同一账号重复"})
+                continue
+            if not token:
+                skipped.append({"id": row_id, "email": row.get("email"), "reason": "AT 为空"})
+                continue
+
+            row["access_token"] = token
+            row["token_expires_at"] = raw.get("token_expires_at")
+            row["token_expired"] = raw.get("token_expired")
+            row["access_token_replaced_at"] = now
+            row["access_token_replace_source"] = str(raw.get("source") or "manual")[:40]
+            _reset_account_at_validity_fields(row)
+            row["updated_at"] = now
+            normalized_email = str(row.get("email") or "").strip().lower()
+            for pool_rows in (outlook_rows, generic_rows, domain_rows):
+                pool_row = _find_by_email(pool_rows, normalized_email)
+                if pool_row is not None:
+                    pool_row["access_token"] = token
+                    pool_row["updated_at"] = now
+            seen_ids.add(row_id)
+            updated.append({
+                "id": row_id,
+                "email": row.get("email"),
+                "source": row.get("access_token_replace_source"),
+                "replaced_at": now,
+            })
+
+        if updated:
+            _save_accounts(accounts)
+            _save_outlook(outlook_rows)
+            _save_generic_api_emails(generic_rows)
+            _save_domain_pool(domain_rows)
+        return updated, skipped
 
 
 def _stored_registration_password(row: dict) -> str:
