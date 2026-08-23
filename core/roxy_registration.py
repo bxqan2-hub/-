@@ -2479,9 +2479,18 @@ def _submit_signup_password_direct(driver, password: str) -> dict:
     setValue(input, password);
     const form = input.closest('form');
     const scope = form || document;
-    const buttons = [...scope.querySelectorAll('button,input[type="submit"]')]
+    const allButtons = [...scope.querySelectorAll('button,input[type="submit"]')]
       .filter(el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
         && !el.disabled && el.getAttribute('aria-disabled') !== 'true')
+    // The password page also renders a visible type="button" control (for
+    // example a password visibility toggle) beside the real Continue submit.
+    // Prefer an explicit submit control so a hydration/layout change cannot
+    // consume the click without advancing the auth transaction.
+    const submitButtons = allButtons.filter(el =>
+      (el.matches && el.matches('button[type="submit"],input[type="submit"]'))
+      || String(el.getAttribute('type') || '').toLowerCase() === 'submit'
+    );
+    const buttons = (submitButtons.length ? submitButtons : allButtons)
       .map((el, idx) => {
         const r = el.getBoundingClientRect();
         const ir = input.getBoundingClientRect();
@@ -2491,9 +2500,14 @@ def _submit_signup_password_direct(driver, password: str) -> dict:
       .filter(x => x.below)
       .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
     if (!buttons.length) return {ok:false, reason:'missing_submit'};
-    buttons[0].el.scrollIntoView({block:'center'});
-    buttons[0].el.click();
-    return {ok:true, reason:'submitted_password'};
+    const submit = buttons[0].el;
+    submit.scrollIntoView({block:'center'});
+    if (form && typeof form.requestSubmit === 'function' && submit.tagName === 'BUTTON') {
+      form.requestSubmit(submit);
+      return {ok:true, reason:'submitted_password', method:'requestSubmit'};
+    }
+    submit.click();
+    return {ok:true, reason:'submitted_password', method:'click'};
     """, str(password or "")) or {}
 
 

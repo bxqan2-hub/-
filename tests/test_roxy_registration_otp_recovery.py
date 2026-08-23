@@ -489,7 +489,9 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
                 )
         password_target_script = driver.execute_script.call_args.args[0]
         self.assertIn("HTMLInputElement.prototype", password_target_script)
-        self.assertIn("buttons[0].el.click()", password_target_script)
+        self.assertIn("submit.click()", password_target_script)
+        self.assertIn("form.requestSubmit(submit)", password_target_script)
+        self.assertIn("button[type=\"submit\"],input[type=\"submit\"]", password_target_script)
         self.assertEqual(checkpoints, [])
 
     def test_password_form_noop_is_relocated_and_submitted_once_more(self):
