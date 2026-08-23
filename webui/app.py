@@ -897,6 +897,22 @@ def create_app(auth_code: str | None = None) -> Flask:
             for row in db.list_generic_api_email_pool(limit=1_000_000)
             if str(row.get("email") or "").strip()
         }
+        # 历史换绑记录已经把 URL 保存在账号 original_email_line 中，但旧版本
+        # 没有同步通用邮箱池。以账号行作为只读兜底，避免“复制邮箱+URL”只复制
+        # 出邮箱；邮箱池中已有 URL 时仍以邮箱池为准。
+        for account in db.list_accounts(limit=1_000_000, archived=False):
+            email = str(account.get("email") or "").strip().lower()
+            if not email or url_by_email.get(email):
+                continue
+            original_line = str(account.get("original_email_line") or "").strip()
+            delimiter = "----" if "----" in original_line else "====" if "====" in original_line else ""
+            fields = [field.strip() for field in original_line.split(delimiter)] if delimiter else []
+            code_url = next((
+                field for field in fields[1:]
+                if field.lower().startswith(("http://", "https://"))
+            ), "")
+            if code_url:
+                url_by_email[email] = code_url
         lines: list[str] = []
         missing_url_count = 0
         for email in emails:

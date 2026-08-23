@@ -127,6 +127,34 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual(account["access_token"], "at-new")
                 self.assertEqual(account["at_validity_status"], "unchecked")
                 self.assertEqual(account["original_email_line"], "new@example.com----https://MAIL.example/new-code?id=99")
+                pool = db.list_generic_api_email_pool(limit=100)
+                self.assertEqual([row["email"] for row in pool], ["new@example.com"])
+                self.assertEqual(pool[0]["code_url"], "https://MAIL.example/new-code?id=99")
+                self.assertEqual(pool[0]["status"], "used")
+                copied = client.post("/api/emails/copy-mailbox-lines", json={"account_ids": [7]})
+                self.assertEqual(copied.status_code, 200)
+                self.assertEqual(copied.get_json()["lines"], [
+                    "new@example.com----https://MAIL.example/new-code?id=99"
+                ])
+                self.assertEqual(copied.get_json()["missing_url_count"], 0)
+
+    def test_copy_mailbox_url_falls_back_to_rebound_account_line(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._seed(root)
+            accounts = json.loads(root.joinpath("accounts.json").read_text(encoding="utf-8"))
+            accounts[0]["email"] = "new@example.com"
+            accounts[0]["original_email_line"] = "new@example.com----https://mail.example/rebound"
+            root.joinpath("accounts.json").write_text(json.dumps(accounts), encoding="utf-8")
+            with self._patch_storage(root):
+                client = create_app(auth_code="test-auth").test_client()
+                client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
+                response = client.post("/api/emails/copy-mailbox-lines", json={"account_ids": [7]})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["lines"], [
+                    "new@example.com----https://mail.example/rebound"
+                ])
+                self.assertEqual(response.get_json()["missing_url_count"], 0)
 
     def test_url_format_extracts_real_at_from_full_session_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:

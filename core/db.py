@@ -2320,6 +2320,7 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
     with _LOCK:
         accounts = _load_accounts()
         groups = _load_account_groups()
+        generic_rows = _load_generic_api_emails()
         if target != "default" and not any(
             isinstance(group, dict) and str(group.get("id") or "") == target
             for group in groups
@@ -2328,9 +2329,11 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
 
         original_accounts = copy.deepcopy(accounts)
         original_groups = copy.deepcopy(groups)
+        original_generic_rows = copy.deepcopy(generic_rows)
         updated: list[dict] = []
         skipped: list[dict] = []
         seen_new_emails: set[str] = set()
+        email_pool_changed = False
 
         for index, raw in enumerate(records or [], start=1):
             new_email = str(raw.get("email") or raw.get("new_email") or "").strip()
@@ -2456,6 +2459,37 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
                 removed_original_account_id = int(row.get("id") or 0)
                 accounts.remove(row)
 
+            # URL 格式中的地址属于换绑后邮箱。同步迁移通用邮箱池，保证账号页
+            # “复制邮箱+URL”与后续收信都能按新邮箱取得该 URL；这里不使用 URL
+            # 查找原账号，原账号仍只由第一段 old_email 决定。
+            if source_url_mode:
+                pool_row = _find_by_email(generic_rows, normalized_new) or _find_by_email(generic_rows, normalized_old)
+                if pool_row is None:
+                    pool_row = {
+                        "id": _next_id(generic_rows),
+                        "created_at": now,
+                        "imported_at": now,
+                        "note": None,
+                    }
+                    generic_rows.append(pool_row)
+                generic_rows[:] = [
+                    item for item in generic_rows
+                    if item is pool_row
+                    or str(item.get("email") or "").strip().lower() not in {normalized_old, normalized_new}
+                ]
+                pool_row.update({
+                    "email": new_email,
+                    "code_url": source_api_url,
+                    "provider": "generic_api",
+                    "status": "used",
+                    "used_at": pool_row.get("used_at") or now,
+                    "registered_account_id": int(target_row.get("id") or 0),
+                    "access_token": access_token,
+                    "updated_at": now,
+                })
+                pool_row["copy_line"] = _generic_api_email_line(pool_row)
+                email_pool_changed = True
+
             # 分组成员以邮箱保存。先从所有分组清除原/新邮箱，再仅写入当前目标组，
             # 因而“分组1旧邮箱 → 当前分组2新邮箱”的迁移不会留下幽灵成员。
             for group in groups:
@@ -2485,10 +2519,14 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             try:
                 _save_accounts(accounts)
                 _save_account_groups(groups)
+                if email_pool_changed:
+                    _save_generic_api_emails(generic_rows)
             except Exception:
-                # 不创建本地备份文件；用内存中的提交前状态恢复两个持久化对象。
+                # 不创建本地备份文件；用内存中的提交前状态恢复持久化对象。
                 _save_accounts(original_accounts)
                 _save_account_groups(original_groups)
+                if email_pool_changed:
+                    _save_generic_api_emails(original_generic_rows)
                 raise
         return updated, skipped
 
