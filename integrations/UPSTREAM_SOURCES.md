@@ -24,15 +24,18 @@ Kakao OAICS protocol reference:
 GCash qualification reference:
 
 - [qualification-test](https://github.com/yeying-xingchen/qualification-test)
-  - Audited reference commit: `7d3973ea0a4b6ff20ac60154012eee87359c262c`
+  - Audited reference commit: `aaeb077ec2b6b6db68ac3339bf6e4181ebdd22dc`
   - Reference only; it is not deployed as another runtime service.
-  - The account-page GCash detector adopts its Checkout Sentinel/SO requirement,
-    Firefox 144 session continuity, HTTP-to-HTTPS proxy transport fallback,
-    three-step publication wait, GCash-specific `cpmt_*` classification, and
-    stable default concurrency of four workers.
-  - The local detector keeps the stronger PH billing/tax follow-up, whole-pool
-    proxy rotation, bounded total runtime, definitive-negative boundary, and
-    strict no-confirm/no-start behavior.
+  - The account-page GCash detector keeps its Checkout Sentinel/SO requirement,
+    Firefox 144 session continuity, HTTP-to-HTTPS proxy transport fallback, and
+    the upstream's known opaque GCash `cpmt_*` identifier.
+  - For lower latency, the local detector intentionally diverges from the
+    upstream's OAICS-prefix requirement and three-step state polling. It creates
+    one PH/PHP Checkout, reads explicit GCash evidence from that creation
+    response, and stops without OAICS classification, tax updates,
+    PaymentMethod, ctoken, start, or confirm calls. The local bulk default is
+    eight workers (maximum 32) with whole-pool proxy rotation on retryable
+    creation failures.
 
 PayPal OAICS extraction core:
 

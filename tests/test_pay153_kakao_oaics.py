@@ -96,26 +96,29 @@ class KakaoOaicsTests(unittest.TestCase):
         self.assertEqual(pay153_app.gcash_custom_payment_method_id([
             {"id": "cpmt_gcash", "display_name": "GCash"},
         ]), "cpmt_gcash")
+        self.assertEqual(pay153_app.gcash_custom_payment_method_id([
+            {"id": "cpmt_1TOgstC6h1nxGoI3WUVEY2cJ"},
+        ]), "cpmt_1TOgstC6h1nxGoI3WUVEY2cJ")
+        self.assertEqual(pay153_app.gcash_checkout_method({
+            "payment_method_types": ["cpmt_1TOgstC6h1nxGoI3WUVEY2cJ"],
+        }), ("cpmt_1TOgstC6h1nxGoI3WUVEY2cJ", "checkout.payment_method_types"))
 
     @patch.object(pay153_app.time, "sleep")
     @patch.object(pay153_app, "submit_custom_checkout_taxes")
     @patch.object(pay153_app, "fetch_custom_checkout_session")
     @patch.object(pay153_app, "create_checkout")
-    def test_gcash_detection_requires_sentinel_and_waits_for_published_method(
+    def test_gcash_detection_uses_only_create_response_without_oaics_classification(
         self, create_checkout, fetch_state, submit_taxes, sleep,
     ):
         create_checkout.return_value = {
             "data": {
-                "checkout_session_id": "oaics_abc",
-                "checkout_provider": "open_ai",
-                "processor_entity": "openai_ie",
+                "checkout_session_id": "cs_live_abc",
+                "checkout_provider": "stripe",
+                "checkout_currency": "php",
+                "payment_method_types": ["card", "gcash"],
             },
             "http": Mock(),
         }
-        fetch_state.side_effect = [
-            {"custom_payment_methods": []},
-            {"custom_payment_methods": [{"id": "cpmt_gcash", "name": "GCash"}]},
-        ]
 
         payload, status = pay153_app.detect_gcash({
             "token": "aaa.bbb.ccc",
@@ -125,10 +128,37 @@ class KakaoOaicsTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["gcash"])
         self.assertFalse(payload["confirm_sent"])
+        self.assertEqual(payload["gcash_method"], "gcash")
+        self.assertEqual(payload["gcash_evidence_source"], "checkout.payment_method_types")
+        self.assertEqual(payload["checkout_currency"], "PHP")
+        self.assertNotIn("kind", payload)
+        self.assertNotIn("session_prefix", payload)
         self.assertTrue(create_checkout.call_args.kwargs["use_sen"])
         self.assertTrue(create_checkout.call_args.kwargs["use_so"])
-        sleep.assert_called_once_with(0.8)
+        fetch_state.assert_not_called()
         submit_taxes.assert_not_called()
+        sleep.assert_not_called()
+
+    @patch.object(pay153_app, "fetch_custom_checkout_session")
+    @patch.object(pay153_app, "create_checkout")
+    def test_oaics_session_alone_does_not_qualify_gcash(self, create_checkout, fetch_state):
+        create_checkout.return_value = {
+            "data": {
+                "checkout_session_id": "oaics_abc",
+                "checkout_provider": "open_ai",
+                "payment_method_types": ["card"],
+            },
+            "http": Mock(),
+        }
+
+        payload, status = pay153_app.detect_gcash({"token": "aaa.bbb.ccc"})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["gcash"])
+        self.assertEqual(payload["detection_outcome"], "no_gcash_in_create_response")
+        self.assertNotIn("kind", payload)
+        fetch_state.assert_not_called()
 
     @patch.object(pay153_app, "create_checkout", side_effect=RuntimeError(
         "OpenAI Checkout HTTP 429: rate limit exceeded"

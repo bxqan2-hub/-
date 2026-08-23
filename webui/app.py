@@ -1525,7 +1525,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped_count": len(skipped),
             "workers": workers,
             "confirm_sent": False,
-            "message": "每个账号创建一次 PH Checkout 读取 GCash 资格；代理/风控类失败自动遍历整个代理池换代理重试，直到有确定结果",
+            "message": "每个账号只创建一次 PH/PHP Checkout 并从创建响应直读 GCash；不识别 OAICS 类型，代理/风控类失败自动换代理重试",
         }), 202
 
     @app.post("/api/accounts/extract-oaics-bulk")

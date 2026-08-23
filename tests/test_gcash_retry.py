@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from config import proxy as proxy_cfg
-from core import detection_proxy
+from core import db, detection_proxy
 from core import gcash_service
 from webui.app import create_app
 
@@ -15,6 +15,9 @@ class GcashProxyRetryTests(unittest.TestCase):
         self.assertFalse(gcash_service._should_retry_with_next_proxy(
             {"ok": True, "gcash": False,
              "detection_outcome": "no_cpmt_after_full_probe"}))
+        self.assertFalse(gcash_service._should_retry_with_next_proxy(
+            {"ok": True, "gcash": False,
+             "detection_outcome": "no_gcash_in_create_response"}))
 
     def test_should_retry_on_proxy_ssl_or_risk_control_failure(self):
         for error in [
@@ -78,10 +81,10 @@ class GcashProxyRetryTests(unittest.TestCase):
         self.assertTrue(result["gcash"])
         sleep.assert_called_once_with(0.75)
 
-    def test_queue_defaults_match_stable_upstream_concurrency(self):
+    def test_queue_defaults_use_raised_direct_checkout_concurrency(self):
         settings = gcash_service.queue_settings()
-        self.assertEqual(settings["default_workers"], 4)
-        self.assertEqual(settings["max_workers"], 16)
+        self.assertEqual(settings["default_workers"], 8)
+        self.assertEqual(settings["max_workers"], 32)
 
     def test_retry_switches_proxy_until_success(self):
         calls = []
@@ -205,7 +208,7 @@ class GcashBulkApiTests(unittest.TestCase):
         self.client = create_app(auth_code="test-auth").test_client()
         self.client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
 
-    def test_bulk_api_defaults_to_four_workers(self):
+    def test_bulk_api_defaults_to_eight_workers(self):
         profiles = [f"PH|http://proxy-{index}.example:8080" for index in range(8)]
         with patch.object(proxy_cfg, "GC_CHECK_PROXY_PROFILES", profiles), \
              patch.object(
@@ -228,9 +231,38 @@ class GcashBulkApiTests(unittest.TestCase):
             })
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.get_json()["workers"], 4)
-        get_executor.assert_called_once_with(4)
+        response_data = response.get_json()
+        self.assertEqual(response_data["workers"], 8)
+        self.assertIn("只创建一次 PH/PHP Checkout", response_data["message"])
+        self.assertIn("不识别 OAICS 类型", response_data["message"])
+        get_executor.assert_called_once_with(8)
         self.assertEqual(enqueue.call_count, 10)
+
+
+class GcashPersistenceTests(unittest.TestCase):
+    def test_gcash_result_never_overwrites_checkout_kind_fields(self):
+        row = {
+            "id": 7,
+            "checkout_kind_status": "success",
+            "checkout_kind": "cs_live",
+            "checkout_kind_provider": "stripe",
+        }
+        with patch.object(db, "_load_accounts", return_value=[row]), \
+             patch.object(db, "_save_accounts") as save_accounts:
+            updated = db.update_account_gcash(7, {
+                "ok": True,
+                "gcash": True,
+                # Even a legacy caller-provided kind must be ignored here.
+                "kind": "oaics",
+                "checkout_provider": "open_ai",
+                "checkout_country": "PH",
+                "checkout_currency": "PHP",
+            })
+
+        self.assertTrue(updated)
+        self.assertEqual(row["checkout_kind"], "cs_live")
+        self.assertEqual(row["checkout_kind_provider"], "stripe")
+        save_accounts.assert_called_once()
 
 
 if __name__ == "__main__":

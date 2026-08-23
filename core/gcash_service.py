@@ -2,9 +2,9 @@
 """Background GCash eligibility detection for account rows.
 
 Each task creates one minimal PH/PHP Plus Checkout through the vendored
-PAY.153 service and reads back whether a ``cpmt_*`` custom payment method
-(GCash) is available. It never confirms or starts a payment method, so no
-payment state is advanced.
+PAY.153 service and reads explicit GCash evidence from that creation response.
+It does not classify the Checkout backend, poll session state, update taxes,
+confirm, or start a payment method.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ from core.integrated_runtime import get_pay153_module
 logger = logging.getLogger(__name__)
 
 _MIN_WORKERS = 1
-DEFAULT_WORKERS = 4
-MAX_WORKERS = 16
+DEFAULT_WORKERS = 8
+MAX_WORKERS = 32
 _DEFAULT_WORKERS = DEFAULT_WORKERS
 _QUEUE_LIMIT = 500
 _EXECUTOR_LOCK = threading.RLock()
@@ -51,7 +51,9 @@ def _should_retry_with_next_proxy(result: dict) -> bool:
     if result.get("ok") or result.get("gcash"):
         return False
     # 完整探测后确认无 GCash 资格（只出现在 200 success 分支），不重试。
-    if result.get("detection_outcome") == "no_cpmt_after_full_probe":
+    if result.get("detection_outcome") in {
+        "no_cpmt_after_full_probe", "no_gcash_in_create_response",
+    }:
         return False
     if not error:
         return False

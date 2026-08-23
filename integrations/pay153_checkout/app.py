@@ -3186,6 +3186,13 @@ def classify_checkout_kind(checkout: dict[str, Any]) -> str:
     return "unknown"
 
 
+KNOWN_GCASH_METHOD_IDS = frozenset({
+    # qualification-test upstream records this opaque OpenAI custom method as
+    # GCash even when the Checkout response omits a human-readable label.
+    "cpmt_1TOgstC6h1nxGoI3WUVEY2cJ",
+})
+
+
 def gcash_custom_payment_method_id(methods: Any) -> str:
     """Return only a published GCash ``cpmt_*`` method, not another wallet."""
     if not isinstance(methods, list):
@@ -3196,9 +3203,58 @@ def gcash_custom_payment_method_id(methods: Any) -> str:
         method_id = str(item.get("id") or "")
         if not method_id.startswith("cpmt_"):
             continue
+        if method_id in KNOWN_GCASH_METHOD_IDS:
+            return method_id
         if "gcash" in json.dumps(item, ensure_ascii=False).lower():
             return method_id
     return ""
+
+
+def gcash_checkout_method(checkout: Any) -> tuple[str, str]:
+    """Read GCash evidence directly from a successful Checkout response.
+
+    The fast account-page probe intentionally does not classify the Checkout
+    session backend and does not perform a follow-up OAICS state request.  It
+    only accepts explicit GCash evidence in payment-method fields returned by
+    the PH/PHP Checkout creation call.
+    """
+    if not isinstance(checkout, dict):
+        return "", ""
+    containers: list[tuple[str, dict[str, Any]]] = [("checkout", checkout)]
+    for container_key in ("checkout_session", "session", "payment_method_configuration"):
+        nested = checkout.get(container_key)
+        if isinstance(nested, dict):
+            containers.append((container_key, nested))
+    for container_name, container in containers:
+        for field in (
+            "payment_method_types",
+            "custom_payment_methods",
+            "available_payment_methods",
+            "payment_methods",
+        ):
+            methods = container.get(field)
+            custom_method_id = gcash_custom_payment_method_id(methods)
+            if custom_method_id:
+                return custom_method_id, f"{container_name}.{field}"
+            if not isinstance(methods, list):
+                continue
+            for item in methods:
+                if isinstance(item, str):
+                    value = item.strip()
+                    if value in KNOWN_GCASH_METHOD_IDS:
+                        return value, f"{container_name}.{field}"
+                    if value.lower() == "gcash":
+                        return "gcash", f"{container_name}.{field}"
+                if not isinstance(item, dict):
+                    continue
+                method_id = str(item.get("id") or "").strip()
+                labels = (
+                    item.get("type"), item.get("name"), item.get("display_name"),
+                    item.get("label"), item.get("payment_method_type"),
+                )
+                if any(str(label or "").strip().lower() == "gcash" for label in labels):
+                    return method_id if method_id.startswith("cpmt_") else "gcash", f"{container_name}.{field}"
+    return "", ""
 
 
 @app.get("/private-checkout")
@@ -3291,12 +3347,10 @@ def health():
 
 
 def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
-    """Create the smallest PH/PHP Plus Checkout and read whether GCash is offered.
+    """Create one PH/PHP Plus Checkout and read its direct GCash evidence.
 
-    Never progresses past the tax-address step: it stops as soon as
-    ``custom_payment_methods`` is readable, so no PaymentMethod confirm,
-    ctoken, or payment-state advance is ever triggered. Backend reports
-    ``gcash`` only when a GCash-labelled ``cpmt_*`` method appears on the PH Checkout.
+    This fast path performs no OAICS type recognition, state polling, tax
+    update, PaymentMethod creation, ctoken, start, or confirm request.
     """
     data = data if isinstance(data, dict) else {}
     token_raw = str(data.get("token") or "").strip()
@@ -3342,86 +3396,28 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         )
         checkout = dict(created.get("data") or {})
         session_id = str(checkout.get("checkout_session_id") or "")
-        processor = (
-            str(checkout.get("processor_entity") or "").strip()
-            or ("openai_llc" if str(checkout.get("checkout_country") or "").strip().upper() == "US" else "openai_ie")
-        )
-        if not session_id or not str(session_id).startswith("oaics_"):
+        if not session_id and not str(checkout.get("url") or checkout.get("checkout_url") or "").strip():
             return {
                 "ok": False, "gcash": False,
-                "error": "当前账号未返回 OAICS 自定义 Checkout，无法读取 GCash 支付方式"
-                        if session_id else "创建 Checkout 失败：未返回 Session",
-                "session_prefix": session_id[:16],
+                "error": "创建 PH/PHP Checkout 失败：未返回 Session",
             }, 502
-        http = created.get("http")
-        if http is None:
-            return {"ok": False, "gcash": False, "error": "创建 Checkout 未提供会话"}, 502
-        # OAICS custom methods can publish a moment after the Checkout itself
-        # becomes readable; poll briefly before submitting PH taxes.
-        custom_state = fetch_custom_checkout_session(http, token, session_id, processor, device_id)
-        custom_method_id = gcash_custom_payment_method_id(
-            custom_state.get("custom_payment_methods")
-        )
-        # qualification-test 当前实现使用 3 次 0.8 秒轮询；保留本地更完整的
-        # PH 税区探测，同时采用该发布等待窗口，避免把异步发布误判为无资格。
-        for _poll in range(3):
-            if custom_method_id:
-                break
-            time.sleep(0.8)
-            custom_state = fetch_custom_checkout_session(http, token, session_id, processor, device_id)
-            custom_method_id = gcash_custom_payment_method_id(
-                custom_state.get("custom_payment_methods")
-            )
-        if not custom_method_id:
-            # Submit PH billing first; some accounts only surface GCash after the
-            # tax address is set (matches the extraction flow). Any failure here
-            # (risk-control, proxy, network) means the probe is incomplete —
-            # never report a definitive "no GCash" from stale data.
-            billing = default_billing("PH", meta.get("email") or "", real_random=True)
-            tax_checkout = submit_custom_checkout_taxes(
-                http, token, session_id, processor, billing,
-                custom_checkout_currency(custom_state) or "PHP", device_id,
-            )
-            if tax_checkout:
-                custom_state = tax_checkout
-            custom_method_id = gcash_custom_payment_method_id(
-                custom_state.get("custom_payment_methods")
-            )
-            for _poll in range(2):
-                if custom_method_id:
-                    break
-                time.sleep(0.8)
-                custom_state = fetch_custom_checkout_session(
-                    http, token, session_id, processor, device_id,
-                )
-                custom_method_id = gcash_custom_payment_method_id(
-                    custom_state.get("custom_payment_methods")
-                )
-        gcash = bool(custom_method_id)
-        # 合并查询：一次 PH Checkout 同时判定 session 类型（oaics/cs_live）与
-        # GCash 资格。能走到这里说明 session 是 OAICS（读到了 custom_payment_methods），
-        # kind 用 classify_checkout_kind 与类型查询共用同一套判定，保证不自相矛盾。
-        kind = classify_checkout_kind(checkout)
-        # 只有走完完整成功探测（OAICS 读取方法列表 + 提交 PH 账单均 200）仍未
-        # 发现 cpmt_ 时，才算是"确定无 GCash 资格"，返回 200；其余任何分支
-        # （风控、非 OAICS、SSL/代理失败、网络错误）都已在上面以失败返回，
-        # 绝对不把探测失败归为"无 GC"。
+        method_evidence, evidence_source = gcash_checkout_method(checkout)
+        gcash = bool(method_evidence)
         return {
             "ok": True,
             "gcash": gcash,
-            "kind": kind,
-            "detection_outcome": "qualified" if gcash else "no_cpmt_after_full_probe",
-            "custom_payment_method_id": custom_method_id,
-            "checkout_provider": str(checkout.get("checkout_provider") or ""),
-            "processor_entity": processor,
-            "session_prefix": session_id[:32],
+            "detection_outcome": "qualified" if gcash else "no_gcash_in_create_response",
+            "custom_payment_method_id": method_evidence if method_evidence.startswith("cpmt_") else "",
+            "gcash_method": "gcash" if gcash else "",
+            "gcash_evidence_source": evidence_source,
+            "checkout_created": True,
             "confirm_sent": False,
             "promo_update_sent": False,
             "proxy_source": proxy_source,
             "checkout_country": "PH",
-            "checkout_currency": custom_checkout_currency(custom_state) or "PHP",
+            "checkout_currency": str(checkout.get("checkout_currency") or checkout.get("currency") or "PHP").upper(),
             "checked_at": int(time.time()),
-            "error": None if gcash else "当前 PH Checkout 完成完整探测后仍无 GCash 支付方式",
+            "error": None if gcash else "当前 PH/PHP Checkout 创建响应未包含 GCash 支付方式",
         }, 200
     except Exception as exc:
         error_text = f"{type(exc).__name__}: {str(exc)[:500]}"

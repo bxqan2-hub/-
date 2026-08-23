@@ -334,12 +334,14 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn('${renderConfigPlainFieldV2(checkoutProfiles)}', html)
         self.assertNotIn('${renderConfigPlainFieldV2(atProfiles)}', html)
 
-    def test_gcash_ui_uses_rate_limit_safe_concurrency(self):
+    def test_gcash_ui_uses_fast_direct_checkout_concurrency(self):
         html = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("const workers = Math.min(ids.length, 4)", html)
-        self.assertIn("qualification-test 的稳定默认并发 4", html)
-        self.assertIn("必要时仅提交 PH 账单税区", html)
+        self.assertIn("const workers = Math.min(ids.length, 8)", html)
+        self.assertIn("不识别 OAICS 类型", html)
+        self.assertIn("不轮询 Checkout", html)
+        self.assertIn("不提交税区", html)
+        self.assertNotIn("合并查询：创建 Checkout 同时判定类型与 GCash 资格", html)
 
     def test_settings_ui_filters_irrelevant_drivers_and_has_real_status_cards(self):
         html = self.client.get("/").get_data(as_text=True)
