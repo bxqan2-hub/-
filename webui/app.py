@@ -1441,9 +1441,9 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
         if len(ids) > 500:
             return jsonify({"ok": False, "error": "单次最多检测 500 个账号"}), 400
-        max_workers = 100
+        max_workers = gcash_service.MAX_WORKERS
         try:
-            workers = _positive_worker_count(data.get("workers"), 50)
+            workers = _positive_worker_count(data.get("workers"), gcash_service.DEFAULT_WORKERS)
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
         workers = max(1, min(workers, max_workers, len(ids)))
@@ -3702,6 +3702,62 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "label": group["label"],
                     "count": group["count"],
                 }
+                for group in groups
+            ],
+            "updated": result["updated"],
+            "reloaded": reload_ok,
+        })
+
+    @app.post("/api/detection-proxy-pools/delete")
+    def api_detection_proxy_pool_delete():
+        """Delete every static proxy in one selected country group."""
+        data = request.get_json(silent=True) or {}
+        purpose = str(data.get("purpose") or "").strip().lower()
+        country = str(data.get("country") or "").strip().upper()
+        field_map = {
+            "plan": ("PLAN_CHECK_PROXY_PROFILES", "PLAN_CHECK_PROXY_ACTIVE"),
+            "at": ("AT_VALIDITY_PROXY_PROFILES", "AT_VALIDITY_PROXY_ACTIVE"),
+            "checkout": ("CHECKOUT_CHECK_PROXY_PROFILES", "CHECKOUT_CHECK_PROXY_ACTIVE"),
+        }
+        if purpose not in field_map:
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at 或 checkout"}), 400
+        if len(country) != 2 or not country.isalpha():
+            return jsonify({"ok": False, "error": "country 必须是两位国家代码"}), 400
+
+        from config import proxy as proxy_cfg
+        from core import detection_proxy
+
+        profiles_key, active_key = field_map[purpose]
+        existing = getattr(proxy_cfg, profiles_key, []) or []
+        profiles = detection_proxy.detection_proxy_profiles(existing)
+        kept = [profile["spec"] for profile in profiles if profile["country"] != country]
+        deleted_count = len(profiles) - len(kept)
+        if deleted_count <= 0:
+            return jsonify({"ok": False, "error": f"{country} 代理池不存在"}), 404
+
+        groups = detection_proxy.detection_proxy_country_groups(kept)
+        countries = [str(group["country"]) for group in groups]
+        current_active = str(getattr(proxy_cfg, active_key, "") or "").strip().upper()
+        active = current_active if current_active in countries else (countries[0] if countries else "")
+        result = config_editor.update_config({profiles_key: kept, active_key: active})
+
+        reload_ok = True
+        try:
+            import config as _config_pkg
+            _config_pkg.reload_all()
+        except Exception:
+            reload_ok = False
+            logger.exception("检测代理国家池删除后热加载失败")
+
+        return jsonify({
+            "ok": True,
+            "purpose": purpose,
+            "deleted_country": country,
+            "deleted_count": deleted_count,
+            "active_country": active,
+            "total_count": len(kept),
+            "countries": [
+                {"code": group["country"], "label": group["label"], "count": group["count"]}
                 for group in groups
             ],
             "updated": result["updated"],

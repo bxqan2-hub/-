@@ -88,6 +88,61 @@ class KakaoOaicsTests(unittest.TestCase):
         self.assertEqual(create_checkout.call_args.args[2], "")
         fetch_dynamic_attempt_proxy.assert_not_called()
 
+    def test_gcash_method_classifier_rejects_other_custom_wallets(self):
+        self.assertEqual(pay153_app.gcash_custom_payment_method_id([
+            {"id": "cpmt_other", "type": "kakao_pay"},
+            {"id": "pm_card", "type": "gcash"},
+        ]), "")
+        self.assertEqual(pay153_app.gcash_custom_payment_method_id([
+            {"id": "cpmt_gcash", "display_name": "GCash"},
+        ]), "cpmt_gcash")
+
+    @patch.object(pay153_app.time, "sleep")
+    @patch.object(pay153_app, "submit_custom_checkout_taxes")
+    @patch.object(pay153_app, "fetch_custom_checkout_session")
+    @patch.object(pay153_app, "create_checkout")
+    def test_gcash_detection_requires_sentinel_and_waits_for_published_method(
+        self, create_checkout, fetch_state, submit_taxes, sleep,
+    ):
+        create_checkout.return_value = {
+            "data": {
+                "checkout_session_id": "oaics_abc",
+                "checkout_provider": "open_ai",
+                "processor_entity": "openai_ie",
+            },
+            "http": Mock(),
+        }
+        fetch_state.side_effect = [
+            {"custom_payment_methods": []},
+            {"custom_payment_methods": [{"id": "cpmt_gcash", "name": "GCash"}]},
+        ]
+
+        payload, status = pay153_app.detect_gcash({
+            "token": "aaa.bbb.ccc",
+            "proxy": "http://127.0.0.1:8080",
+        })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["gcash"])
+        self.assertFalse(payload["confirm_sent"])
+        self.assertTrue(create_checkout.call_args.kwargs["use_sen"])
+        self.assertTrue(create_checkout.call_args.kwargs["use_so"])
+        sleep.assert_called_once_with(0.8)
+        submit_taxes.assert_not_called()
+
+    @patch.object(pay153_app, "create_checkout", side_effect=RuntimeError(
+        "OpenAI Checkout HTTP 429: rate limit exceeded"
+    ))
+    def test_gcash_detection_exposes_upstream_checkout_status(self, _create_checkout):
+        payload, status = pay153_app.detect_gcash({
+            "token": "aaa.bbb.ccc",
+            "proxy": "http://127.0.0.1:8080",
+        })
+
+        self.assertEqual(status, 502)
+        self.assertEqual(payload["upstream_http_status"], 429)
+        self.assertFalse(payload["confirm_sent"])
+
     def _run(self, confirm_payload, *, amount=0):
         chatgpt = Mock()
         chatgpt.post.return_value = _Response(200, confirm_payload)

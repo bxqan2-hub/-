@@ -21,6 +21,19 @@ Kakao OAICS protocol reference:
     before taxes, PaymentMethod, ctoken, or confirm. KR is needed for the Kakao
     payment method, not for Checkout classification.
 
+GCash qualification reference:
+
+- [qualification-test](https://github.com/yeying-xingchen/qualification-test)
+  - Audited reference commit: `7d3973ea0a4b6ff20ac60154012eee87359c262c`
+  - Reference only; it is not deployed as another runtime service.
+  - The account-page GCash detector adopts its Checkout Sentinel/SO requirement,
+    Firefox 144 session continuity, HTTP-to-HTTPS proxy transport fallback,
+    three-step publication wait, GCash-specific `cpmt_*` classification, and
+    stable default concurrency of four workers.
+  - The local detector keeps the stronger PH billing/tax follow-up, whole-pool
+    proxy rotation, bounded total runtime, definitive-negative boundary, and
+    strict no-confirm/no-start behavior.
+
 PayPal OAICS extraction core:
 
 - [link-pp](https://github.com/eatWhitePorridge/link-pp)

@@ -325,10 +325,21 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="detectionProxyImportModal"', html)
         self.assertIn('加入代理池', html)
         self.assertIn('/api/detection-proxy-pools/import', html)
+        self.assertIn('data-delete-detection-proxy-country', html)
+        self.assertIn('/api/detection-proxy-pools/delete', html)
+        self.assertIn('删除当前国家池', html)
+        self.assertIn('不影响其他代理池', html)
         self.assertIn('随机洗牌', html)
         self.assertNotIn('${renderConfigPlainFieldV2(planProfiles)}', html)
         self.assertNotIn('${renderConfigPlainFieldV2(checkoutProfiles)}', html)
         self.assertNotIn('${renderConfigPlainFieldV2(atProfiles)}', html)
+
+    def test_gcash_ui_uses_rate_limit_safe_concurrency(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("const workers = Math.min(ids.length, 4)", html)
+        self.assertIn("qualification-test 的稳定默认并发 4", html)
+        self.assertIn("必要时仅提交 PH 账单税区", html)
 
     def test_settings_ui_filters_irrelevant_drivers_and_has_real_status_cards(self):
         html = self.client.get("/").get_data(as_text=True)

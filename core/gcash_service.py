@@ -13,6 +13,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 from core import db
 from core.integrated_runtime import get_pay153_module
@@ -21,7 +22,9 @@ from core.integrated_runtime import get_pay153_module
 logger = logging.getLogger(__name__)
 
 _MIN_WORKERS = 1
-_DEFAULT_WORKERS = 6
+DEFAULT_WORKERS = 4
+MAX_WORKERS = 16
+_DEFAULT_WORKERS = DEFAULT_WORKERS
 _QUEUE_LIMIT = 500
 _EXECUTOR_LOCK = threading.RLock()
 _EXECUTOR_WORKERS = _DEFAULT_WORKERS
@@ -33,7 +36,8 @@ _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 PROXY_RETRYABLE_HINTS = (
     "SSL", "ProxyError", "Connection", "timeout", "timed out",
     "Failed to perform", "OpenAI Checkout HTTP 400", "HTTP 400",
-    "unusual activity", "502", "5xx",
+    "OpenAI Checkout HTTP 429", "HTTP 429", "rate limit", "too many requests",
+    "unusual activity", "Sentinel", "SENTINEL_INIT_BLOCKED", "502", "5xx",
 )
 MAX_PROXY_RETRIES: int | None = None
 # 单个账号整个探测的硬性总耗时上限（秒）。超过即中止并释放线程，
@@ -52,6 +56,36 @@ def _should_retry_with_next_proxy(result: dict) -> bool:
     if not error:
         return False
     return any(hint.lower() in error.lower() for hint in PROXY_RETRYABLE_HINTS)
+
+
+def proxy_transport_candidates(proxy: str | None) -> list[str | None]:
+    """Try HTTPS proxy transport after the same HTTP proxy tunnel fails."""
+    value = str(proxy or "").strip()
+    if not value:
+        return [None]
+    candidates: list[str | None] = [value]
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() == "http":
+        candidates.append(urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, parsed.fragment)))
+    return candidates
+
+
+def _is_proxy_transport_failure(result: dict) -> bool:
+    error = str(result.get("error") or "").lower()
+    return any(marker in error for marker in (
+        "connect tunnel failed", "curl: (7)", "could not connect to proxy",
+        "could not resolve proxy", "proxyerror", "connection refused",
+    ))
+
+
+def _retry_delay_seconds(result: dict, retry_index: int) -> float:
+    error = str(result.get("error") or "").lower()
+    upstream_status = result.get("upstream_http_status")
+    if upstream_status == 429 or "http 429" in error or "rate limit" in error or "too many requests" in error:
+        return min(4.0, 0.75 * (2 ** max(0, int(retry_index))))
+    if "unusual activity" in error or "http 400" in error:
+        return min(1.5, 0.35 * (max(0, int(retry_index)) + 1))
+    return 0.0
 
 
 def _normalize_workers(value: int | None) -> int:
@@ -76,23 +110,35 @@ def get_executor(max_workers: int | None = None) -> ThreadPoolExecutor:
 
 
 def check_gcash(access_token: str, *, proxy: str | None = None) -> dict:
-    body = {"token": str(access_token or "").strip()}
-    if proxy:
-        body["proxy"] = str(proxy).strip()
-    try:
-        result, status_code = get_pay153_module().detect_gcash(body)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "gcash": False,
-            "checked_at": datetime.now().isoformat(timespec="seconds"),
-            "confirm_sent": False,
-            "error": f"GCash 检测执行异常：{type(exc).__name__}: {str(exc)[:240]}",
-        }
-    if not isinstance(result, dict):
-        result = {"ok": False, "gcash": False, "error": "PAY.153 返回格式不正确"}
+    result: dict = {"ok": False, "gcash": False}
+    status_code = 502
+    used_transport = ""
+    transport_attempts = 0
+    for candidate in proxy_transport_candidates(proxy):
+        transport_attempts += 1
+        body = {"token": str(access_token or "").strip()}
+        if candidate:
+            body["proxy"] = candidate
+            used_transport = urlsplit(candidate).scheme.lower()
+        try:
+            result, status_code = get_pay153_module().detect_gcash(body)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "gcash": False,
+                "confirm_sent": False,
+                "error": f"GCash 检测执行异常：{type(exc).__name__}: {str(exc)[:240]}",
+            }
+            status_code = 502
+        if not isinstance(result, dict):
+            result = {"ok": False, "gcash": False, "error": "PAY.153 返回格式不正确"}
+        if status_code < 400 or not _is_proxy_transport_failure(result):
+            break
     result["checked_at"] = datetime.now().isoformat(timespec="seconds")
     result["proxy_source"] = "request" if proxy else result.get("proxy_source")
+    result["proxy_transport"] = used_transport or ("direct" if not proxy else "")
+    result["transport_attempt_count"] = transport_attempts
+    result["http_status"] = status_code
     result.setdefault("gcash", False)
     result.setdefault("confirm_sent", False)
     if status_code >= 400:
@@ -180,6 +226,15 @@ def _run_with_proxy_retry(
                 result["retried_proxies"] = attempts
                 result["attempt_count"] = idx + 1
             return db.update_account_gcash(account_id, result) and result
+        delay = _retry_delay_seconds(result, idx)
+        if delay > 0 and idx + 1 < total:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                delay = min(delay, remaining)
+            time.sleep(delay)
     # 整个池子都试完 / 总时长超时仍失败：记录尝试过的代理，方便用户看。
     result = dict(last_result)
     result.setdefault("ok", False)
@@ -242,7 +297,15 @@ def enqueue(
 
 
 def queue_settings() -> dict:
-    return {"workers": _EXECUTOR_WORKERS, "queue_limit": _QUEUE_LIMIT}
+    return {
+        "workers": _EXECUTOR_WORKERS,
+        "default_workers": DEFAULT_WORKERS,
+        "max_workers": MAX_WORKERS,
+        "queue_limit": _QUEUE_LIMIT,
+    }
 
 
-__all__ = ["check_gcash", "enqueue", "get_executor", "queue_settings"]
+__all__ = [
+    "DEFAULT_WORKERS", "MAX_WORKERS", "check_gcash", "enqueue",
+    "get_executor", "proxy_transport_candidates", "queue_settings",
+]

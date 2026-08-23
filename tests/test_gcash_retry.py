@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from config import proxy as proxy_cfg
+from core import detection_proxy
 from core import gcash_service
+from webui.app import create_app
 
 
 class GcashProxyRetryTests(unittest.TestCase):
@@ -18,11 +21,67 @@ class GcashProxyRetryTests(unittest.TestCase):
             "SSLError: Failed to perform, curl: (35)",
             "ProxyError: could not connect to proxy",
             "OpenAI Checkout HTTP 400: unusual activity",
+            "OpenAI Checkout HTTP 429: rate limit exceeded",
+            "Sentinel token generation failed after fresh-session retry",
             "Connection reset by peer",
         ]:
             self.assertTrue(gcash_service._should_retry_with_next_proxy(
                 {"ok": False, "gcash": False, "error": error}),
                 msg=error)
+
+    def test_http_proxy_transport_falls_back_to_https_for_tunnel_failure(self):
+        runtime = MagicMock()
+        runtime.detect_gcash.side_effect = [
+            ({"ok": False, "gcash": False, "error": "CONNECT tunnel failed"}, 502),
+            ({"ok": True, "gcash": True, "custom_payment_method_id": "cpmt_gcash"}, 200),
+        ]
+
+        with patch.object(gcash_service, "get_pay153_module", return_value=runtime):
+            result = gcash_service.check_gcash(
+                "token",
+                proxy="http://user:pass@proxy.example:8080",
+            )
+
+        calls = [call.args[0]["proxy"] for call in runtime.detect_gcash.call_args_list]
+        self.assertEqual(calls, [
+            "http://user:pass@proxy.example:8080",
+            "https://user:pass@proxy.example:8080",
+        ])
+        self.assertTrue(result["gcash"])
+        self.assertEqual(result["proxy_transport"], "https")
+        self.assertEqual(result["transport_attempt_count"], 2)
+
+    def test_rate_limit_retry_uses_bounded_backoff(self):
+        calls = []
+
+        def fake_check(token, proxy=None):
+            calls.append(proxy)
+            if len(calls) == 1:
+                return {
+                    "ok": False,
+                    "gcash": False,
+                    "upstream_http_status": 429,
+                    "error": "OpenAI Checkout HTTP 429: rate limit exceeded",
+                }
+            return {"ok": True, "gcash": True}
+
+        with patch.object(gcash_service, "check_gcash", side_effect=fake_check), \
+             patch.object(gcash_service.db, "update_account_gcash", return_value=True), \
+             patch.object(gcash_service.time, "sleep") as sleep:
+            result = gcash_service._run_with_proxy_retry(
+                account_id=6,
+                access_token="tok",
+                proxies=["p1", "p2"],
+                max_retries=None,
+            )
+
+        self.assertTrue(result["gcash"])
+        sleep.assert_called_once_with(0.75)
+
+    def test_queue_defaults_match_stable_upstream_concurrency(self):
+        settings = gcash_service.queue_settings()
+        self.assertEqual(settings["default_workers"], 4)
+        self.assertEqual(settings["max_workers"], 16)
 
     def test_retry_switches_proxy_until_success(self):
         calls = []
@@ -139,6 +198,39 @@ class GcashProxyRetryTests(unittest.TestCase):
         self.assertEqual(calls, ["p1"])
         self.assertFalse(result["gcash"])
         self.assertNotIn("已尝试", result.get("error") or "")
+
+
+class GcashBulkApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = create_app(auth_code="test-auth").test_client()
+        self.client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
+
+    def test_bulk_api_defaults_to_four_workers(self):
+        profiles = [f"PH|http://proxy-{index}.example:8080" for index in range(8)]
+        with patch.object(proxy_cfg, "GC_CHECK_PROXY_PROFILES", profiles), \
+             patch.object(
+                 detection_proxy,
+                 "resolve_detection_proxy",
+                 side_effect=lambda spec: spec.split("|", 1)[-1],
+             ), patch("webui.app.db.get_account", side_effect=lambda account_id: {
+                 "id": account_id,
+                 "email": f"user-{account_id}@example.test",
+                 "access_token": "token",
+             }), patch(
+                 "webui.app.gcash_service.get_executor",
+                 return_value=MagicMock(),
+             ) as get_executor, patch(
+                 "webui.app.gcash_service.enqueue",
+                 return_value={"accepted": True, "busy": False},
+             ) as enqueue:
+            response = self.client.post("/api/accounts/check-gcash-bulk", json={
+                "account_ids": list(range(1, 11)),
+            })
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["workers"], 4)
+        get_executor.assert_called_once_with(4)
+        self.assertEqual(enqueue.call_count, 10)
 
 
 if __name__ == "__main__":

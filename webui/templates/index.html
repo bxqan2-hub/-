@@ -2062,7 +2062,7 @@
     .detection-proxy-card-v2 select,
     .detection-proxy-card-v2 textarea { width: 100%; max-width: 100%; }
     .detection-proxy-controls-v2 {
-      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end;
+      display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: end;
     }
     .detection-proxy-controls-v2 .fld { margin: 0; }
     .detection-proxy-controls-v2 .btn { min-height: 38px; white-space: nowrap; }
@@ -6091,9 +6091,9 @@ async function checkSelectedCheckoutKinds() {
 async function checkSelectedGcash() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  // GCash 检测无滑块挑战，100 条代理时可满并发；后端会按账号数/代理池数量自动收敛。
-  const workers = Math.min(ids.length, 100);
-  if (!confirm(`确定查询选中的 ${ids.length} 个账号的 GCash 资格吗？\n\n每个账号通过 gc查询代理池 随机挑一条 PH 出口代理创建最小 PH/PHP Checkout，只读取是否返回 GCash 支付方式（cpmt_），不执行税区、PaymentMethod、ctoken 或 confirm。\n\n并发线程数：${workers}`)) return;
+  // Checkout / Sentinel 容易触发全局限流；采用 qualification-test 的稳定默认并发 4。
+  const workers = Math.min(ids.length, 4);
+  if (!confirm(`确定查询选中的 ${ids.length} 个账号的 GCash 资格吗？\n\n每个账号通过 gc查询代理池 随机挑一条 PH 出口代理创建最小 PH/PHP Checkout；必要时仅提交 PH 账单税区以刷新 GCash 方式，不创建 PaymentMethod，不生成 ctoken，也不会 confirm。\n\n并发线程数：${workers}`)) return;
   const btn = $('#btnCheckSelectedGcashV2');
   if (!btn) return;
   const old = btn.textContent;
@@ -7990,6 +7990,11 @@ function bindDetectionProxyPoolToolsV2() {
       saveDetectionProxyCountryV2(select);
     });
   });
+  document.querySelectorAll('[data-delete-detection-proxy-country]').forEach(button => {
+    if (button.dataset.bound) return;
+    button.dataset.bound = '1';
+    button.addEventListener('click', () => deleteDetectionProxyCountryV2(button));
+  });
   const modal = $('#detectionProxyImportModal');
   if (!modal || modal.dataset.bound) return;
   modal.dataset.bound = '1';
@@ -8000,6 +8005,30 @@ function bindDetectionProxyPoolToolsV2() {
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeDetectionProxyImportModalV2();
   });
+}
+
+async function deleteDetectionProxyCountryV2(button) {
+  const requestedPurpose = button.dataset.deleteDetectionProxyCountry;
+  const purpose = requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan');
+  const select = document.querySelector(`[data-detection-country-select="${purpose}"]`);
+  const country = String(select?.value || '').trim().toUpperCase();
+  if (!country) { showToast('当前没有可删除的国家代理池'); return; }
+  const option = select?.selectedOptions?.[0];
+  const label = option?.textContent || proxyRegionLabelV2(country);
+  const scope = purpose === 'plan' ? '套餐' : (purpose === 'at' ? 'AT 有效性' : 'Checkout');
+  if (!confirm(`确定删除 ${label} 的全部代理吗？\n\n只删除 ${scope} 检测池中的 ${country} 分组，不影响其他代理池。`)) return;
+  button.disabled = true;
+  try {
+    const response = await api('/api/detection-proxy-pools/delete', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({purpose, country}),
+    });
+    await loadConfig();
+    showToast(`已删除 ${proxyRegionLabelV2(country)}代理池 ${response.deleted_count || 0} 条代理`);
+  } catch (e) {
+    showToast('删除国家代理池失败: ' + e.message);
+    button.disabled = false;
+  }
 }
 
 function configGroupSlug(name) {
@@ -8311,6 +8340,7 @@ function renderDetectionProxyCountryControlV2(profileField, activeField, purpose
         </select>
       </label>
       <button type="button" class="btn primary" data-add-detection-proxy="${attrEsc(purpose)}">加入代理池</button>
+      <button type="button" class="btn danger" data-delete-detection-proxy-country="${attrEsc(purpose)}"${profiles.length ? '' : ' disabled'}>删除当前国家池</button>
     </div>
     <div class="detection-proxy-summary-v2" data-detection-proxy-status="${attrEsc(purpose)}">
       ${profiles.length

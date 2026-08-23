@@ -240,6 +240,47 @@ class DetectionProxyImportApiTests(unittest.TestCase):
             "JP|socks5h://at-jp.example:1080",
         ])
 
+    def test_delete_removes_selected_country_and_selects_remaining_pool(self):
+        with patch.object(detection_proxy.proxy_cfg, "PLAN_CHECK_PROXY_PROFILES", [
+            "JP|socks5h://jp-one.example:1080",
+            "JP|socks5h://jp-two.example:1080",
+            "PH|socks5h://ph.example:1080",
+        ]), patch.object(detection_proxy.proxy_cfg, "PLAN_CHECK_PROXY_ACTIVE", "JP"), \
+             patch("webui.app.config_editor.update_config", return_value={
+                 "updated": ["PLAN_CHECK_PROXY_PROFILES", "PLAN_CHECK_PROXY_ACTIVE"],
+                 "ignored": [],
+             }) as update, patch("config.reload_all"):
+            response = self.client.post("/api/detection-proxy-pools/delete", json={
+                "purpose": "plan",
+                "country": "jp",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["deleted_country"], "JP")
+        self.assertEqual(payload["deleted_count"], 2)
+        self.assertEqual(payload["total_count"], 1)
+        self.assertEqual(payload["active_country"], "PH")
+        saved = update.call_args.args[0]
+        self.assertEqual(saved["PLAN_CHECK_PROXY_PROFILES"], [
+            "PH|socks5h://ph.example:1080",
+        ])
+        self.assertEqual(saved["PLAN_CHECK_PROXY_ACTIVE"], "PH")
+
+    def test_delete_rejects_country_missing_from_selected_pool(self):
+        with patch.object(detection_proxy.proxy_cfg, "AT_VALIDITY_PROXY_PROFILES", [
+            "PH|socks5h://ph.example:1080",
+        ]), patch.object(detection_proxy.proxy_cfg, "AT_VALIDITY_PROXY_ACTIVE", "PH"), \
+             patch("webui.app.config_editor.update_config") as update:
+            response = self.client.post("/api/detection-proxy-pools/delete", json={
+                "purpose": "at",
+                "country": "JP",
+            })
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("JP 代理池不存在", response.get_json()["error"])
+        update.assert_not_called()
+
     def test_import_can_grow_existing_pool_beyond_legacy_500_limit(self):
         existing = [
             f"JP|socks5h://old-{index}.example:1080"
