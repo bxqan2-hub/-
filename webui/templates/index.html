@@ -2488,7 +2488,7 @@
             </select>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCreateAccountGroupV2" title="新建一个本地账号分组">新建</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnManualAddAccountV2" title="直接添加邮箱+取码URL+AT，或邮箱+密码+2FA+AT，并可立即查询套餐">添加账号</button>
-            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnBatchReplaceAtV2" title="批量粘贴 AT，读取每个 JWT 内的邮箱并自动替换现有账号 AT">批量导入AT</button>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnBatchReplaceAtV2" title="支持原始 AT、Bearer、邮箱+AT、完整 /api/auth/session JSON 或 JSON 数组，自动识别邮箱并替换">批量导入AT</button>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportReboundAccountsV2" title="导入独立换绑分站结果；替换原账号邮箱和AT，并迁移到当前分组">导入换绑邮箱</button>
             <button type="button" class="jobs-tb-btn" id="btnRenameAccountGroupV2" disabled title="修改当前分组名称">重命名</button>
             <button type="button" class="jobs-tb-btn" id="btnDeleteAccountGroupV2" disabled title="仅删除当前分组，不删除其中账号">删除</button>
@@ -3007,7 +3007,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="atReplaceTitle">批量导入 AT</h3>
-        <p id="atReplaceDescription">每行粘贴一个 AT。系统读取 JWT 内的邮箱，匹配账号页现有邮箱并替换 AT。</p>
+        <p id="atReplaceDescription">支持原始 AT 或完整 /api/auth/session JSON。系统读取邮箱和套餐信息，匹配现有账号并替换。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseAtReplace" aria-label="关闭">×</button>
     </div>
@@ -3015,8 +3015,8 @@
       <div class="outlook-import-result" id="atReplaceResultV2"></div>
       <label class="outlook-import-field">
         <span id="atReplaceFieldLabelV2">AT 列表</span>
-        <textarea id="atReplaceTextV2" rows="10" placeholder="eyJ...&#10;eyJ..." autocomplete="off" spellcheck="false"></textarea>
-        <span class="outlook-import-hint" id="atReplaceHintV2">每行一个 AT；支持带 Bearer 或 Authorization: 前缀。重复邮箱自动采用到期时间较晚的 AT。</span>
+        <textarea id="atReplaceTextV2" rows="10" placeholder="eyJ...&#10;或粘贴完整的 /api/auth/session JSON" autocomplete="off" spellcheck="false"></textarea>
+        <span class="outlook-import-hint" id="atReplaceHintV2">支持原始 JWT、Bearer、Authorization、邮箱----AT、Session JSON、JSON 数组和每行一个 Session JSON；重复邮箱采用到期时间较晚的 AT。</span>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -4421,17 +4421,17 @@ function openAtReplaceModal(accountId = null) {
   $('#atReplaceTitle').textContent = single ? '替换账号 AT' : '批量导入 AT';
   $('#atReplaceDescription').textContent = single
     ? `当前账号：${account.email}。系统会校验 AT 内邮箱，匹配后再替换。`
-    : '每行粘贴一个 AT。系统读取 JWT 内的邮箱，匹配账号页现有邮箱并替换 AT。';
+    : '支持原始 AT 或完整 /api/auth/session JSON。系统读取邮箱和套餐信息，匹配现有账号并替换。';
   $('#atReplaceFieldLabelV2').textContent = single ? '新的 AT' : 'AT 列表';
   $('#atReplaceHintV2').textContent = single
-    ? '粘贴一个 AT；JWT 内邮箱必须与当前账号一致。'
-    : '每行一个 AT；支持带 Bearer 或 Authorization: 前缀。重复邮箱自动采用到期时间较晚的 AT。';
+    ? '可粘贴一个原始 AT 或完整 Session JSON；其中邮箱必须与当前账号一致。'
+    : '支持原始 JWT、Bearer、Authorization、邮箱----AT、Session JSON、JSON 数组和每行一个 Session JSON；重复邮箱采用到期时间较晚的 AT。';
   $('#btnSubmitAtReplace').textContent = single ? '校验并替换' : '识别邮箱并替换';
   const text = $('#atReplaceTextV2');
   if (text) {
     text.value = '';
     text.rows = single ? 5 : 10;
-    text.placeholder = single ? 'eyJ...' : 'eyJ...\neyJ...';
+    text.placeholder = single ? 'eyJ...\n或完整的 /api/auth/session JSON' : 'eyJ...\n或完整的 /api/auth/session JSON';
   }
   const result = $('#atReplaceResultV2');
   if (result) result.innerHTML = '';
@@ -4465,7 +4465,9 @@ async function submitAtReplace() {
       result = await api('/api/accounts/replace-at-bulk', {
         method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text}),
       });
-      message = `已按 AT 邮箱自动替换 ${result.updated_count || 0} 个账号` +
+      const sessionCount = Number(result.format_counts?.session_json || 0);
+      message = `已识别并替换 ${result.updated_count || 0} 个账号` +
+        (sessionCount ? `（Session JSON ${sessionCount} 个）` : '') +
         ((result.skipped_count || 0) ? `；跳过 ${result.skipped_count} 条` : '');
       ACCOUNT_SELECTED.clear();
       (result.updated || []).forEach(item => ACCOUNT_SELECTED.add(Number(item.id)));

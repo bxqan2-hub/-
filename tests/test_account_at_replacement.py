@@ -8,16 +8,25 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core import db
-from webui.app import _access_token_identity, create_app
+from webui.app import _access_token_identity, _parse_at_import_text, create_app
 
 
-def _jwt(email: str, *, exp: int, top_level_email: bool = False, marker: str = "") -> str:
+def _jwt(
+    email: str,
+    *,
+    exp: int,
+    top_level_email: bool = False,
+    marker: str = "",
+    plan_type: str = "",
+) -> str:
     header = {"alg": "none", "typ": "JWT"}
     payload = {"exp": exp, "marker": marker}
     if top_level_email:
         payload["email"] = email
     else:
         payload["https://api.openai.com/profile"] = {"email": email}
+    if plan_type:
+        payload["https://api.openai.com/auth"] = {"chatgpt_plan_type": plan_type}
 
     def encode(value):
         raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
@@ -58,6 +67,53 @@ class AccountAtReplacementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "未识别到邮箱"):
             _access_token_identity(_jwt("", exp=4_102_444_800))
 
+    def test_identity_accepts_full_session_json_and_validates_session_email(self):
+        token = _jwt("plus@example.com", exp=4_202_444_800, plan_type="plus")
+        session = {
+            "WARNING_BANNER": "DO NOT SHARE",
+            "accessToken": token,
+            "sessionToken": "not-the-access-token",
+            "user": {"email": "plus@example.com", "name": "Plus User"},
+            "account": {"planType": "plus", "structure": "personal", "isDelinquent": False},
+        }
+        pretty = json.dumps(session, indent=2)
+
+        identity = _access_token_identity(pretty)
+
+        self.assertEqual(identity["email"], "plus@example.com")
+        self.assertEqual(identity["access_token"], token)
+        self.assertEqual(identity["plan_type"], "plus")
+        self.assertEqual(identity["plan_evidence_source"], "api/auth/session")
+        self.assertEqual(identity["input_format"], "session_json")
+        session["user"]["email"] = "mismatch@example.com"
+        with self.assertRaisesRegex(ValueError, "与 AT 邮箱 .* 不一致"):
+            _access_token_identity(session)
+
+    def test_import_text_accepts_session_object_json_array_ndjson_and_email_at(self):
+        one = _jwt("one@example.com", exp=4_102_444_800)
+        two = _jwt("two@example.com", exp=4_202_444_800)
+        entries, skipped = _parse_at_import_text(json.dumps([
+            {"accessToken": one, "user": {"email": "one@example.com"}},
+            two,
+        ]))
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(skipped, [])
+        ndjson, skipped = _parse_at_import_text(
+            json.dumps({"accessToken": one, "user": {"email": "one@example.com"}})
+            + "\n"
+            + f"two@example.com----{two}"
+        )
+        self.assertEqual(len(ndjson), 2)
+        self.assertEqual(skipped, [])
+        self.assertEqual(_access_token_identity(ndjson[1])["input_format"], "email_at")
+        pretty_stream, skipped = _parse_at_import_text(
+            json.dumps({"accessToken": one, "user": {"email": "one@example.com"}}, indent=2)
+            + "\n\n"
+            + json.dumps({"accessToken": two, "user": {"email": "two@example.com"}}, indent=2)
+        )
+        self.assertEqual(len(pretty_stream), 2)
+        self.assertEqual(skipped, [])
+
     def test_single_route_rejects_mismatch_then_replaces_matching_account(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -84,6 +140,67 @@ class AccountAtReplacementTests(unittest.TestCase):
                 self.assertEqual(stored["access_token"], replacement)
                 self.assertEqual(stored["at_validity_status"], "unchecked")
                 self.assertIsNone(stored["at_validity_trigger"])
+
+    def test_single_route_accepts_full_session_json_and_marks_plus(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self._patch_storage(root):
+                account_id = db.insert_account(email="plus@example.com", access_token="old-token")
+                token = _jwt("plus@example.com", exp=4_202_444_800, plan_type="plus")
+                session = {
+                    "accessToken": token,
+                    "user": {"email": "plus@example.com"},
+                    "account": {"planType": "plus", "isDelinquent": False},
+                }
+                client = create_app(auth_code="test-auth").test_client()
+                client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
+
+                response = client.post(f"/api/accounts/{account_id}/replace-at", json={
+                    "access_token": json.dumps(session, indent=2),
+                })
+
+                self.assertEqual(response.status_code, 200)
+                stored = db.get_account(account_id)
+                self.assertEqual(stored["access_token"], token)
+                self.assertEqual(stored["current_plan_type"], "plus")
+                self.assertTrue(stored["has_active_subscription"])
+                self.assertTrue(stored["has_active_plus_subscription"])
+                self.assertFalse(stored["is_free_plan"])
+                self.assertEqual(stored["plan_detection_source"], "api/auth/session")
+                self.assertEqual(stored["plan_check_status"], "success")
+
+    def test_bulk_route_accepts_json_array_of_sessions_and_raw_tokens(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self._patch_storage(root):
+                session_id = db.insert_account(email="session@example.com", access_token="old-session")
+                raw_id = db.insert_account(email="raw@example.com", access_token="old-raw")
+                session_token = _jwt("session@example.com", exp=4_202_444_800, plan_type="plus")
+                raw_token = _jwt("raw@example.com", exp=4_202_444_800, plan_type="plus")
+                client = create_app(auth_code="test-auth").test_client()
+                client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
+                text = json.dumps([
+                    {
+                        "accessToken": session_token,
+                        "user": {"email": "session@example.com"},
+                        "account": {"planType": "plus"},
+                    },
+                    raw_token,
+                ], indent=2)
+
+                response = client.post("/api/accounts/replace-at-bulk", json={"text": text})
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["input_count"], 2)
+                self.assertEqual(payload["updated_count"], 2)
+                self.assertEqual(payload["format_counts"], {"raw_at": 1, "session_json": 1})
+                self.assertNotIn(session_token, json.dumps(payload))
+                self.assertNotIn(raw_token, json.dumps(payload))
+                self.assertEqual(db.get_account(session_id)["access_token"], session_token)
+                self.assertTrue(db.get_account(session_id)["has_active_plus_subscription"])
+                self.assertEqual(db.get_account(raw_id)["access_token"], raw_token)
+                self.assertTrue(db.get_account(raw_id)["has_active_plus_subscription"])
 
     def test_bulk_route_matches_claim_email_prefers_later_expiry_and_syncs_pool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -129,7 +246,9 @@ class AccountAtReplacementTests(unittest.TestCase):
         self.assertIn('data-account-replace-at=', template)
         self.assertIn("/api/accounts/replace-at-bulk", template)
         self.assertIn("/replace-at`,", template)
-        self.assertIn("读取 JWT 内的邮箱", template)
+        self.assertIn("读取邮箱和套餐信息", template)
+        self.assertIn("完整 /api/auth/session JSON", template)
+        self.assertIn("Session JSON、JSON 数组", template)
 
 
 if __name__ == "__main__":

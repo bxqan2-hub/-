@@ -105,9 +105,71 @@ def _parse_manual_account_lines(text: str) -> tuple[list[dict], list[dict]]:
     return records, invalid
 
 
-def _access_token_identity(raw_token: str) -> dict:
-    """本地解析 OpenAI AT 的邮箱和到期时间；凭据只留在进程内。"""
-    token = chatgpt_plan.normalize_token(str(raw_token or ""))
+def _strip_pasted_code_fence(value: str) -> str:
+    text = str(value or "").strip().lstrip("\ufeff")
+    lines = text.splitlines()
+    if len(lines) >= 2 and lines[0].strip().startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def _session_payload_from_mapping(value: dict, depth: int = 0) -> dict | None:
+    if depth > 3:
+        return None
+    if any(str(value.get(key) or "").strip() for key in ("accessToken", "access_token")):
+        return value
+    for key in ("session", "data", "result"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            found = _session_payload_from_mapping(nested, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _access_token_identity(raw_token: object) -> dict:
+    """统一解析原始 AT、邮箱+AT 和 /api/auth/session JSON。"""
+    expected_email = ""
+    session_plan_type = ""
+    input_format = "raw_at"
+    value = raw_token
+    if isinstance(value, dict):
+        session = _session_payload_from_mapping(value)
+        if session is None:
+            raise ValueError("JSON 中没有 accessToken/access_token")
+        value = session.get("accessToken") or session.get("access_token")
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        account = session.get("account") if isinstance(session.get("account"), dict) else {}
+        expected_email = str(user.get("email") or session.get("email") or "").strip()
+        session_plan_type = str(account.get("planType") or account.get("plan_type") or "").strip()
+        input_format = "session_json"
+    elif isinstance(value, list):
+        if len(value) != 1:
+            raise ValueError("单账号替换一次只能提供一个 AT 或一个 Session JSON")
+        return _access_token_identity(value[0])
+    else:
+        text = _strip_pasted_code_fence(str(value or ""))
+        if text[:1] in {"{", "[", '"'}:
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError:
+                decoded = None
+            if decoded is not None:
+                return _access_token_identity(decoded)
+        delimiter = "----" if "----" in text else "====" if "====" in text else "\t" if "\t" in text else ""
+        if delimiter:
+            parts = [part.strip() for part in text.split(delimiter)]
+            if len(parts) >= 2 and "@" in parts[0]:
+                expected_email = parts[0]
+                text = parts[-1]
+                input_format = "email_at"
+        prefix_match = re.match(r"^(?:access_?token|accessToken)\s*[:=]\s*(.+)$", text, re.I | re.S)
+        if prefix_match:
+            text = prefix_match.group(1).strip()
+            input_format = "token_assignment"
+        value = text
+
+    token = chatgpt_plan.normalize_token(str(value or ""))
     if not token:
         raise ValueError("AT 不能为空")
     if len(token) > 32_768:
@@ -118,13 +180,80 @@ def _access_token_identity(raw_token: str) -> dict:
     email = str(claims.get("email") or "").strip()
     if not email or "@" not in email:
         raise ValueError("AT 中未识别到邮箱信息")
+    if expected_email and expected_email.casefold() != email.casefold():
+        raise ValueError(f"Session/导入行邮箱 {expected_email} 与 AT 邮箱 {email} 不一致")
+    claim_plan_type = str(claims.get("claim_plan_type") or "").strip()
     return {
         "access_token": token,
         "email": email,
         "token_expires_at": claims.get("token_expires_at"),
         "token_expired": claims.get("token_expired"),
         "exp": claims.get("exp"),
+        "plan_type": session_plan_type or claim_plan_type,
+        "plan_evidence_source": "api/auth/session" if session_plan_type else "access_token_claim" if claim_plan_type else "",
+        "input_format": input_format,
     }
+
+
+def _flatten_at_import_json(value: object, entries: list[object], skipped: list[dict], position: str) -> None:
+    if isinstance(value, list):
+        for index, item in enumerate(value, start=1):
+            _flatten_at_import_json(item, entries, skipped, f"{position}[{index}]")
+    elif isinstance(value, (dict, str)):
+        entries.append(value)
+    else:
+        skipped.append({"position": position, "reason": "JSON 项必须是 Session 对象或 AT 字符串"})
+
+
+def _parse_at_import_text(text: str) -> tuple[list[object], list[dict]]:
+    """解析完整/多行 Session JSON、JSON 数组、NDJSON 或逐行 AT。"""
+    source = _strip_pasted_code_fence(text)
+    if not source:
+        return [], []
+    entries: list[object] = []
+    skipped: list[dict] = []
+    try:
+        decoded = json.loads(source)
+    except json.JSONDecodeError:
+        decoded = None
+    if decoded is not None:
+        _flatten_at_import_json(decoded, entries, skipped, "json")
+        return entries, skipped
+
+    # 兼容连续粘贴多个格式化 Session JSON（对象之间只有空白，没有外层数组）。
+    decoder = json.JSONDecoder()
+    stream_values: list[object] = []
+    cursor = 0
+    while cursor < len(source):
+        while cursor < len(source) and source[cursor].isspace():
+            cursor += 1
+        if cursor >= len(source):
+            break
+        try:
+            value, end = decoder.raw_decode(source, cursor)
+        except json.JSONDecodeError:
+            stream_values = []
+            break
+        stream_values.append(value)
+        cursor = end
+    if stream_values:
+        for index, value in enumerate(stream_values, start=1):
+            _flatten_at_import_json(value, entries, skipped, f"json[{index}]")
+        return entries, skipped
+
+    for line_number, raw in enumerate(source.splitlines(), start=1):
+        line = raw.strip().lstrip("\ufeff")
+        if not line or line.startswith("#") or line.startswith("```"):
+            continue
+        try:
+            decoded_line = json.loads(line) if line[:1] in {"{", "[", '"'} else None
+        except json.JSONDecodeError:
+            decoded_line = None
+        if decoded_line is not None:
+            _flatten_at_import_json(decoded_line, entries, skipped, f"line {line_number}")
+        else:
+            entries.append(line)
+    return entries, skipped
 
 
 def _rewrite_integrated_location(value: str, prefix: str) -> str:
@@ -1049,7 +1178,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
         data = request.get_json(silent=True) or {}
         try:
-            identity = _access_token_identity(data.get("access_token") or data.get("token") or "")
+            source = data.get("access_token") or data.get("token") or data.get("session")
+            if source is None and any(key in data for key in ("accessToken", "account", "user")):
+                source = data
+            identity = _access_token_identity(source or "")
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         account_email = str(account.get("email") or "").strip()
@@ -1072,24 +1204,30 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/accounts/replace-at-bulk")
     def api_accounts_replace_at_bulk():
-        """解析每个 AT 的邮箱 claim，自动匹配现有账号并替换。"""
+        """解析 AT 或 Session JSON 的邮箱 claim，自动匹配现有账号并替换。"""
         data = request.get_json(silent=True) or {}
-        lines = [line.strip() for line in str(data.get("text") or "").splitlines() if line.strip()]
-        if not lines:
-            return jsonify({"ok": False, "error": "请粘贴至少一个 AT"}), 400
-        if len(lines) > 5000:
-            return jsonify({"ok": False, "error": "单次最多导入 5000 个 AT"}), 400
+        source = data.get("text")
+        if source is None and "items" in data:
+            source = data.get("items")
+        source_text = source if isinstance(source, str) else json.dumps(source, ensure_ascii=False) if source is not None else ""
+        entries, skipped = _parse_at_import_text(source_text)
+        if not entries:
+            return jsonify({"ok": False, "error": "请粘贴至少一个 AT 或 Session JSON", "skipped": skipped}), 400
+        if len(entries) > 5000:
+            return jsonify({"ok": False, "error": "单次最多导入 5000 个 AT/Session"}), 400
 
         candidates: dict[str, dict] = {}
-        skipped: list[dict] = []
-        for line_number, raw_token in enumerate(lines, start=1):
+        format_counts: dict[str, int] = {}
+        for position, raw_token in enumerate(entries, start=1):
             try:
                 identity = _access_token_identity(raw_token)
             except ValueError as exc:
-                skipped.append({"line": line_number, "reason": str(exc)})
+                skipped.append({"position": position, "reason": str(exc)})
                 continue
             normalized_email = identity["email"].casefold()
-            identity.update({"line": line_number, "source": "bulk_claim_email"})
+            input_format = str(identity.get("input_format") or "raw_at")
+            format_counts[input_format] = format_counts.get(input_format, 0) + 1
+            identity.update({"position": position, "source": f"bulk_{input_format}"})
             previous = candidates.get(normalized_email)
             if previous is not None:
                 previous_exp = previous.get("exp")
@@ -1098,14 +1236,14 @@ def create_app(auth_code: str | None = None) -> Flask:
                 current_rank = float(current_exp) if isinstance(current_exp, (int, float)) else -1
                 if current_rank >= previous_rank:
                     skipped.append({
-                        "line": previous.get("line"),
+                        "position": previous.get("position"),
                         "email": previous.get("email"),
                         "reason": "同邮箱存在多个 AT，已采用到期时间较晚的一条",
                     })
                     candidates[normalized_email] = identity
                 else:
                     skipped.append({
-                        "line": line_number,
+                        "position": position,
                         "email": identity.get("email"),
                         "reason": "同邮箱存在多个 AT，已采用到期时间较晚的一条",
                     })
@@ -1123,7 +1261,9 @@ def create_app(auth_code: str | None = None) -> Flask:
         skipped.extend(db_skipped)
         return jsonify({
             "ok": True,
+            "input_count": len(entries),
             "parsed_count": len(candidates),
+            "format_counts": format_counts,
             "updated": updated,
             "updated_count": len(updated),
             "skipped": skipped,

@@ -2243,6 +2243,46 @@ def replace_account_access_tokens(records: list[dict]) -> tuple[list[dict], list
             row["access_token_replaced_at"] = now
             row["access_token_replace_source"] = str(raw.get("source") or "manual")[:40]
             _reset_account_at_validity_fields(row)
+            imported_plan = str(raw.get("plan_type") or "").strip().lower()
+            plan_evidence_source = str(raw.get("plan_evidence_source") or "").strip()
+            if imported_plan:
+                row["plan_type"] = imported_plan
+                row["current_plan_type"] = imported_plan
+                row["plan_check_status"] = "success"
+                row["plan_check_ok"] = True
+                row["plan_check_error"] = None
+                row["plan_check_http_status"] = None
+                row["plan_check_queued_at"] = None
+                row["plan_check_started_at"] = None
+                row["plan_checked_at"] = now
+                row["plan_check_completed_at"] = now
+                row["plan_last_success_at"] = now
+                row["plan_detection_status"] = "confirmed"
+                row["plan_detection_source"] = plan_evidence_source or "access_token_claim"
+                row["plan_authority"] = "session" if plan_evidence_source == "api/auth/session" else "token_claim"
+                row["plan_confidence"] = "high" if plan_evidence_source == "api/auth/session" else "medium"
+                row["plan_check_network_route"] = None
+                row["plan_check_proxy_used"] = None
+                row["plan_check_proxy_fallback_reason"] = None
+                row["plan_check_proxy_country"] = None
+                row["plan_check_result_json"] = json.dumps({
+                    "ok": True,
+                    "checked_at": now,
+                    "current_plan_type": imported_plan,
+                    "plan_detection_source": row["plan_detection_source"],
+                    "plan_authority": row["plan_authority"],
+                    "plan_confidence": row["plan_confidence"],
+                }, ensure_ascii=False)
+                is_plus = "plus" in imported_plan and "free" not in imported_plan
+                is_free = imported_plan in {"free", "chatgptfreeplan"}
+                if is_plus:
+                    row["has_active_subscription"] = True
+                    row["has_active_plus_subscription"] = True
+                    row["is_free_plan"] = False
+                elif is_free:
+                    row["has_active_subscription"] = False
+                    row["has_active_plus_subscription"] = False
+                    row["is_free_plan"] = True
             row["updated_at"] = now
             normalized_email = str(row.get("email") or "").strip().lower()
             for pool_rows in (outlook_rows, generic_rows, domain_rows):
