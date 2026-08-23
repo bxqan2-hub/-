@@ -82,8 +82,8 @@ class AccountAtReplacementTests(unittest.TestCase):
 
         self.assertEqual(identity["email"], "plus@example.com")
         self.assertEqual(identity["access_token"], token)
-        self.assertEqual(identity["plan_type"], "plus")
-        self.assertEqual(identity["plan_evidence_source"], "api/auth/session")
+        self.assertNotIn("plan_type", identity)
+        self.assertNotIn("plan_evidence_source", identity)
         self.assertEqual(identity["input_format"], "session_json")
         session["user"]["email"] = "mismatch@example.com"
         with self.assertRaisesRegex(ValueError, "与 AT 邮箱 .* 不一致"):
@@ -141,11 +141,24 @@ class AccountAtReplacementTests(unittest.TestCase):
                 self.assertEqual(stored["at_validity_status"], "unchecked")
                 self.assertIsNone(stored["at_validity_trigger"])
 
-    def test_single_route_accepts_full_session_json_and_marks_plus(self):
+    def test_single_route_accepts_full_session_json_without_changing_plan_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with self._patch_storage(root):
-                account_id = db.insert_account(email="plus@example.com", access_token="old-token")
+                account_id = db.insert_account(
+                    email="plus@example.com",
+                    access_token="old-token",
+                    plan_type="free",
+                )
+                db.update_account_plan_check(acc_id=account_id, result={
+                    "ok": True,
+                    "current_plan_type": "free",
+                    "is_free_plan": True,
+                    "has_active_subscription": False,
+                    "has_active_plus_subscription": False,
+                    "plan_detection_source": "backend-api/accounts/check",
+                    "plan_authority": "authoritative",
+                })
                 token = _jwt("plus@example.com", exp=4_202_444_800, plan_type="plus")
                 session = {
                     "accessToken": token,
@@ -162,19 +175,24 @@ class AccountAtReplacementTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 stored = db.get_account(account_id)
                 self.assertEqual(stored["access_token"], token)
-                self.assertEqual(stored["current_plan_type"], "plus")
-                self.assertTrue(stored["has_active_subscription"])
-                self.assertTrue(stored["has_active_plus_subscription"])
-                self.assertFalse(stored["is_free_plan"])
-                self.assertEqual(stored["plan_detection_source"], "api/auth/session")
+                self.assertEqual(stored["current_plan_type"], "free")
+                self.assertFalse(stored["has_active_subscription"])
+                self.assertFalse(stored["has_active_plus_subscription"])
+                self.assertTrue(stored["is_free_plan"])
+                self.assertEqual(stored["plan_detection_source"], "backend-api/accounts/check")
+                self.assertEqual(stored["plan_authority"], "authoritative")
                 self.assertEqual(stored["plan_check_status"], "success")
 
     def test_bulk_route_accepts_json_array_of_sessions_and_raw_tokens(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with self._patch_storage(root):
-                session_id = db.insert_account(email="session@example.com", access_token="old-session")
-                raw_id = db.insert_account(email="raw@example.com", access_token="old-raw")
+                session_id = db.insert_account(
+                    email="session@example.com", access_token="old-session", plan_type="free",
+                )
+                raw_id = db.insert_account(
+                    email="raw@example.com", access_token="old-raw", plan_type="free",
+                )
                 session_token = _jwt("session@example.com", exp=4_202_444_800, plan_type="plus")
                 raw_token = _jwt("raw@example.com", exp=4_202_444_800, plan_type="plus")
                 client = create_app(auth_code="test-auth").test_client()
@@ -198,9 +216,11 @@ class AccountAtReplacementTests(unittest.TestCase):
                 self.assertNotIn(session_token, json.dumps(payload))
                 self.assertNotIn(raw_token, json.dumps(payload))
                 self.assertEqual(db.get_account(session_id)["access_token"], session_token)
-                self.assertTrue(db.get_account(session_id)["has_active_plus_subscription"])
+                self.assertEqual(db.get_account(session_id)["plan_type"], "free")
+                self.assertIsNone(db.get_account(session_id).get("has_active_plus_subscription"))
                 self.assertEqual(db.get_account(raw_id)["access_token"], raw_token)
-                self.assertTrue(db.get_account(raw_id)["has_active_plus_subscription"])
+                self.assertEqual(db.get_account(raw_id)["plan_type"], "free")
+                self.assertIsNone(db.get_account(raw_id).get("has_active_plus_subscription"))
 
     def test_bulk_route_matches_claim_email_prefers_later_expiry_and_syncs_pool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -246,7 +266,7 @@ class AccountAtReplacementTests(unittest.TestCase):
         self.assertIn('data-account-replace-at=', template)
         self.assertIn("/api/accounts/replace-at-bulk", template)
         self.assertIn("/replace-at`,", template)
-        self.assertIn("读取邮箱和套餐信息", template)
+        self.assertIn("只读取邮箱用于匹配账号并替换 AT，不改变套餐检测结果", template)
         self.assertIn("完整 /api/auth/session JSON", template)
         self.assertIn("Session JSON、JSON 数组", template)
 

@@ -3007,7 +3007,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="atReplaceTitle">批量导入 AT</h3>
-        <p id="atReplaceDescription">支持原始 AT 或完整 /api/auth/session JSON。系统读取邮箱和套餐信息，匹配现有账号并替换。</p>
+        <p id="atReplaceDescription">支持原始 AT 或完整 /api/auth/session JSON。系统只读取邮箱用于匹配账号并替换 AT，不改变套餐检测结果。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseAtReplace" aria-label="关闭">×</button>
     </div>
@@ -4421,7 +4421,7 @@ function openAtReplaceModal(accountId = null) {
   $('#atReplaceTitle').textContent = single ? '替换账号 AT' : '批量导入 AT';
   $('#atReplaceDescription').textContent = single
     ? `当前账号：${account.email}。系统会校验 AT 内邮箱，匹配后再替换。`
-    : '支持原始 AT 或完整 /api/auth/session JSON。系统读取邮箱和套餐信息，匹配现有账号并替换。';
+    : '支持原始 AT 或完整 /api/auth/session JSON。系统只读取邮箱用于匹配账号并替换 AT，不改变套餐检测结果。';
   $('#atReplaceFieldLabelV2').textContent = single ? '新的 AT' : 'AT 列表';
   $('#atReplaceHintV2').textContent = single
     ? '可粘贴一个原始 AT 或完整 Session JSON；其中邮箱必须与当前账号一致。'

@@ -225,7 +225,6 @@ def _session_payload_from_mapping(value: dict, depth: int = 0) -> dict | None:
 def _access_token_identity(raw_token: object) -> dict:
     """统一解析原始 AT、邮箱+AT 和 /api/auth/session JSON。"""
     expected_email = ""
-    session_plan_type = ""
     input_format = "raw_at"
     value = raw_token
     if isinstance(value, dict):
@@ -234,9 +233,7 @@ def _access_token_identity(raw_token: object) -> dict:
             raise ValueError("JSON 中没有 accessToken/access_token")
         value = session.get("accessToken") or session.get("access_token")
         user = session.get("user") if isinstance(session.get("user"), dict) else {}
-        account = session.get("account") if isinstance(session.get("account"), dict) else {}
         expected_email = str(user.get("email") or session.get("email") or "").strip()
-        session_plan_type = str(account.get("planType") or account.get("plan_type") or "").strip()
         input_format = "session_json"
     elif isinstance(value, list):
         if len(value) != 1:
@@ -277,15 +274,12 @@ def _access_token_identity(raw_token: object) -> dict:
         raise ValueError("AT 中未识别到邮箱信息")
     if expected_email and expected_email.casefold() != email.casefold():
         raise ValueError(f"Session/导入行邮箱 {expected_email} 与 AT 邮箱 {email} 不一致")
-    claim_plan_type = str(claims.get("claim_plan_type") or "").strip()
     return {
         "access_token": token,
         "email": email,
         "token_expires_at": claims.get("token_expires_at"),
         "token_expired": claims.get("token_expired"),
         "exp": claims.get("exp"),
-        "plan_type": session_plan_type or claim_plan_type,
-        "plan_evidence_source": "api/auth/session" if session_plan_type else "access_token_claim" if claim_plan_type else "",
         "input_format": input_format,
     }
 
