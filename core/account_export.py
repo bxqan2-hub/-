@@ -880,7 +880,21 @@ def _browser_authenticated_json_post(
         raise TwoFASetupError(stage, code, message)
     status = int(result.get("status") or 0)
     if status != 200:
-        raise TwoFASetupError(stage, code, message, http_status=status or None)
+        # Keep the stable error code for callers, but include the browser
+        # response stage/status so the registration log explains whether the
+        # failure was a missing session, a rejected token, or a transport error.
+        detail = str(result.get("error") or "").strip()
+        if not detail and isinstance(result.get("body"), dict):
+            body = result.get("body") or {}
+            for key in ("error_code", "error", "code", "message", "detail"):
+                value = str(body.get(key) or "").strip()
+                if value:
+                    detail = value
+                    break
+        suffix = f" stage={result.get('stage') or 'request'}"
+        if detail:
+            suffix += f" detail={redact_otp_text(detail[:180])}"
+        raise TwoFASetupError(stage, code, f"{message} HTTP {status or 0}{suffix}", http_status=status or None)
     if not bool(result.get("json", True)):
         raise TwoFASetupError(stage, code, f"{message}（响应不是 JSON）", http_status=status)
     body = result.get("body")
@@ -899,6 +913,7 @@ def _setup_totp_with_driver(
     email: str,
     *,
     authenticated_email: str = "",
+    access_token: str = "",
 ) -> tuple[str, str, str | None]:
     """按参考项目的实时浏览器方案直接 enroll/activate TOTP。"""
     _assert_authenticated_account(email, authenticated_email)
@@ -925,6 +940,7 @@ def _setup_totp_with_driver(
         driver,
         "/backend-api/accounts/mfa/enroll",
         {"factor_type": "totp"},
+        access_token=access_token,
         stage="totp_enroll",
         code="totp_browser_enroll_failed",
         message="浏览器 MFA enroll 请求失败",
@@ -1713,6 +1729,7 @@ def _setup_2fa_result(
     existing_password: str | None = None,
     desired_password: str | None = None,
     authenticated_email: str = "",
+    access_token: str = "",
 ) -> TwoFASetupResult:
     """
     完整的 2FA 设置流程。
@@ -1831,6 +1848,7 @@ def _setup_2fa_result(
             driver,
             email,
             authenticated_email=authenticated_email,
+            access_token=access_token,
         )
         setattr(session, "_twofa_session_expires", browser_expires)
         totp_checkpoint_persisted = _persist_activated_totp_checkpoint(email, secret, new_token)
@@ -1966,6 +1984,7 @@ def setup_2fa_result(
     existing_password: str | None = None,
     desired_password: str | None = None,
     authenticated_email: str = "",
+    access_token: str = "",
 ) -> TwoFASetupResult:
     """执行完整 2FA 流程并返回可落库的 Secret 与刷新后 Token。"""
     try:
@@ -1977,6 +1996,7 @@ def setup_2fa_result(
             existing_password=existing_password,
             desired_password=desired_password,
             authenticated_email=authenticated_email,
+            access_token=access_token,
         )
         try:
             setup_status = result.password_setup or {}
@@ -2018,6 +2038,7 @@ def setup_2fa(
     existing_password: str | None = None,
     desired_password: str | None = None,
     authenticated_email: str = "",
+    access_token: str = "",
 ) -> str:
     """兼容旧调用方：执行完整流程并只返回规范化 Secret。"""
     return setup_2fa_result(
@@ -2028,6 +2049,7 @@ def setup_2fa(
         existing_password=existing_password,
         desired_password=desired_password,
         authenticated_email=authenticated_email,
+        access_token=access_token,
     ).secret
 
 
@@ -2143,6 +2165,7 @@ def maybe_setup_2fa_result(
     existing_password: str | None = None,
     desired_password: str | None = None,
     authenticated_email: str = "",
+    access_token: str = "",
 ) -> TwoFASetupResult | None:
     """按开关执行 2FA；失败只降级为 None，保留已注册账号。"""
     try:
@@ -2166,6 +2189,7 @@ def maybe_setup_2fa_result(
             existing_password=existing_password,
             desired_password=desired_password,
             authenticated_email=authenticated_email,
+            access_token=access_token,
         )
     except TwoFASetupError as exc:
         _set_twofa_error(session, exc)
@@ -2184,6 +2208,7 @@ def maybe_setup_2fa(
     existing_password: str | None = None,
     desired_password: str | None = None,
     authenticated_email: str = "",
+    access_token: str = "",
 ) -> str | None:
     """兼容旧调用方：返回 Secret 或 None。"""
     result = maybe_setup_2fa_result(
@@ -2193,6 +2218,7 @@ def maybe_setup_2fa(
         existing_password=existing_password,
         desired_password=desired_password,
         authenticated_email=authenticated_email,
+        access_token=access_token,
     )
     return result.secret if result else None
 

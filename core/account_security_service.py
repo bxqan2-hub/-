@@ -238,6 +238,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                 driver,
                 email,
                 authenticated_email=authenticated_email,
+                access_token=access_token,
             )
             access_token = str(refreshed_token or access_token).strip()
             totp_done = True

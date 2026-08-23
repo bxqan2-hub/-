@@ -3717,6 +3717,7 @@ def run_roxy_registration(
                     existing_password=openai_password,
                     desired_password=password_state.get("desired"),
                     authenticated_email=str((session_info.get("user") or {}).get("email") or ""),
+                    access_token=access_token,
                 )
                 twofa_error = getattr(twofa_session, "_twofa_last_error", None)
                 if twofa_result:
@@ -3748,7 +3749,13 @@ def run_roxy_registration(
                     logger.warning("[Roxy注册][2FA] 未完成，账号仍保存")
             except Exception as exc:
                 twofa_error = twofa_failure_payload(exc, default_stage="totp_proxy")
-                logger.warning("[Roxy注册][2FA] 执行失败，账号仍保存：%s", type(exc).__name__)
+                logger.warning(
+                    "[Roxy注册][2FA] 执行失败，账号仍保存：stage=%s code=%s http=%s message=%s",
+                    twofa_error.get("stage") if isinstance(twofa_error, dict) else "-",
+                    twofa_error.get("code") if isinstance(twofa_error, dict) else type(exc).__name__,
+                    twofa_error.get("http_status") if isinstance(twofa_error, dict) else "-",
+                    twofa_error.get("message") if isinstance(twofa_error, dict) else str(exc)[:180],
+                )
             finally:
                 if twofa_session is not None:
                     twofa_session.close()

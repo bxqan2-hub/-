@@ -539,6 +539,7 @@ def test_setup_2fa_prefers_live_browser_mfa_and_skips_csrf_reauth(monkeypatch) -
         driver=Driver(),
         existing_password="Stable-pass-1!",
         authenticated_email="USER@example.com",
+        access_token="session-access-token",
     )
 
     assert result.secret == "JBSWY3DPEHPK3PXP"
@@ -550,7 +551,7 @@ def test_setup_2fa_prefers_live_browser_mfa_and_skips_csrf_reauth(monkeypatch) -
         "/backend-api/accounts/mfa/enroll",
         "/backend-api/accounts/mfa/user/activate_enrollment",
     ]
-    assert calls[0][3] == ""
+    assert calls[0][3] == "session-access-token"
     assert calls[1][3] == "browser-access-token"
     assert calls[1][2]["factor_type"] == "totp"
     assert calls[1][2]["session_id"] == "enrollment-session"

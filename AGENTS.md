@@ -12,6 +12,14 @@
 - Before handoff, verify that the working tree is clean and that the local HEAD
   matches the pushed remote branch.
 
+## Persistent upstream reference
+
+- Before changing ChatGPT registration, Roxy browser, password, or MFA logic,
+  read `docs/UPSTREAM_PROJECT_INDEX.md`. It locks the GPT-utral-platform source
+  URL/commit, relevant upstream files, local mappings, and the required
+  comparison/update steps so the upstream address does not need to be supplied
+  again for each change.
+
 ## Payment / extraction integrations
 
 The only runtime implementation for payment-link extraction is:
