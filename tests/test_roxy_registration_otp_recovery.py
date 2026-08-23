@@ -526,6 +526,30 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(submit_password.call_count, 2)
         self.assertEqual(checkpoints, [("mail@example.test", "Password1!")])
 
+    def test_missing_password_input_waits_for_navigation_instead_of_new_submit_error(self):
+        driver = MagicMock()
+        checkpoints = []
+        with patch("core.roxy_registration._is_email_verification_page", side_effect=[False, True]), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration._is_login_password_page", return_value=False), \
+             patch("core.roxy_registration._submit_signup_password_direct", return_value={
+                 "ok": False,
+                 "reason": "missing_password_input",
+             }), \
+             patch("core.roxy_registration._registration_password", return_value="Password1!"), \
+             patch("core.roxy_registration.human_delay"):
+            password = roxy_registration._fill_password_page_if_present(
+                driver,
+                "mail@example.test",
+                timeout=1,
+                allow_passwordless=False,
+                on_confirmed=lambda *args: checkpoints.append(args),
+            )
+
+        self.assertEqual(password, "Password1!")
+        self.assertEqual(checkpoints, [("mail@example.test", "Password1!")])
+
     def test_email_already_verified_page_is_success_not_invalid_otp(self):
         driver = MagicMock()
         verified = {

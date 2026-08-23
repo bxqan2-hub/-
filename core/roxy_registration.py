@@ -2652,16 +2652,85 @@ def _fill_password_page_if_present(
         submit_timeout = max(6, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_TIMEOUT", 16) or 16))
         submit_attempts = max(1, min(2, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_ATTEMPTS", 2) or 2)))
         observe_per_attempt = max(4, submit_timeout // submit_attempts)
-        for submit_attempt in range(1, submit_attempts + 1):
+
+        def has_password_input(state: dict | None) -> bool:
+            return any(
+                item.get("visible")
+                and (
+                    str(item.get("type") or "").lower() == "password"
+                    or "password" in str(item.get("name") or "").lower()
+                    or str(item.get("autocomplete") or "").lower() == "new-password"
+                )
+                for item in (state or {}).get("inputs") or []
+            )
+
+        submit_attempt = 1
+        missing_input_recoveries = 0
+        while submit_attempt <= submit_attempts:
+            # requestSubmit may remove the React form briefly before the URL
+            # changes. Re-check terminal states before another real submit.
+            if _is_email_verification_page(driver):
+                logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
+                return confirmed(selected_password)
             if submit_attempt > 1:
                 logger.warning("%s 密码提交无响应，重新定位同一表单并进行第 %s/%s 次提交", _log_prefix(driver), submit_attempt, submit_attempts)
             result = _submit_signup_password_direct(driver, selected_password)
-            if not result.get('ok'):
+            if not result.get("ok"):
+                if result.get("reason") == "missing_password_input":
+                    # A disappearing input is a navigation/hydration race, not
+                    # a password rejection. Do not spend a real submit attempt
+                    # until the same form has hydrated again.
+                    settle_end = time.time() + observe_per_attempt
+                    while time.time() < settle_end:
+                        if _is_email_verification_page(driver):
+                            logger.info("%s 密码提交后在表单重定位期间进入邮箱验证码页", _log_prefix(driver))
+                            return confirmed(selected_password)
+                        if _has_access_token(driver):
+                            logger.info("%s 密码提交后在表单重定位期间检测到登录态", _log_prefix(driver))
+                            return confirmed(selected_password)
+                        last = _password_page_state(driver)
+                        errors = [str(x) for x in (last.get("errors") or []) if str(x).strip()]
+                        if errors:
+                            raise RuntimeError(f"创建账号密码提交被拒绝: errors={errors} state={last}")
+                        if has_password_input(last):
+                            break
+                        time.sleep(0.35)
+                    if _is_email_verification_page(driver) or _has_access_token(driver):
+                        return confirmed(selected_password)
+                    if has_password_input(last):
+                        missing_input_recoveries += 1
+                        if missing_input_recoveries <= 2:
+                            logger.warning("%s 密码表单重新出现，等待 DOM 稳定后重试同一次提交（恢复 %s/2）", _log_prefix(driver), missing_input_recoveries)
+                            time.sleep(0.2)
+                            continue
+                    missing_input_recoveries = 0
+                    if not _is_signup_password_page(driver):
+                        advanced = _otp_flow_advanced_state(driver)
+                        if advanced in ("profile", "logged_in", "email_verified"):
+                            return confirmed(selected_password)
+                        if _has_access_token(driver):
+                            logger.info("%s 密码提交后离开密码页并检测到登录态", _log_prefix(driver))
+                            return confirmed(selected_password)
+                        logger.warning("%s 密码提交后页面已离开密码路由但尚未确认最终状态，继续观察：state=%s", _log_prefix(driver), last)
+                        if submit_attempt < submit_attempts:
+                            submit_attempt += 1
+                            continue
+                        raise RuntimeError(f"创建账号密码提交后未确认最终页面状态: state={last}")
+                    if submit_attempt < submit_attempts:
+                        logger.warning("%s 密码表单暂不可提交，等待 DOM 稳定后重试：%s", _log_prefix(driver), result)
+                        submit_attempt += 1
+                        continue
+                    # The page is still the password route, but the input is
+                    # not ready. Preserve the original terminal diagnosis;
+                    # this is distinct from a rejected submit or a script error.
+                    raise RuntimeError(f"创建账号密码提交后仍停留在密码页: state={last}")
                 if submit_attempt < submit_attempts:
                     logger.warning("%s 密码表单暂不可提交，等待 DOM 稳定后重试：%s", _log_prefix(driver), result)
+                    submit_attempt += 1
                     time.sleep(0.5)
                     continue
                 raise RuntimeError(f"密码页处理失败：{result} state={last}")
+            missing_input_recoveries = 0
             logger.info("%s 已填写并提交密码页（%s/%s）", _log_prefix(driver), submit_attempt, submit_attempts)
             wait_end = time.time() + observe_per_attempt
             while time.time() < wait_end:
@@ -2687,6 +2756,8 @@ def _fill_password_page_if_present(
                     time.sleep(0.35)
                     continue
                 time.sleep(0.35)
+            submit_attempt += 1
+
         raise RuntimeError(f"创建账号密码提交后仍停留在密码页: state={last}")
     logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
     return None
