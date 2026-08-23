@@ -10,9 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from core import db
 
@@ -41,6 +43,19 @@ def _append_log(email: str, message: str, *, clear: bool = False) -> None:
     stamp = datetime.now().strftime("%H:%M:%S")
     with path.open(mode, encoding="utf-8") as handle:
         handle.write(f"{stamp} [INFO] {str(message or '')[:1000]}\n")
+
+
+def _proxy_label(value: str) -> str:
+    """只记录代理 host/port，避免把 Roxy 代理凭据写进账号日志。"""
+    try:
+        parsed = urlparse(str(value or ""))
+        if parsed.hostname and parsed.port:
+            return f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+        if parsed.hostname:
+            return f"{parsed.scheme}://{parsed.hostname}"
+    except Exception:
+        pass
+    return "direct" if not str(value or "").strip() else "configured"
 
 
 def _stored_password(account: dict) -> str:
@@ -105,25 +120,62 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         from config import roxybrowser as roxy_cfg
 
         client = RoxyBrowserClient()
-        opened = client.open_profile(headless=False, require_proxy_exit_ip=False)
-        if not db.mark_account_security_setup_running(account_id, profile_id=opened.profile_id):
-            raise RuntimeError("账号已删除或安全设置状态已重置")
-        driver = _build_driver(opened)
-        _center_browser_window(driver)
-        driver.set_page_load_timeout(int(roxy_cfg.ROXY_SELENIUM_TIMEOUT))
-        try:
-            driver.set_script_timeout(max(120, int(roxy_cfg.ROXY_SELENIUM_TIMEOUT)))
-        except Exception:
-            pass
+        session_info = None
+        browser_attempts = max(1, min(3, int(getattr(roxy_cfg, "ROXY_CREATE_API_ATTEMPTS", 2) or 2) + 1))
+        for browser_attempt in range(1, browser_attempts + 1):
+            try:
+                # 先做真实出口预检，再创建 Roxy 环境；这样浏览器不会直接吃到刚失效的粘性代理。
+                opened = client.open_profile(headless=False, require_proxy_exit_ip=True)
+                if not db.mark_account_security_setup_running(account_id, profile_id=opened.profile_id):
+                    raise RuntimeError("账号已删除或安全设置状态已重置")
+                driver = _build_driver(opened)
+                _center_browser_window(driver)
+                driver.set_page_load_timeout(int(roxy_cfg.ROXY_SELENIUM_TIMEOUT))
+                try:
+                    driver.set_script_timeout(max(120, int(roxy_cfg.ROXY_SELENIUM_TIMEOUT)))
+                except Exception:
+                    pass
 
-        _append_log(email, f"[安全扩展] 已打开独立 Roxy 环境 {opened.profile_id}，开始邮箱 OTP 登录")
-        _fill_email_and_otp(driver, email, wait_for_otp, "https://chatgpt.com/auth/login")
-        session_info = _fetch_chatgpt_session(
-            driver,
-            timeout=max(15, int(getattr(roxy_cfg, "ROXY_SESSION_WAIT_TIMEOUT", 25) or 25)),
-            auto_jump_wait=max(3, int(getattr(roxy_cfg, "ROXY_SESSION_AUTO_JUMP_WAIT", 8) or 8)),
-            refresh_attempts=1,
-        )
+                _append_log(
+                    email,
+                    f"[安全扩展] Roxy 尝试 {browser_attempt}/{browser_attempts}："
+                    f"profile={opened.profile_id} proxy={_proxy_label(client.profile_proxy)}，开始邮箱 OTP 登录",
+                )
+                _fill_email_and_otp(driver, email, wait_for_otp, "https://chatgpt.com/auth/login")
+                _append_log(email, "[安全扩展] 邮箱 OTP 登录步骤结束，开始读取 ChatGPT session")
+                session_info = _fetch_chatgpt_session(
+                    driver,
+                    timeout=max(15, int(getattr(roxy_cfg, "ROXY_SESSION_WAIT_TIMEOUT", 25) or 25)),
+                    auto_jump_wait=max(3, int(getattr(roxy_cfg, "ROXY_SESSION_AUTO_JUMP_WAIT", 8) or 8)),
+                    refresh_attempts=1,
+                )
+                break
+            except Exception as exc:
+                _append_log(
+                    email,
+                    f"[安全扩展] Roxy 尝试 {browser_attempt}/{browser_attempts} 失败："
+                    f"{type(exc).__name__}: {str(exc)[:240]}",
+                )
+                if driver is not None:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    driver = None
+                if client is not None and opened is not None:
+                    try:
+                        client.cleanup_profile(opened)
+                    except Exception:
+                        logger.exception("[安全扩展] Roxy 重试前清理失败 account_id=%s", account_id)
+                    opened = None
+                if browser_attempt >= browser_attempts:
+                    raise
+                # 丢弃旧粘性代理；下一轮 open_profile 会重新预检并重新抽取代理。
+                client.profile_proxy = None
+                client.profile_proxy_source = None
+                time.sleep(1.0)
+        if not isinstance(session_info, dict):
+            raise RuntimeError("浏览器登录后没有返回 ChatGPT session")
         authenticated_email = str((session_info.get("user") or {}).get("email") or "").strip()
         if authenticated_email.casefold() != email.casefold():
             raise RuntimeError("浏览器登录账号与目标账号不一致，已停止安全设置")

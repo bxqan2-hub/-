@@ -240,7 +240,7 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
     assert result["ok"] is True
     assert result["password_done"] is True
     assert result["totp_done"] is True
-    assert calls["open_profile"] == {"headless": False, "require_proxy_exit_ip": False}
+    assert calls["open_profile"] == {"headless": False, "require_proxy_exit_ip": True}
     assert calls["login_email"] == "worker@example.com"
     assert calls["login_url"] == "https://chatgpt.com/auth/login"
     assert calls["password"]["password_mode"] == "reset"
