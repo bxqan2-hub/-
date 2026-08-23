@@ -2455,13 +2455,21 @@ def _click_signup_password_link_if_present(driver, timeout: int = 15) -> bool:
     return _is_signup_password_page(driver)
 
 
-def _submit_signup_password_direct(driver, password: str) -> dict:
-    """在一次页面脚本中写入 React 密码值并点击该表单的提交按钮。
+def _submit_signup_password_direct(
+    driver,
+    password: str,
+    *,
+    submit_mode: str = "click_async",
+) -> dict:
+    """写入 React 密码值并在页面事件循环中提交当前表单。
 
-    流程来源：Torin-x/GPT-utral-platform 的浏览器密码提交实现。
+    首次尝试沿用上游的原生按钮点击；只有上一轮观察窗口耗尽后，第二次
+    尝试才切到 requestSubmit，避免同步 execute_script 卡住 ChromeDriver。
     """
+    mode = str(submit_mode or "click_async").strip().lower()
     return driver.execute_script(r"""
     const password = String(arguments[0]);
+    const submitMode = String(arguments[1] || 'click_async');
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
       && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
       && !el.disabled && !el.readOnly;
@@ -2502,13 +2510,53 @@ def _submit_signup_password_direct(driver, password: str) -> dict:
     if (!buttons.length) return {ok:false, reason:'missing_submit'};
     const submit = buttons[0].el;
     submit.scrollIntoView({block:'center'});
-    if (form && typeof form.requestSubmit === 'function' && submit.tagName === 'BUTTON') {
-      form.requestSubmit(submit);
-      return {ok:true, reason:'submitted_password', method:'requestSubmit'};
-    }
-    submit.click();
-    return {ok:true, reason:'submitted_password', method:'click'};
-    """, str(password or "")) or {}
+    const submitNow = () => {
+      if (submitMode === 'request_submit_async') {
+        if (form && typeof form.requestSubmit === 'function') {
+          form.requestSubmit(submit);
+          return 'requestSubmit';
+        }
+        if (form && typeof form.submit === 'function') {
+          form.submit();
+          return 'formSubmit';
+        }
+      }
+      try {
+        for (const type of ['pointerdown', 'mousedown', 'mouseup']) {
+          try { submit.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window})); } catch (_) {}
+        }
+        submit.click();
+        return 'click';
+      } catch (clickError) {
+        if (form && typeof form.requestSubmit === 'function') {
+          form.requestSubmit(submit);
+          return 'requestSubmitFallback';
+        }
+        if (form && typeof form.submit === 'function') {
+          form.submit();
+          return 'formSubmitFallback';
+        }
+        throw clickError;
+      }
+    };
+    // Do not synchronously execute a submit/navigation from execute_script.
+    // Roxy/Chrome can hold the WebDriver script until the auth route settles.
+    setTimeout(() => {
+      try {
+        window.__roxy_password_submit_debug = {
+          at: Date.now(),
+          mode: submitMode,
+          method: submitNow(),
+          url: location.href,
+        };
+      } catch (error) {
+        window.__roxy_password_submit_debug = {
+          at: Date.now(), mode: submitMode, error: String(error), url: location.href,
+        };
+      }
+    }, 80);
+    return {ok:true, reason:'submitted_password', method:`scheduled_${submitMode}`};
+    """, str(password or ""), mode) or {}
 
 
 def _click_passwordless_signup_if_present(driver) -> dict:
@@ -2651,7 +2699,10 @@ def _fill_password_page_if_present(
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(selected_password), email)
         submit_timeout = max(6, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_TIMEOUT", 16) or 16))
         submit_attempts = max(1, min(2, int(getattr(_cfg, "ROXY_PASSWORD_SUBMIT_ATTEMPTS", 2) or 2)))
-        observe_per_attempt = max(4, submit_timeout // submit_attempts)
+        # The upstream flow keeps one submit under observation for up to 20s.
+        # Splitting the old 16s budget across two attempts caused a second
+        # submit at 8s, while the first request was still being processed.
+        observe_per_attempt = max(20, min(30, submit_timeout))
 
         def has_password_input(state: dict | None) -> bool:
             return any(
@@ -2674,7 +2725,12 @@ def _fill_password_page_if_present(
                 return confirmed(selected_password)
             if submit_attempt > 1:
                 logger.warning("%s 密码提交无响应，重新定位同一表单并进行第 %s/%s 次提交", _log_prefix(driver), submit_attempt, submit_attempts)
-            result = _submit_signup_password_direct(driver, selected_password)
+            submit_mode = "click_async" if submit_attempt == 1 else "request_submit_async"
+            result = _submit_signup_password_direct(
+                driver,
+                selected_password,
+                submit_mode=submit_mode,
+            )
             if not result.get("ok"):
                 if result.get("reason") == "missing_password_input":
                     # A disappearing input is a navigation/hydration race, not
@@ -2731,7 +2787,13 @@ def _fill_password_page_if_present(
                     continue
                 raise RuntimeError(f"密码页处理失败：{result} state={last}")
             missing_input_recoveries = 0
-            logger.info("%s 已填写并提交密码页（%s/%s）", _log_prefix(driver), submit_attempt, submit_attempts)
+            logger.info(
+                "%s 已填写并提交密码页（%s/%s）：method=%s",
+                _log_prefix(driver),
+                submit_attempt,
+                submit_attempts,
+                result.get("method") or submit_mode,
+            )
             wait_end = time.time() + observe_per_attempt
             while time.time() < wait_end:
                 if _is_email_verification_page(driver):

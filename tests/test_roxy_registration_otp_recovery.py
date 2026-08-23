@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+from concurrent.futures import ThreadPoolExecutor
 import os
+import threading
 import unittest
 from unittest.mock import MagicMock, call, patch
 
@@ -580,6 +582,68 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(password, "Password1!")
         self.assertEqual(submit_password.call_count, 2)
         self.assertEqual(checkpoints, [("mail@example.test", "Password1!")])
+
+    def test_password_page_ten_concurrent_recovery_runs(self):
+        class FakeDriver:
+            def __init__(self, index, *, delayed_retry=False):
+                self.index = index
+                self.delayed_retry = delayed_retry
+                self.submit_modes = []
+                self.email_checks = 0
+                self.submitted = False
+                self._registration_log_prefix = f"[replay-{index}]"
+
+        drivers = [FakeDriver(index, delayed_retry=index == 9) for index in range(10)]
+        clock_lock = threading.Lock()
+        virtual_clock = [0.0]
+
+        def fake_time():
+            with clock_lock:
+                virtual_clock[0] += 1.0
+                return virtual_clock[0]
+
+        def email_page(driver):
+            driver.email_checks += 1
+            if not driver.submitted:
+                return False
+            # The tenth replay deliberately requires the second submit mode;
+            # the other nine emulate successful first-click navigation.
+            return driver.email_checks >= (4 if not driver.delayed_retry else 6)
+
+        def submit_password(driver, _password, *, submit_mode="click_async"):
+            driver.submit_modes.append(submit_mode)
+            if not driver.delayed_retry or len(driver.submit_modes) >= 2:
+                driver.submitted = True
+            return {"ok": True, "reason": "submitted_password", "method": submit_mode}
+
+        def run_one(driver):
+            return roxy_registration._fill_password_page_if_present(
+                driver,
+                f"replay-{driver.index}@example.test",
+                timeout=5,
+                allow_passwordless=False,
+                password="Password1!",
+            )
+
+        with patch("core.roxy_registration.time.time", side_effect=fake_time), \
+             patch("core.roxy_registration.time.sleep"), \
+             patch("core.roxy_registration._is_email_verification_page", side_effect=email_page), \
+             patch("core.roxy_registration._has_access_token", return_value=False), \
+             patch("core.roxy_registration._is_signup_password_page", return_value=True), \
+             patch("core.roxy_registration._is_login_password_page", return_value=False), \
+             patch("core.roxy_registration._submit_signup_password_direct", side_effect=submit_password), \
+             patch("core.roxy_registration._password_page_state", return_value={
+                 "url": "https://auth.openai.com/create-account/password",
+                 "errors": [],
+                 "inputs": [{"visible": True, "type": "password", "autocomplete": "new-password"}],
+             }), \
+             patch("core.roxy_registration.human_delay"):
+            with ThreadPoolExecutor(max_workers=10, thread_name_prefix="password-replay") as pool:
+                results = list(pool.map(run_one, drivers))
+
+        self.assertEqual(results, ["Password1!"] * 10)
+        self.assertEqual(sum(len(driver.submit_modes) for driver in drivers), 11)
+        self.assertEqual(drivers[9].submit_modes, ["click_async", "request_submit_async"])
 
     def test_email_already_verified_page_is_success_not_invalid_otp(self):
         driver = MagicMock()
