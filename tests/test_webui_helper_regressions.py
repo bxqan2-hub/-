@@ -297,6 +297,37 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('<th>检测时间</th>', html)
         self.assertIn('<th>代理</th>', html)
         self.assertIn("row.error || row.detection_outcome || '—'", html)
+        self.assertIn('id="btnCopyAtQualificationEligible"', html)
+        self.assertIn('复制成功资格邮箱+AT（0）', html)
+        self.assertIn("function copyAtQualificationEligible()", html)
+        self.assertIn("row.email}----${row.access_token}", html)
+
+    @patch("webui.app.gcash_service.probe_access_token")
+    @patch("core.detection_proxy.resolve_detection_proxy", return_value="http://proxy.test")
+    @patch("core.detection_proxy.parse_detection_proxy_pool", return_value=["gc-profile"])
+    @patch("webui.app._access_token_identity")
+    @patch("webui.app._parse_at_import_text", return_value=(["entry-1", "entry-2"], []))
+    def test_at_qualification_returns_at_only_for_successful_rows(
+        self, _parse_import, identity, _parse_pool, _resolve_proxy, probe
+    ):
+        identity.side_effect = [
+            {"email": "eligible@test.com", "access_token": "AT-ELIGIBLE"},
+            {"email": "ineligible@test.com", "access_token": "AT-INELIGIBLE"},
+        ]
+        probe.side_effect = [
+            {"ok": True, "gcash": True, "attempt_count": 1, "checked_at": "now"},
+            {"ok": True, "gcash": False, "attempt_count": 1, "checked_at": "now"},
+        ]
+
+        response = self.client.post(
+            "/api/accounts/at-qualification-check",
+            json={"text": "entry-1\nentry-2", "qualification": "gcash"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        results = response.get_json()["results"]
+        self.assertEqual(results[0]["access_token"], "AT-ELIGIBLE")
+        self.assertEqual(results[1]["access_token"], "")
 
     def test_accounts_ui_appends_custom_page_size_and_shows_registration_minute(self):
         html = self.client.get("/").get_data(as_text=True)

@@ -1767,6 +1767,13 @@
       white-space: nowrap;
     }
     #atQualificationModal .at-qualification-table-wrap { overflow: visible; }
+    #atQualificationModal .at-qualification-copy-hint {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; margin: 0 0 6px;
+    }
+    #atQualificationModal .at-qualification-copy-hint .outlook-import-hint {
+      min-width: 0;
+    }
     #atQualificationModal .at-qualification-table th:nth-child(1) { width: 40px; }
     #atQualificationModal .at-qualification-table th:nth-child(2) { width: 28%; }
     #atQualificationModal .at-qualification-table th:nth-child(3) { width: 115px; }
@@ -3123,6 +3130,7 @@
     </div>
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelAtQualification">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopyAtQualificationEligible" disabled title="复制成功 GCash 资格账号，格式为：邮箱----AT">复制成功资格邮箱+AT（0）</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitAtQualification">开始检测</button>
     </div>
   </div>
@@ -4619,6 +4627,8 @@ function openAtQualificationModal() {
   if (!modal) return;
   const result = $('#atQualificationResultV2');
   if (result) result.innerHTML = '';
+  AT_QUALIFICATION_ELIGIBLE_ROWS = [];
+  updateAtQualificationCopyButton();
   modal.classList.remove('hidden');
   updateModalScrollLock();
   setTimeout(() => $('#atQualificationTextV2')?.focus(), 50);
@@ -4627,11 +4637,33 @@ function closeAtQualificationModal() {
   $('#atQualificationModal')?.classList.add('hidden');
   updateModalScrollLock();
 }
+let AT_QUALIFICATION_ELIGIBLE_ROWS = [];
+function updateAtQualificationCopyButton() {
+  const button = $('#btnCopyAtQualificationEligible');
+  if (!button) return;
+  const count = AT_QUALIFICATION_ELIGIBLE_ROWS.length;
+  button.disabled = count === 0;
+  button.textContent = `复制成功资格邮箱+AT（${count}）`;
+}
+async function copyAtQualificationEligible() {
+  const lines = AT_QUALIFICATION_ELIGIBLE_ROWS
+    .filter(row => row.email && row.email !== '未识别邮箱' && row.access_token)
+    .map(row => `${row.email}----${row.access_token}`);
+  if (!lines.length) { showToast('本轮没有可复制的成功资格账号'); return; }
+  try {
+    await copyText(lines.join('\n'));
+    showToast(`已复制 ${lines.length} 个成功资格账号和 AT`);
+  } catch (error) {
+    showToast('复制成功资格失败: ' + error.message);
+  }
+}
 function renderAtQualificationResults(payload) {
   const resultEl = $('#atQualificationResultV2');
   if (!resultEl) return;
   const rows = Array.isArray(payload?.results) ? payload.results : [];
   const invalid = Array.isArray(payload?.invalid) ? payload.invalid : [];
+  AT_QUALIFICATION_ELIGIBLE_ROWS = rows.filter(row => row.status === 'eligible' && row.access_token && row.email && row.email !== '未识别邮箱');
+  updateAtQualificationCopyButton();
   const statusLabel = {eligible:'有 GCash 资格', not_eligible:'无 GCash 资格', failed:'检测失败'};
   const body = rows.map(row => {
     const status = String(row.status || 'failed');
@@ -4649,6 +4681,8 @@ async function submitAtQualification() {
   const resultEl = $('#atQualificationResultV2');
   const button = $('#btnSubmitAtQualification');
   if (!text.trim()) { showToast('请粘贴一个或多个 AT'); return; }
+  AT_QUALIFICATION_ELIGIBLE_ROWS = [];
+  updateAtQualificationCopyButton();
   if (button) { button.disabled = true; button.textContent = '检测中…'; }
   if (resultEl) resultEl.innerHTML = '<div class="banner info">正在按 AT 逐条检测，请稍候…</div>';
   try {
@@ -4670,6 +4704,7 @@ function bindAtQualificationModal() {
   modal.dataset.bound = '1';
   $('#btnCloseAtQualification')?.addEventListener('click', closeAtQualificationModal);
   $('#btnCancelAtQualification')?.addEventListener('click', closeAtQualificationModal);
+  $('#btnCopyAtQualificationEligible')?.addEventListener('click', copyAtQualificationEligible);
   $('#btnSubmitAtQualification')?.addEventListener('click', submitAtQualification);
   modal.addEventListener('click', event => { if (event.target === modal) closeAtQualificationModal(); });
   document.addEventListener('keydown', event => {

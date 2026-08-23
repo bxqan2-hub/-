@@ -2175,6 +2175,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "attempt_count": result.get("attempt_count"),
                 "detection_outcome": detection_outcome,
                 "error": result.get("error"),
+                # Only successful qualification rows expose the pasted AT so
+                # the UI can offer a one-click email----AT export without
+                # echoing tokens for failed or ineligible checks.
+                "access_token": item["access_token"] if status == "eligible" else "",
             })
         results.sort(key=lambda row: int(row.get("index") or 0))
         return jsonify({
