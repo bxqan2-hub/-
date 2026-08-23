@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 
 from config import at_validity as validity_cfg
-from core import db, plan_check_service
+from core import at_validity_service, db
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def _iso_from_timestamp(value: float | None) -> str | None:
 
 
 def enqueue_accounts(*, trigger: str = "scheduled-at") -> dict:
-    """把所有未归档且有 AT 的账号放入现有轻量套餐检测队列。"""
+    """把所有未归档且有 AT 的账号放入独立 AT 会话检测队列。"""
     global _LAST_RUN_AT, _LAST_RESULT
     if not _RUN_LOCK.acquire(blocking=False):
         return {"accepted": False, "busy": True, "error": "AT 定时检测正在入队"}
@@ -64,7 +64,7 @@ def enqueue_accounts(*, trigger: str = "scheduled-at") -> dict:
             if not token:
                 result["skipped_no_token_count"] += 1
                 continue
-            queued = plan_check_service.enqueue_account_plan_check(
+            queued = at_validity_service.enqueue_account_at_validity_check(
                 account_id=int(account.get("id") or 0),
                 email=str(account.get("email") or ""),
                 access_token=token,
@@ -157,5 +157,5 @@ def status() -> dict:
         "last_run_at": _LAST_RUN_AT,
         "next_run_at": next_run_at,
         "last_result": last_result,
-        "queue": plan_check_service.queue_settings(),
+        "queue": at_validity_service.queue_settings(),
     }

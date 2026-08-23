@@ -36,7 +36,7 @@ EDITABLE_FIELDS = [
     # ---- 账号 AT 有效性 ----
     {
         "key": "AT_VALIDITY_AUTO_CHECK_ENABLED", "file": "at_validity.py", "type": "bool", "group": "账号 AT 有效性",
-        "label": "启用 AT 定时检测", "help": "使用轻量套餐接口定时验证未归档账号的 Access Token；网络/代理错误与已确认失效分开记录",
+        "label": "启用 AT 定时检测", "help": "只调用 AT 会话接口验证未归档账号的 Access Token，不查询套餐或 0 元试用；可使用本地/静态检测代理",
     },
     {
         "key": "AT_VALIDITY_CHECK_INTERVAL_MINUTES", "file": "at_validity.py", "type": "int", "group": "账号 AT 有效性",
@@ -725,21 +725,21 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/Agent网络模式", "help": "用于查套餐和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
+        "label": "套餐/AT/Agent网络模式", "help": "用于查套餐、独立 AT 有效性和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
     },
     {
         "key": "PLAN_CHECK_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/Agent专用代理", "help": "用于查套餐和生成 Agent Token；留空时 auto/proxy 从代理池选择。可能包含认证信息，仅保存到 .env",
+        "label": "套餐/AT/Agent专用代理", "help": "可填写 http://127.0.0.1:端口，供套餐、独立 AT 有效性和 Agent Token 使用；可能包含认证信息，仅保存到 .env",
         "storage": "env", "secret": True,
     },
     {
         "key": "PLAN_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "套餐检测静态代理池", "help": "由“加入代理池”读取代理用户名中的 region-XX 并自动归类；每个国家可加入多条静态代理",
+        "label": "套餐/AT检测静态代理池", "help": "由“加入代理池”读取代理用户名中的 region-XX 并自动归类；套餐检测和独立 AT 有效性检测可复用，每个国家可加入多条静态代理",
         "storage": "runtime_file", "secret": True,
     },
     {
         "key": "PLAN_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐检测当前国家", "help": "选择国家后，套餐/Plus/试用检测会在该国家静态池内随机洗牌取代理",
+        "label": "套餐/AT检测当前国家", "help": "选择国家后，套餐/Plus/试用与独立 AT 有效性检测会在该国家静态池内随机洗牌取代理",
     },
     {
         "key": "CHECKOUT_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",

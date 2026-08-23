@@ -2034,6 +2034,8 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
         "at_validity_status", "at_validity_valid", "at_validity_checked_at",
         "at_validity_http_status", "at_validity_error_code", "at_validity_error", "at_validity_trigger",
+        "at_validity_network_route", "at_validity_proxy_used", "at_validity_proxy_source",
+        "at_validity_proxy_fallback_reason", "at_validity_attempt_count",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
@@ -2102,6 +2104,8 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     "at_validity_status": row.get("at_validity_status"),
                     "at_validity_checked_at": row.get("at_validity_checked_at"),
                     "at_validity_error_code": row.get("at_validity_error_code"),
+                    "at_validity_network_route": row.get("at_validity_network_route"),
+                    "at_validity_proxy_used": row.get("at_validity_proxy_used"),
                     "current_plan_type": row.get("current_plan_type"),
                     "plan_type": row.get("plan_type"),
                     "subscription_plan": row.get("subscription_plan"),
@@ -2278,6 +2282,11 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             row["at_validity_error_code"] = None
             row["at_validity_error"] = None
             row["at_validity_http_status"] = None
+            row["at_validity_network_route"] = None
+            row["at_validity_proxy_used"] = None
+            row["at_validity_proxy_source"] = None
+            row["at_validity_proxy_fallback_reason"] = None
+            row["at_validity_attempt_count"] = None
             row.pop("archived_at", None)
 
             # 分组成员以邮箱保存。先从所有分组清除原/新邮箱，再仅写入当前目标组，
@@ -2379,13 +2388,18 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
             row["at_validity_error"] = None
             row["at_validity_http_status"] = None
             row["at_validity_trigger"] = "live-check-refresh"
+            row["at_validity_network_route"] = None
+            row["at_validity_proxy_used"] = None
+            row["at_validity_proxy_source"] = None
+            row["at_validity_proxy_fallback_reason"] = None
+            row["at_validity_attempt_count"] = 0
 
         row["copy_line"] = _account_line(row)
         _save_accounts(rows)
         return True
 
 
-def update_account_at_validity(acc_id: int, result: dict | None = None, trigger: str = "plan-check") -> bool:
+def update_account_at_validity(acc_id: int, result: dict | None = None, trigger: str = "at-validity") -> bool:
     """写回独立 AT 有效性结论，不把临时网络错误折叠成失效。"""
     result = result or {}
     outcome = str(result.get("outcome") or "check_error").strip().lower()
@@ -2403,7 +2417,15 @@ def update_account_at_validity(acc_id: int, result: dict | None = None, trigger:
         row["at_validity_http_status"] = result.get("http_status")
         row["at_validity_error_code"] = None if outcome == "valid" else str(result.get("error_code") or "check_error")[:100]
         row["at_validity_error"] = None if outcome == "valid" else str(result.get("error") or "AT 检测失败")[:500]
-        row["at_validity_trigger"] = str(trigger or "plan-check")[:80]
+        row["at_validity_trigger"] = str(trigger or "at-validity")[:80]
+        row["at_validity_network_route"] = str(result.get("network_route") or "")[:40] or None
+        row["at_validity_proxy_used"] = str(result.get("proxy_used") or "")[:300] or None
+        row["at_validity_proxy_source"] = str(result.get("proxy_source") or "")[:80] or None
+        row["at_validity_proxy_fallback_reason"] = str(result.get("proxy_fallback_reason") or "")[:300] or None
+        try:
+            row["at_validity_attempt_count"] = max(0, int(result.get("attempt_count") or 0))
+        except (TypeError, ValueError):
+            row["at_validity_attempt_count"] = 0
         row["updated_at"] = now
         _save_accounts(rows)
         return True

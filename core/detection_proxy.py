@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""套餐与 Checkout 检测使用的按国家静态代理池。"""
+"""套餐/AT 与 Checkout 检测使用的按国家静态代理池。"""
 from __future__ import annotations
 
 import calendar
@@ -226,9 +226,9 @@ def resolve_detection_proxy(
 
 
 def resolve_static_detection_proxy(spec: str | None) -> str | None:
-    """解析静态检测代理，并明确拒绝套餐/Checkout 再调用动态代理 API。"""
+    """解析静态检测代理，并明确拒绝套餐/AT/Checkout 再调用动态代理 API。"""
     if spec is not None and _is_api_spec(str(spec or "").strip()):
-        raise ValueError("套餐与 Checkout 检测只支持静态代理池，不再调用动态代理 API")
+        raise ValueError("套餐、AT 与 Checkout 检测只支持静态代理池，不再调用动态代理 API")
     return resolve_detection_proxy(spec)
 
 

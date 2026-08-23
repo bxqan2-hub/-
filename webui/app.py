@@ -338,6 +338,8 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         # AT 定时有效性结论；明确失效与检测错误分开。
         "at_validity_status", "at_validity_valid", "at_validity_checked_at",
         "at_validity_http_status", "at_validity_error_code", "at_validity_error", "at_validity_trigger",
+        "at_validity_network_route", "at_validity_proxy_used", "at_validity_proxy_source",
+        "at_validity_proxy_fallback_reason", "at_validity_attempt_count",
         # Codex / Agent 状态提示。
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",

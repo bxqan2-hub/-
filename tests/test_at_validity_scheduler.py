@@ -1,52 +1,116 @@
 # -*- coding: utf-8 -*-
 import json
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import config
-from core import at_validity, at_validity_scheduler, db, plan_check_service
+from core import at_validity, at_validity_scheduler, at_validity_service, db
 from webui import config_editor
 from webui.app import create_app
 
 
-class AtValidityClassificationTests(unittest.TestCase):
-    def test_valid_result_is_conclusive(self):
-        result = at_validity.classify_plan_check_result({
-            "ok": True,
-            "checked_at": "2026-08-23T12:00:00",
-            "http_status": 200,
-        })
+class AtValidityProbeTests(unittest.TestCase):
+    @staticmethod
+    def _session(status_code: int):
+        env = MagicMock()
+        env.device_id = "device-test"
+        env.navigator_language.return_value = "zh-CN"
+        env._get_common_headers.return_value = {"user-agent": "test"}
+        env.session.get.return_value = SimpleNamespace(status_code=status_code)
+        return env
+
+    @patch.object(at_validity, "resolve_plan_check_route", return_value={
+        "proxy": "http://127.0.0.1:7890",
+        "network_route": "proxy",
+        "proxy_used": "http://127.0.0.1:7890",
+        "proxy_source": "configured",
+        "proxy_fallback_reason": None,
+    })
+    @patch.object(at_validity.detection_proxy, "resolve_static_detection_proxy", return_value="http://127.0.0.1:7890")
+    @patch.object(at_validity.detection_proxy, "configured_detection_proxy_spec", return_value=None)
+    def test_route_accepts_configured_local_proxy(self, configured_spec, resolve_static, resolve_route):
+        with patch.object(at_validity.proxy_cfg, "PLAN_CHECK_PROXY", "http://127.0.0.1:7890"), \
+             patch.object(at_validity.proxy_cfg, "PLAN_CHECK_PROXY_MODE", "auto"):
+            route = at_validity._resolve_at_validity_route()
+
+        configured_spec.assert_called_once_with("plan")
+        resolve_static.assert_called_once_with("http://127.0.0.1:7890")
+        resolve_route.assert_called_once_with()
+        self.assertEqual(route["network_route"], "proxy")
+
+    @patch.object(at_validity, "BrowserSession")
+    @patch.object(at_validity, "token_claims", return_value={"token_expired": True})
+    def test_expired_jwt_is_invalid_without_network(self, _claims, session_cls):
+        result = at_validity.check_access_token_validity("expired-token")
+
+        self.assertEqual(result["outcome"], "invalid_confirmed")
+        self.assertEqual(result["error_code"], "token_expired")
+        session_cls.assert_not_called()
+
+    @patch.object(at_validity, "_resolve_at_validity_route", return_value={
+        "proxy": "http://127.0.0.1:7890",
+        "network_route": "proxy",
+        "proxy_used": "http://127.0.0.1:7890",
+        "proxy_source": "configured",
+    })
+    @patch.object(at_validity, "BrowserSession")
+    @patch.object(at_validity, "token_claims", return_value={"token_expired": False})
+    def test_http_200_is_valid_and_uses_local_proxy(self, _claims, session_cls, _route):
+        env = self._session(200)
+        session_cls.return_value = env
+
+        result = at_validity.check_access_token_validity("at-local", max_attempts=1)
 
         self.assertEqual(result["outcome"], "valid")
         self.assertTrue(result["valid"])
+        self.assertEqual(result["network_route"], "proxy")
+        self.assertEqual(result["proxy_used"], "http://127.0.0.1:7890")
+        session_cls.assert_called_once_with(proxy="http://127.0.0.1:7890", detect_exit_geo=False)
+        request = env.session.get.call_args
+        self.assertEqual(request.args[0], "https://chatgpt.com/backend-api/me")
+        self.assertEqual(request.kwargs["headers"]["authorization"], "Bearer at-local")
+        env.close.assert_called_once_with()
 
-    def test_expired_or_401_result_is_invalid_confirmed(self):
-        expired = at_validity.classify_plan_check_result({
-            "ok": False,
-            "token_expired": True,
-            "error": "AT已过期/失效",
-        })
-        unauthorized = at_validity.classify_plan_check_result({
-            "ok": False,
-            "http_status": 401,
-            "error": "Unauthorized",
-        })
+    @patch.object(at_validity, "_resolve_at_validity_route", return_value={
+        "proxy": "", "network_route": "direct", "proxy_used": None,
+    })
+    @patch.object(at_validity, "BrowserSession")
+    @patch.object(at_validity, "token_claims", return_value={"token_expired": False})
+    def test_http_401_is_confirmed_invalid(self, _claims, session_cls, _route):
+        session_cls.return_value = self._session(401)
 
-        self.assertEqual(expired["outcome"], "invalid_confirmed")
-        self.assertEqual(expired["error_code"], "token_expired")
-        self.assertEqual(unauthorized["outcome"], "invalid_confirmed")
-        self.assertEqual(unauthorized["error_code"], "http_401")
+        result = at_validity.check_access_token_validity("at-401", max_attempts=1)
 
-    def test_transport_or_rate_limit_result_remains_check_error(self):
-        result = at_validity.classify_plan_check_result({
-            "ok": False,
-            "http_status": 429,
-            "error": "HTTP 429",
-            "retryable": True,
-        })
+        self.assertEqual(result["outcome"], "invalid_confirmed")
+        self.assertEqual(result["error_code"], "http_401")
+
+    @patch.object(at_validity.time, "sleep")
+    @patch.object(at_validity, "_resolve_at_validity_route", return_value={
+        "proxy": "", "network_route": "direct", "proxy_used": None,
+    })
+    @patch.object(at_validity, "BrowserSession")
+    @patch.object(at_validity, "token_claims", return_value={"token_expired": False})
+    def test_rate_limit_remains_check_error(self, _claims, session_cls, _route, _sleep):
+        session_cls.return_value = self._session(429)
+
+        result = at_validity.check_access_token_validity("at-429", max_attempts=2)
 
         self.assertEqual(result["outcome"], "check_error")
         self.assertIsNone(result["valid"])
+        self.assertEqual(result["http_status"], 429)
+        self.assertEqual(result["attempt_count"], 2)
+
+    @patch.object(at_validity, "_resolve_at_validity_route", side_effect=ValueError("动态代理被拒绝"))
+    @patch.object(at_validity, "BrowserSession")
+    @patch.object(at_validity, "token_claims", return_value={"token_expired": False})
+    def test_proxy_configuration_error_is_not_invalid(self, _claims, session_cls, _route):
+        result = at_validity.check_access_token_validity("at-proxy")
+
+        self.assertEqual(result["outcome"], "check_error")
+        self.assertEqual(result["error_code"], "proxy_config_error")
+        session_cls.assert_not_called()
 
 
 class AtValidityPersistenceAndFilterTests(unittest.TestCase):
@@ -59,7 +123,7 @@ class AtValidityPersistenceAndFilterTests(unittest.TestCase):
         self.assertTrue(db._account_matches_at_validity_filter(error, "invalid-or-error"))
         self.assertFalse(db._account_matches_at_validity_filter(valid, "invalid-or-error"))
 
-    def test_validity_result_persists_without_erasing_account(self):
+    def test_validity_result_persists_route_without_erasing_account(self):
         captured = {}
 
         def save(rows):
@@ -74,6 +138,10 @@ class AtValidityPersistenceAndFilterTests(unittest.TestCase):
                 "http_status": 401,
                 "error_code": "http_401",
                 "error": "AT 已失效",
+                "network_route": "proxy",
+                "proxy_used": "http://127.0.0.1:7890",
+                "proxy_source": "configured",
+                "attempt_count": 1,
             }, trigger="scheduled-at")
 
         self.assertTrue(updated)
@@ -81,12 +149,14 @@ class AtValidityPersistenceAndFilterTests(unittest.TestCase):
         self.assertEqual(row["at_validity_status"], "invalid_confirmed")
         self.assertFalse(row["at_validity_valid"])
         self.assertEqual(row["at_validity_trigger"], "scheduled-at")
+        self.assertEqual(row["at_validity_proxy_used"], "http://127.0.0.1:7890")
+        self.assertEqual(row["at_validity_attempt_count"], 1)
 
 
-class AtValiditySchedulerTests(unittest.TestCase):
-    @patch.object(plan_check_service, "enqueue_account_plan_check")
+class AtValidityServiceAndSchedulerTests(unittest.TestCase):
+    @patch.object(at_validity_scheduler.at_validity_service, "enqueue_account_at_validity_check")
     @patch.object(at_validity_scheduler.db, "list_accounts")
-    def test_scheduler_enqueues_only_accounts_with_tokens(self, list_accounts, enqueue):
+    def test_scheduler_enqueues_only_accounts_with_tokens_in_at_queue(self, list_accounts, enqueue):
         list_accounts.return_value = [
             {"id": 1, "email": "one@example.test", "access_token": "at-one"},
             {"id": 2, "email": "two@example.test", "access_token": ""},
@@ -105,45 +175,40 @@ class AtValiditySchedulerTests(unittest.TestCase):
         list_accounts.assert_called_once_with(limit=1_000_000, archived="0")
         self.assertEqual(enqueue.call_count, 2)
 
-    @patch.object(plan_check_service, "check_account_plan", return_value={
-        "ok": False,
-        "checked_at": "2026-08-23T12:00:00",
-        "http_status": 401,
-        "token_expired": True,
-        "error": "AT已过期/失效",
+    @patch.object(at_validity_service, "_wait_for_rate_slot")
+    @patch.object(at_validity_service, "check_access_token_validity", return_value={
+        "outcome": "valid", "valid": True, "http_status": 200,
     })
-    @patch.object(plan_check_service.detection_proxy, "resolve_static_detection_proxy", return_value="")
-    @patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", return_value=None)
-    @patch.object(plan_check_service.detection_proxy, "infer_timezone_offset_min", return_value="-")
-    @patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True)
-    @patch.object(plan_check_service.db, "update_account_plan_check")
-    @patch.object(plan_check_service.db, "update_account_at_validity")
-    @patch.object(plan_check_service, "_wait_for_rate_slot")
-    def test_scheduled_probe_has_finite_retry_and_persists_invalid_outcome(
-        self,
-        _wait,
-        update_validity,
-        _update_plan,
-        _mark,
-        _timezone,
-        _configured,
-        _resolve,
-        check,
-    ):
-        plan_check_service._QUEUE_SLOTS.acquire()
-        result = plan_check_service._run_plan_check(
+    @patch.object(at_validity_service.db, "update_account_plan_check")
+    @patch.object(at_validity_service.db, "update_account_at_validity")
+    def test_worker_updates_only_at_validity_fields(self, update_validity, update_plan, check, _wait):
+        at_validity_service._QUEUE_SLOTS.acquire()
+        with at_validity_service._RUNNING_LOCK:
+            at_validity_service._RUNNING.add(9)
+
+        result = at_validity_service._run_at_validity_check(
             account_id=9,
             email="nine@example.test",
             access_token="at-nine",
             trigger="scheduled-at",
             proxy=None,
-            timezone_offset_min="-",
         )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(check.call_args.kwargs["max_attempts"], 2)
-        persisted = update_validity.call_args.args[1]
-        self.assertEqual(persisted["outcome"], "invalid_confirmed")
+        self.assertEqual(result["outcome"], "valid")
+        check.assert_called_once()
+        update_validity.assert_called_once_with(9, result, trigger="scheduled-at")
+        update_plan.assert_not_called()
+
+    def test_source_has_no_plan_or_trial_detection_dependency(self):
+        project = Path(__file__).resolve().parents[1]
+        scheduler_source = (project / "core" / "at_validity_scheduler.py").read_text(encoding="utf-8")
+        probe_source = (project / "core" / "at_validity.py").read_text(encoding="utf-8")
+        plan_service_source = (project / "core" / "plan_check_service.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("plan_check_service", scheduler_source)
+        self.assertNotIn("check_account_plan", probe_source)
+        self.assertNotIn("plus_trial_eligible", probe_source)
+        self.assertNotIn("update_account_at_validity", plan_service_source)
 
 
 class AtValidityWebApiTests(unittest.TestCase):

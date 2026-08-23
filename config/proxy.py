@@ -72,18 +72,18 @@ PROXY_API_CACHE_SECONDS = 0.0
 # True=API 获取失败时中止任务，避免无意直连暴露真实出口；False=回退静态池/系统代理。
 PROXY_API_FAIL_CLOSED = True
 
-# 套餐/Plus 试用资格查询与 Codex Agent Token 生成共用这组独立网络策略，
+# 套餐/Plus 试用资格查询、独立 AT 有效性检测与 Codex Agent Token 生成共用网络策略，
 # 避免批量请求被注册代理池中的临时本地代理拖垮，也避免无条件直连造成出口策略失控。
 #   auto   = 优先使用 PLAN_CHECK_PROXY 或代理池；本地代理端口未监听时回退直连
 #   proxy  = 强制使用 PLAN_CHECK_PROXY 或代理池，失败直接报错
 #   direct = 始终直连
 PLAN_CHECK_PROXY_MODE = "auto"
 
-# 套餐查询 / Codex Agent Token 生成专用代理。留空时 auto/proxy 模式从 PROXY_POOL 选择。
+# 套餐查询 / AT 有效性 / Codex Agent Token 生成专用代理，可填写本地代理地址。
 # 代理可能包含账号密码，因此 WebUI 会把它保存到 .env。
 PLAN_CHECK_PROXY = ""
 
-# 套餐与 Checkout 检测使用两套完全独立的静态代理池。
+# 套餐/AT 与 Checkout 检测使用两套完全独立的静态代理池。
 # WebUI 加入代理时会探测出口并保存为 `国家代码|静态代理`；ACTIVE 保存当前国家代码。
 # 每个国家可保存多条代理，检测任务按随机洗牌轮转分配，不调用动态代理 API。
 PLAN_CHECK_PROXY_PROFILES = []

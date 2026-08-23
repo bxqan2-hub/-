@@ -2436,7 +2436,7 @@
           <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测成功且明确没有 Plus 试用活动的 Free 账号">无试用资格</button>
           <button type="button" class="acc-v2-toggle" id="showOaicsAccountsOnlyV2" aria-pressed="false" title="只显示 Checkout 类型已检测为 OAICS 的账号">OAICS</button>
           <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">GC资格</button>
-          <button type="button" class="acc-v2-toggle" id="showAtInvalidAccountsOnlyV2" aria-pressed="false" title="只显示 AT 已确认失效或检测遇到错误的账号；网络错误不会误标成失效">AT失效/错误</button>
+          <button type="button" class="acc-v2-toggle" id="showAtInvalidAccountsOnlyV2" aria-pressed="false" title="只显示 AT 已确认失效或检测遇到错误的账号；检测只验证 AT，不查询套餐或 0 元试用，网络错误不会误标成失效">AT失效/错误</button>
           <button type="button" class="acc-v2-toggle" id="atValidityEnabledV2" aria-pressed="true" title="启用或停用 AT 定时有效性检测；修改后点击保存">定时AT检测</button>
           <label class="acc-v2-inline" title="AT 定时有效性检测周期，单位为分钟">周期
             <span class="el-input-number">
@@ -4700,10 +4700,15 @@ function _tokenCellV2(r) {
   const atStatus = String(r.at_validity_status || '');
   const atError = r.at_validity_error || '';
   const atChecked = r.at_validity_checked_at || '';
+  const atProxy = r.at_validity_proxy_used || '';
+  const atRoute = r.at_validity_network_route === 'proxy' ? `代理 ${atProxy || '已配置'}`
+    : r.at_validity_network_route === 'direct_fallback' ? `代理不可用后直连${r.at_validity_proxy_fallback_reason ? `：${r.at_validity_proxy_fallback_reason}` : ''}`
+    : r.at_validity_network_route === 'direct' ? '直连' : '';
+  const atTitle = [atError || atChecked, atRoute].filter(Boolean).join('；');
   let atHtml = '';
-  if (atStatus === 'valid') atHtml = `<div class="acc-v2-sub" title="${esc(atChecked)}" style="color:#67c23a">AT: 有效</div>`;
-  else if (atStatus === 'invalid_confirmed') atHtml = `<div class="acc-v2-sub" title="${esc(atError || atChecked)}" style="color:#f56c6c">AT: 已失效</div>`;
-  else if (atStatus === 'check_error') atHtml = `<div class="acc-v2-sub" title="${esc(atError || atChecked)}" style="color:#e6a23c">AT检测: 错误</div>`;
+  if (atStatus === 'valid') atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#67c23a">AT: 有效</div>`;
+  else if (atStatus === 'invalid_confirmed') atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#f56c6c">AT: 已失效</div>`;
+  else if (atStatus === 'check_error') atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#e6a23c">AT检测: 错误</div>`;
   const twoFaHtml = _twoFaCellV2(r);
   if (r.has_access_token) {
     return `<div class="account-token-stack"><button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制 AT</button>${twoFaHtml}${atHtml}${liveHtml}</div>`;
@@ -5602,7 +5607,7 @@ async function saveAtValiditySchedule(button) {
   finally { if (button) { button.disabled = false; button.textContent = old; } }
 }
 async function runAtValidityNow(button) {
-  if (!confirm('立即检测所有未归档且有 AT 的账号吗？\n\n使用轻量套餐接口，不会触发邮箱 OTP 登录。')) return;
+  if (!confirm('立即检测所有未归档且有 AT 的账号吗？\n\n只调用 AT 会话有效性接口，可使用本地/静态检测代理；不会查询套餐、0元试用或触发邮箱 OTP。')) return;
   const old = button?.textContent || '立即检查AT';
   if (button) { button.disabled = true; button.textContent = '入队中…'; }
   try {
@@ -8279,7 +8284,7 @@ function renderDetectionProxyCountryControlV2(profileField, activeField, purpose
     <div class="detection-proxy-summary-v2" data-detection-proxy-status="${attrEsc(purpose)}">
       ${profiles.length
         ? `已归纳 <strong>${profiles.length}</strong> 个国家、共 <strong>${total}</strong> 条；当前 ${esc(selected?.label || '')}`
-        : '当前没有静态代理；原动态 API 不会被套餐或 Checkout 检测调用。'}
+        : '当前没有静态代理；原动态 API 不会被套餐、AT 或 Checkout 检测调用。'}
     </div>`;
 }
 function renderDetectionProxyPanelV2(fields) {
@@ -8299,15 +8304,15 @@ function renderDetectionProxyPanelV2(fields) {
   ` : '';
   const planCard = (planProfiles && planActive) ? `
     <section class="detection-proxy-card-v2" aria-label="套餐检测代理">
-      <h4>套餐 / Plus / 试用检测代理</h4>
-      <p>只用于“检测套餐/Plus/试用”；多并发会在所选国家池内洗牌分配。</p>
+      <h4>套餐 / Plus / 试用 / AT 检测代理</h4>
+      <p>套餐检测和独立 AT 有效性检测可复用这里的本地/静态代理；AT 检测只读取会话接口状态，不进入套餐或 0 元试用判断。</p>
       ${renderDetectionProxyCountryControlV2(planProfiles, planActive, 'plan')}
     </section>
   ` : '';
   return `
     <div class="detection-proxy-panel-v2">
       <div class="detection-proxy-panel-v2-head">
-        <div><b>检测代理（套餐与 Checkout 完全分离）</b></div>
+        <div><b>检测代理（套餐/AT 与 Checkout 完全分离）</b></div>
         <span>加入静态代理后自动识别国家；选择国家即可使用该国家代理池</span>
       </div>
       <div class="detection-proxy-grid-v2">
