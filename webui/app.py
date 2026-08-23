@@ -3548,7 +3548,10 @@ def create_app(auth_code: str | None = None) -> Flask:
         from core import detection_proxy
 
         try:
-            submitted = detection_proxy.parse_detection_proxy_pool(data.get("proxies"), limit=500)
+            submitted = detection_proxy.parse_detection_proxy_pool(
+                data.get("proxies"),
+                limit=detection_proxy.DETECTION_PROXY_IMPORT_MAX_ENTRIES,
+            )
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         if not submitted:
@@ -3623,7 +3626,15 @@ def create_app(auth_code: str | None = None) -> Flask:
             merged[normalized] = (str(inspection["country"]), normalized)
 
         saved_profiles = [f"{country}|{proxy}" for country, proxy in merged.values()]
-        groups = detection_proxy.detection_proxy_country_groups(saved_profiles)
+        try:
+            groups = detection_proxy.detection_proxy_country_groups(saved_profiles)
+        except ValueError as exc:
+            logger.info(
+                "检测代理池合并后超过容量: purpose=%s total=%s",
+                purpose,
+                len(saved_profiles),
+            )
+            return jsonify({"ok": False, "error": str(exc)}), 400
         countries = [str(group["country"]) for group in groups]
         current_active = str(getattr(proxy_cfg, active_key, "") or "").strip().upper()
         active = current_active if current_active in countries else str(detected[0][1]["country"])

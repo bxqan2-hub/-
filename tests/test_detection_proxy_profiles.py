@@ -179,6 +179,58 @@ class DetectionProxyImportApiTests(unittest.TestCase):
             "US|http://us.example:8080",
         ])
 
+    def test_import_can_grow_existing_pool_beyond_legacy_500_limit(self):
+        existing = [
+            f"JP|socks5h://old-{index}.example:1080"
+            for index in range(500)
+        ]
+        inspection = {
+            "country": "JP",
+            "country_label": "JP",
+            "country_source": "proxy_region_tag",
+            "proxy": "socks5h://new.example:1080",
+            "masked_proxy": "socks5h://new.example:1080",
+            "exit_ip": "",
+            "region": "",
+            "city": "",
+        }
+
+        with patch.object(
+            detection_proxy.proxy_cfg,
+            "PLAN_CHECK_PROXY_PROFILES",
+            existing,
+        ), patch.object(
+            detection_proxy.proxy_cfg,
+            "PLAN_CHECK_PROXY_ACTIVE",
+            "JP",
+        ), patch.object(
+            detection_proxy,
+            "inspect_static_proxy",
+            return_value=inspection,
+        ), patch(
+            "webui.app.config_editor.update_config",
+            return_value={
+                "updated": ["PLAN_CHECK_PROXY_PROFILES", "PLAN_CHECK_PROXY_ACTIVE"],
+                "ignored": [],
+            },
+        ) as update, patch("config.reload_all"):
+            response = self.client.post("/api/detection-proxy-pools/import", json={
+                "purpose": "plan",
+                "proxies": ["socks5h://new.example:1080"],
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "application/json")
+        payload = response.get_json()
+        self.assertEqual(payload["total_count"], 501)
+        saved = update.call_args.args[0]["PLAN_CHECK_PROXY_PROFILES"]
+        self.assertEqual(len(saved), 501)
+
+    def test_parser_accepts_large_runtime_detection_pool(self):
+        entries = [f"JP|socks5h://proxy-{index}.example:1080" for index in range(1_200)]
+
+        self.assertEqual(len(detection_proxy.parse_detection_proxy_pool(entries)), 1_200)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,8 @@ _REGION_STANDARD_OFFSETS = {
 
 _COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
 _PROXY_REGION_TAG_RE = re.compile(r"(?:^|[-_])region[-_]([A-Z]{2})(?=$|[-_])", re.IGNORECASE)
+DETECTION_PROXY_POOL_MAX_ENTRIES = 50_000
+DETECTION_PROXY_IMPORT_MAX_ENTRIES = 10_000
 _POOL_ROTATION_LOCK = threading.Lock()
 _POOL_ROTATIONS: dict[tuple[str, str], dict[str, object]] = {}
 
@@ -48,7 +50,11 @@ def _region_offset_minutes(region: str) -> int | None:
     return standard + (60 if dst_start <= now < dst_end else 0)
 
 
-def parse_detection_proxy_pool(value, *, limit: int = 500) -> list[str]:
+def parse_detection_proxy_pool(
+    value,
+    *,
+    limit: int = DETECTION_PROXY_POOL_MAX_ENTRIES,
+) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
