@@ -2476,6 +2476,17 @@
               </button>
             </span>分钟
           </label>
+          <label class="acc-v2-inline" title="已完成过一次检测的账号再次检测周期；新账号仍按首次周期进入队列">已查询账号复查
+            <span class="el-input-number">
+              <input id="atValidityRecheckIntervalV2" type="number" min="1" max="43200" value="1440" inputmode="numeric">
+              <button type="button" class="el-input-number__increase" data-step-for="atValidityRecheckIntervalV2" data-step="1" aria-label="增加">
+                <svg viewBox="0 0 24 24"><polyline points="6 14 12 8 18 14"/></svg>
+              </button>
+              <button type="button" class="el-input-number__decrease" data-step-for="atValidityRecheckIntervalV2" data-step="-1" aria-label="减少">
+                <svg viewBox="0 0 24 24"><polyline points="6 10 12 16 18 10"/></svg>
+              </button>
+            </span>分钟
+          </label>
           <button type="button" class="jobs-tb-btn" id="btnSaveAtValidityScheduleV2" title="保存启用状态和检测周期，保存后立即热加载">保存AT定时</button>
           <button type="button" class="jobs-tb-btn" id="btnRunAtValidityNowV2" title="立即把所有未归档且有 AT 的账号放入轻量检测队列">立即检查AT</button>
           <span class="at-validity-status" id="atValidityScheduleStatusV2" title="AT 定时检测状态">读取定时状态…</span>
@@ -5926,12 +5937,14 @@ function renderAtValidityScheduleStatus(status = AT_VALIDITY_SCHEDULE) {
   if (toggle) toggle.textContent = enabled ? '定时AT检测：开' : '定时AT检测：关';
   const interval = $('#atValidityIntervalV2');
   if (interval && document.activeElement !== interval) interval.value = String(AT_VALIDITY_SCHEDULE.interval_minutes || 360);
+  const recheckInterval = $('#atValidityRecheckIntervalV2');
+  if (recheckInterval && document.activeElement !== recheckInterval) recheckInterval.value = String(AT_VALIDITY_SCHEDULE.recheck_interval_minutes || 1440);
   const statusEl = $('#atValidityScheduleStatusV2');
   if (statusEl) {
     const next = AT_VALIDITY_SCHEDULE.next_run_at ? formatDateTime(AT_VALIDITY_SCHEDULE.next_run_at) : '未安排';
     const last = AT_VALIDITY_SCHEDULE.last_run_at ? formatDateTime(AT_VALIDITY_SCHEDULE.last_run_at) : '尚未执行';
     statusEl.textContent = enabled ? `下次 ${next}` : '定时检测已停用';
-    statusEl.title = `上次：${last}；下次：${next}`;
+    statusEl.title = `上次：${last}；下次：${next}；已查询账号复查周期：${AT_VALIDITY_SCHEDULE.recheck_interval_minutes || 1440} 分钟`;
   }
 }
 async function loadAtValiditySchedule() {
@@ -5944,8 +5957,13 @@ async function loadAtValiditySchedule() {
 }
 async function saveAtValiditySchedule(button) {
   const interval = Number($('#atValidityIntervalV2')?.value || 0);
+  const recheckInterval = Number($('#atValidityRecheckIntervalV2')?.value || 0);
   if (!Number.isInteger(interval) || interval < 1 || interval > 43200) {
     showToast('AT 检测周期必须是 1 到 43200 分钟');
+    return;
+  }
+  if (!Number.isInteger(recheckInterval) || recheckInterval < 1 || recheckInterval > 43200) {
+    showToast('已查询账号复查周期必须是 1 到 43200 分钟');
     return;
   }
   const old = button?.textContent || '保存AT定时';
@@ -5953,10 +5971,10 @@ async function saveAtValiditySchedule(button) {
   try {
     const status = await api('/api/accounts/at-validity-schedule', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({enabled:Boolean(AT_VALIDITY_SCHEDULE.enabled), interval_minutes:interval}),
+      body:JSON.stringify({enabled:Boolean(AT_VALIDITY_SCHEDULE.enabled), interval_minutes:interval, recheck_interval_minutes:recheckInterval}),
     });
     renderAtValidityScheduleStatus(status);
-    showToast(`AT 定时检测已${status.enabled ? '启用' : '停用'}，周期 ${status.interval_minutes} 分钟`);
+    showToast(`AT 定时检测已${status.enabled ? '启用' : '停用'}，首次周期 ${status.interval_minutes} 分钟，已查询账号复查周期 ${status.recheck_interval_minutes} 分钟`);
   } catch (error) { showToast('保存 AT 定时失败: ' + error.message); }
   finally { if (button) { button.disabled = false; button.textContent = old; } }
 }

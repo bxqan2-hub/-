@@ -269,6 +269,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="showAtInvalidAccountsOnlyV2"', html)
         self.assertIn('>AT失效/错误</button>', html)
         self.assertIn('id="atValidityIntervalV2"', html)
+        self.assertIn('id="atValidityRecheckIntervalV2"', html)
         self.assertIn('id="btnSaveAtValidityScheduleV2"', html)
         self.assertIn('id="btnRunAtValidityNowV2"', html)
         self.assertIn("ACCOUNT_AT_VALIDITY_FILTER === 'invalid-or-error'", html)

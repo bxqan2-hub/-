@@ -1464,11 +1464,20 @@ def create_app(auth_code: str | None = None) -> Flask:
             interval = 0
         if not 1 <= interval <= 43_200:
             return jsonify({"ok": False, "error": "interval_minutes 必须在 1 到 43200 之间"}), 400
+        updates = {
+            "AT_VALIDITY_AUTO_CHECK_ENABLED": enabled,
+            "AT_VALIDITY_CHECK_INTERVAL_MINUTES": interval,
+        }
+        if "recheck_interval_minutes" in data:
+            try:
+                recheck_interval = int(data.get("recheck_interval_minutes") or 0)
+            except (TypeError, ValueError):
+                recheck_interval = 0
+            if not 1 <= recheck_interval <= 43_200:
+                return jsonify({"ok": False, "error": "recheck_interval_minutes 必须在 1 到 43200 之间"}), 400
+            updates["AT_VALIDITY_RECHECK_INTERVAL_MINUTES"] = recheck_interval
         try:
-            saved = config_editor.update_config({
-                "AT_VALIDITY_AUTO_CHECK_ENABLED": enabled,
-                "AT_VALIDITY_CHECK_INTERVAL_MINUTES": interval,
-            })
+            saved = config_editor.update_config(updates)
             import config as _config_pkg
             _config_pkg.reload_all()
             at_validity_scheduler.wakeup()

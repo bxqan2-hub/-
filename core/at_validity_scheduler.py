@@ -32,6 +32,32 @@ def _interval_minutes() -> int:
     return max(1, min(43_200, value))
 
 
+def _recheck_interval_minutes() -> int:
+    """返回已检测账号的复查周期（分钟）。"""
+    try:
+        value = int(getattr(validity_cfg, "AT_VALIDITY_RECHECK_INTERVAL_MINUTES", 1_440) or 1_440)
+    except (TypeError, ValueError):
+        value = 1_440
+    return max(1, min(43_200, value))
+
+
+def _account_due_for_recheck(account: dict, *, now: datetime | None = None) -> bool:
+    """判断账号是否尚未检测，或已经达到复查周期。"""
+    raw_checked_at = str(account.get("at_validity_checked_at") or "").strip()
+    if not raw_checked_at:
+        return True
+    try:
+        checked_at = datetime.fromisoformat(raw_checked_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        # 无法解析的历史值不能阻塞账号，下一次调度会重新建立标准时间戳。
+        return True
+    current = now or datetime.now(tz=checked_at.tzinfo)
+    if checked_at.tzinfo is not None and current.tzinfo is None:
+        current = current.replace(tzinfo=checked_at.tzinfo)
+    elapsed_seconds = (current - checked_at).total_seconds()
+    return elapsed_seconds >= _recheck_interval_minutes() * 60
+
+
 def _enabled() -> bool:
     return bool(getattr(validity_cfg, "AT_VALIDITY_AUTO_CHECK_ENABLED", True))
 
@@ -58,8 +84,14 @@ def enqueue_accounts(*, trigger: str = "scheduled-at") -> dict:
             "busy_count": 0,
             "failed_count": 0,
             "skipped_no_token_count": 0,
+            "skipped_recheck_count": 0,
         }
         for account in accounts:
+            # 手动“立即检查 AT”保持原有的强制全量行为；自动调度才按
+            # 首次检测/后续复查两个周期筛选账号。
+            if str(trigger or "scheduled-at").strip().lower() == "scheduled-at" and not _account_due_for_recheck(account):
+                result["skipped_recheck_count"] += 1
+                continue
             token = str(account.get("access_token") or "").strip()
             if not token:
                 result["skipped_no_token_count"] += 1
@@ -79,11 +111,12 @@ def enqueue_accounts(*, trigger: str = "scheduled-at") -> dict:
         _LAST_RUN_AT = datetime.now().isoformat(timespec="seconds")
         _LAST_RESULT = dict(result)
         logger.info(
-            "[AT定时检测] 入队完成：started=%s busy=%s failed=%s no_token=%s",
+            "[AT定时检测] 入队完成：started=%s busy=%s failed=%s no_token=%s skipped_recheck=%s",
             result["started_count"],
             result["busy_count"],
             result["failed_count"],
             result["skipped_no_token_count"],
+            result["skipped_recheck_count"],
         )
         return result
     finally:
@@ -153,6 +186,7 @@ def status() -> dict:
     return {
         "enabled": _enabled(),
         "interval_minutes": _interval_minutes(),
+        "recheck_interval_minutes": _recheck_interval_minutes(),
         "running": _RUN_LOCK.locked(),
         "last_run_at": _LAST_RUN_AT,
         "next_run_at": next_run_at,

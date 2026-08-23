@@ -10,6 +10,10 @@ AT_VALIDITY_AUTO_CHECK_ENABLED = True
 # 定时检测周期（分钟）。账号页顶部可直接修改并热加载。
 AT_VALIDITY_CHECK_INTERVAL_MINUTES = 360
 
+# 已完成过一次检测的账号复查周期（分钟）。调度器仍按上面的首次检测周期
+# 唤醒，但在每次唤醒时只把达到该复查周期的老账号重新入队。
+AT_VALIDITY_RECHECK_INTERVAL_MINUTES = 1_440
+
 # AT 检测使用独立队列，只请求会话接口，不进入套餐或 0 元试用判断。
 AT_VALIDITY_WORKERS = 5
 AT_VALIDITY_QUEUE_LIMIT = 500
@@ -24,6 +28,7 @@ apply_env_overrides(
     {
         "AT_VALIDITY_AUTO_CHECK_ENABLED": "bool",
         "AT_VALIDITY_CHECK_INTERVAL_MINUTES": "int",
+        "AT_VALIDITY_RECHECK_INTERVAL_MINUTES": "int",
         "AT_VALIDITY_WORKERS": "int",
         "AT_VALIDITY_QUEUE_LIMIT": "int",
         "AT_VALIDITY_REQUEST_ATTEMPTS": "int",

@@ -43,6 +43,10 @@ EDITABLE_FIELDS = [
         "label": "AT 检测周期（分钟）", "help": "默认 360 分钟；也可直接在账号页顶部修改，范围 1 到 43200 分钟",
     },
     {
+        "key": "AT_VALIDITY_RECHECK_INTERVAL_MINUTES", "file": "at_validity.py", "type": "int", "group": "账号 AT 有效性",
+        "label": "已查询账号复查周期（分钟）", "help": "账号首次检测后使用的再次检测周期；例如 1440 分钟就是 1 天，范围 1 到 43200 分钟",
+    },
+    {
         "key": "AT_VALIDITY_REQUEST_ATTEMPTS", "file": "at_validity.py", "type": "int", "group": "账号 AT 有效性",
         "label": "AT 网络错误尝试次数", "help": "默认 5 次，范围 1 到 10；代理断开、TLS、超时、限流和服务端错误会重新建立会话后继续尝试",
     },

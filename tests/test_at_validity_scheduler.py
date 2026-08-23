@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -267,8 +268,52 @@ class AtValidityServiceAndSchedulerTests(unittest.TestCase):
         self.assertEqual(result["started_count"], 1)
         self.assertEqual(result["busy_count"], 1)
         self.assertEqual(result["skipped_no_token_count"], 1)
+        self.assertEqual(result["skipped_recheck_count"], 0)
         list_accounts.assert_called_once_with(limit=1_000_000, archived="0")
         self.assertEqual(enqueue.call_count, 2)
+
+    @patch.object(at_validity_scheduler.at_validity_service, "enqueue_account_at_validity_check")
+    @patch.object(at_validity_scheduler.db, "list_accounts")
+    def test_scheduler_skips_recently_checked_accounts_until_recheck_interval(self, list_accounts, enqueue):
+        list_accounts.return_value = [
+            {
+                "id": 1,
+                "email": "recent@example.test",
+                "access_token": "at-recent",
+                "at_validity_checked_at": (datetime.now() - timedelta(minutes=30)).isoformat(),
+            },
+            {"id": 2, "email": "new@example.test", "access_token": "at-new"},
+        ]
+        enqueue.return_value = {"accepted": True, "busy": False}
+
+        with patch.object(
+            at_validity_scheduler.validity_cfg,
+            "AT_VALIDITY_RECHECK_INTERVAL_MINUTES",
+            1_440,
+            create=True,
+        ):
+            result = at_validity_scheduler.enqueue_accounts(trigger="scheduled-at")
+
+        self.assertEqual(result["started_count"], 1)
+        self.assertEqual(result["skipped_recheck_count"], 1)
+        self.assertEqual(enqueue.call_args.kwargs["account_id"], 2)
+
+    @patch.object(at_validity_scheduler.at_validity_service, "enqueue_account_at_validity_check")
+    @patch.object(at_validity_scheduler.db, "list_accounts")
+    def test_manual_check_keeps_force_all_behavior(self, list_accounts, enqueue):
+        list_accounts.return_value = [{
+            "id": 1,
+            "email": "recent@example.test",
+            "access_token": "at-recent",
+            "at_validity_checked_at": datetime.now().isoformat(),
+        }]
+        enqueue.return_value = {"accepted": True, "busy": False}
+
+        result = at_validity_scheduler.enqueue_accounts(trigger="manual-at")
+
+        self.assertEqual(result["started_count"], 1)
+        self.assertEqual(result["skipped_recheck_count"], 0)
+        enqueue.assert_called_once()
 
     @patch.object(at_validity_service, "_wait_for_rate_slot")
     @patch.object(at_validity_service, "check_access_token_validity", return_value={
@@ -320,12 +365,14 @@ class AtValidityWebApiTests(unittest.TestCase):
         with patch.object(at_validity_scheduler, "status", return_value={
             "enabled": True,
             "interval_minutes": 90,
+            "recheck_interval_minutes": 1_440,
             "next_run_at": "2026-08-23T13:30:00",
         }):
             response = self.client.get("/api/accounts/at-validity-schedule")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["interval_minutes"], 90)
+        self.assertEqual(response.get_json()["recheck_interval_minutes"], 1_440)
 
     def test_schedule_update_validates_and_hot_reloads(self):
         invalid = self.client.post("/api/accounts/at-validity-schedule", json={
@@ -334,19 +381,28 @@ class AtValidityWebApiTests(unittest.TestCase):
         })
         self.assertEqual(invalid.status_code, 400)
 
-        with patch.object(config_editor, "update_config", return_value={"updated": ["AT_VALIDITY_CHECK_INTERVAL_MINUTES"]}) as update, \
+        invalid_recheck = self.client.post("/api/accounts/at-validity-schedule", json={
+            "enabled": True,
+            "interval_minutes": 60,
+            "recheck_interval_minutes": 0,
+        })
+        self.assertEqual(invalid_recheck.status_code, 400)
+
+        with patch.object(config_editor, "update_config", return_value={"updated": ["AT_VALIDITY_CHECK_INTERVAL_MINUTES", "AT_VALIDITY_RECHECK_INTERVAL_MINUTES"]}) as update, \
              patch.object(config, "reload_all") as reload_all, \
              patch.object(at_validity_scheduler, "wakeup") as wakeup, \
-             patch.object(at_validity_scheduler, "status", return_value={"enabled": False, "interval_minutes": 120}):
+             patch.object(at_validity_scheduler, "status", return_value={"enabled": False, "interval_minutes": 120, "recheck_interval_minutes": 1_440}):
             response = self.client.post("/api/accounts/at-validity-schedule", json={
                 "enabled": False,
                 "interval_minutes": 120,
+                "recheck_interval_minutes": 1_440,
             })
 
         self.assertEqual(response.status_code, 200)
         update.assert_called_once_with({
             "AT_VALIDITY_AUTO_CHECK_ENABLED": False,
             "AT_VALIDITY_CHECK_INTERVAL_MINUTES": 120,
+            "AT_VALIDITY_RECHECK_INTERVAL_MINUTES": 1_440,
         })
         reload_all.assert_called_once_with()
         wakeup.assert_called_once_with()
