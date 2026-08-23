@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request
 from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, at_validity_scheduler
+from core import codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, at_validity_scheduler
 from core import chatgpt_plan, integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
@@ -597,6 +597,8 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error", "jp_trial_checked_at",
         "codex_status", "codex_agent_status",
         "email_rebind_status", "email_rebind_label", "email_rebind_from", "email_rebound_at",
+        "security_setup_status", "security_setup_stage", "security_setup_message",
+        "security_setup_password_done", "security_setup_totp_done",
     ):
         if key in row:
             out[key] = row.get(key)
@@ -651,6 +653,9 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "at_validity_http_status", "at_validity_error_code", "at_validity_error", "at_validity_trigger",
         "at_validity_network_route", "at_validity_proxy_used", "at_validity_proxy_source",
         "at_validity_proxy_fallback_reason", "at_validity_attempt_count",
+        # 独立补密码/2FA 扩展状态；不返回密码或 TOTP Secret。
+        "security_setup_error", "security_setup_queued_at", "security_setup_started_at",
+        "security_setup_completed_at",
         # Codex / Agent 状态提示。
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
@@ -946,6 +951,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_live_checks = db.recover_interrupted_live_checks()
     if recovered_live_checks:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的查活状态", recovered_live_checks)
+    recovered_security_setups = db.recover_interrupted_account_security_setups()
+    if recovered_security_setups:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的补密码/2FA 状态", recovered_security_setups)
     recovered_codex_agents = db.recover_interrupted_codex_agents()
     if recovered_codex_agents:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 Codex Agent Token 状态", recovered_codex_agents)
@@ -3655,6 +3663,49 @@ def create_app(auth_code: str | None = None) -> Flask:
             "ok": True,
             "log": content,
             "running": live_check_service.is_checking(email),
+        })
+
+    @app.post("/api/accounts/<int:account_id>/security-setup")
+    def api_account_security_setup(account_id: int):
+        """独立扩展：登录指定账号后补设/重设密码并开启 TOTP 2FA。"""
+        data = request.get_json(silent=True) or {}
+        mode = str(data.get("password_mode") or "add").strip().lower()
+        if mode not in {"add", "reset"}:
+            return jsonify({"ok": False, "error": "password_mode 仅支持 add/reset"}), 400
+        queued = account_security_service.enqueue_account_security_setup(
+            account_id=account_id,
+            password_mode=mode,
+            trigger="manual",
+        )
+        if queued.get("busy"):
+            return jsonify({"ok": False, **queued}), 409
+        if not queued.get("accepted"):
+            status = 404 if queued.get("error") == "账号不存在" else 503
+            return jsonify({"ok": False, **queued}), status
+        return jsonify({
+            "ok": True,
+            "message": "补密码/2FA 已加入独立后台队列，Roxy 窗口将自动打开",
+            **queued,
+            "queue": account_security_service.queue_settings(),
+        }), 202
+
+    @app.get("/api/accounts/<int:account_id>/security-setup")
+    def api_account_security_setup_status(account_id: int):
+        account = db.get_account(account_id)
+        if not account:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        fields = (
+            "security_setup_status", "security_setup_stage", "security_setup_message",
+            "security_setup_error", "security_setup_queued_at", "security_setup_started_at",
+            "security_setup_completed_at", "security_setup_password_done", "security_setup_totp_done",
+        )
+        return jsonify({
+            "ok": True,
+            "account_id": account_id,
+            "email": account.get("email"),
+            "password_configured": bool(_account_registration_password(account)),
+            "totp_enabled": bool(account.get("totp_secret")),
+            **{key: account.get(key) for key in fields},
         })
 
     # ----------------------------------------------------------

@@ -1141,6 +1141,27 @@ def test_password_setup_uses_selenium_async_callback_and_skips_totp_when_passwor
     assert "execute_async" not in driver.async_scripts[0]
     assert "const done = arguments[arguments.length - 1]" in driver.async_scripts[0]
     assert "post_login_add_password" in driver.async_scripts[0]
+    assert "post_login_password_reset" not in driver.async_scripts[0]
+    assert "query.set('connection','password')" not in driver.async_scripts[0]
+
+    # 账号页扩展显式选择 reset + console_compat；默认注册分支仍保持上面的 add 脚本。
+    reset_driver = Driver()
+    reset_result = account_export._setup_password_with_driver(
+        driver=reset_driver,
+        session=object(),
+        email="user@example.com",
+        password="Ab3!cdefgh123",
+        totp_secret="JBSWY3DPEHPK3PXP",
+        timeout_seconds=30,
+        password_mode="reset",
+        console_compat=True,
+    )
+
+    assert reset_result["ok"] is True, reset_result
+    assert "post_login_password_reset" in reset_driver.async_scripts[0]
+    assert "post_login_add_password" not in reset_driver.async_scripts[0]
+    assert "query.set('connection','password')" in reset_driver.async_scripts[0]
+    assert "query.set('reauth','password')" in reset_driver.async_scripts[0]
 
 
 def test_password_resend_invokes_arrow_function_for_selenium() -> None:

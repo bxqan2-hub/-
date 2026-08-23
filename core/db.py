@@ -2667,6 +2667,155 @@ def mark_account_live_check_running(acc_id: int) -> bool:
         return True
 
 
+def claim_account_security_setup(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用独立补密码/2FA 任务，不触碰注册、查活或套餐状态。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        if row.get("security_setup_status") in {"queued", "running"}:
+            return False
+        now = _now()
+        row.update({
+            "security_setup_status": "queued",
+            "security_setup_ok": False,
+            "security_setup_stage": "queued",
+            "security_setup_message": "补密码/2FA 任务已排队",
+            "security_setup_error": None,
+            "security_setup_trigger": str(trigger or "manual")[:80],
+            "security_setup_queued_at": now,
+            "security_setup_started_at": None,
+            "security_setup_completed_at": None,
+            "updated_at": now,
+        })
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_security_setup_running(acc_id: int, profile_id: str | None = None) -> bool:
+    """把独立安全设置任务标记为执行中。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("security_setup_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row.update({
+            "security_setup_status": "running",
+            "security_setup_stage": "browser_login",
+            "security_setup_message": "正在打开独立浏览器并登录账号",
+            "security_setup_error": None,
+            "security_setup_started_at": row.get("security_setup_started_at") or now,
+            "updated_at": now,
+        })
+        if profile_id:
+            row["security_setup_profile_id"] = str(profile_id)[:120]
+        _save_accounts(rows)
+        return True
+
+
+def update_account_security_setup(
+    acc_id: int,
+    result: dict | None = None,
+    *,
+    registration_password: str | None = None,
+    totp_secret: str | None = None,
+    access_token: str | None = None,
+) -> bool:
+    """写回独立安全设置结果；只有已确认生效的凭据才覆盖账号字段。"""
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        outlook_rows = _load_outlook()
+        generic_rows = _load_generic_api_emails()
+        domain_rows = _load_domain_pool()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+
+        now = _now()
+        token_value = str(access_token or "").strip()
+        secret_value = str(totp_secret or "").strip()
+        password_value = str(registration_password or "").strip()
+        if token_value:
+            row["access_token"] = token_value
+        if secret_value:
+            row["totp_secret"] = secret_value
+        if password_value:
+            try:
+                extra = json.loads(str(row.get("extra_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            extra["registration_password"] = password_value
+            row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+
+        status = str(result.get("status") or ("success" if result.get("ok") else "failed")).strip().lower()
+        if status not in {"queued", "running", "success", "partial", "failed"}:
+            status = "failed"
+        row["security_setup_status"] = status
+        row["security_setup_ok"] = bool(result.get("ok"))
+        row["security_setup_stage"] = str(result.get("stage") or status)[:80]
+        row["security_setup_message"] = str(result.get("message") or "")[:300] or None
+        row["security_setup_error"] = (
+            None if status == "success"
+            else str(result.get("error") or result.get("message") or "安全设置未完成")[:500]
+        )
+        if result.get("profile_id"):
+            row["security_setup_profile_id"] = str(result.get("profile_id"))[:120]
+        if "password_done" in result:
+            row["security_setup_password_done"] = bool(result.get("password_done"))
+        if "totp_done" in result:
+            row["security_setup_totp_done"] = bool(result.get("totp_done"))
+        if status in {"success", "partial", "failed"}:
+            row["security_setup_completed_at"] = result.get("checked_at") or now
+        row["updated_at"] = now
+        row["copy_line"] = _account_line(row)
+
+        normalized_email = str(row.get("email") or "").strip().lower()
+        for pool_rows in (outlook_rows, generic_rows, domain_rows):
+            pool_row = _find_by_email(pool_rows, normalized_email)
+            if not pool_row:
+                continue
+            if token_value:
+                pool_row["access_token"] = token_value
+            if secret_value:
+                pool_row["totp_secret"] = secret_value
+            pool_row["updated_at"] = now
+
+        _save_accounts(rows)
+        _save_outlook(outlook_rows)
+        _save_generic_api_emails(generic_rows)
+        _save_domain_pool(domain_rows)
+        return True
+
+
+def recover_interrupted_account_security_setups() -> int:
+    """服务启动时把扩展任务遗留状态恢复为可重试失败。"""
+    with _LOCK:
+        rows = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in rows:
+            if row.get("security_setup_status") not in {"queued", "running"}:
+                continue
+            row.update({
+                "security_setup_status": "failed",
+                "security_setup_ok": False,
+                "security_setup_stage": "interrupted",
+                "security_setup_message": "WebUI 重启导致补密码/2FA 任务中断，请重试",
+                "security_setup_error": "WebUI 重启导致补密码/2FA 任务中断，请重试",
+                "security_setup_completed_at": now,
+                "updated_at": now,
+            })
+            recovered += 1
+        if recovered:
+            _save_accounts(rows)
+        return recovered
+
+
 def update_accounts_note(account_ids: list[int] | None, note: str) -> tuple[list[dict], list[dict]]:
     """
     批量更新已注册账号备注。

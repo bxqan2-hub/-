@@ -1229,6 +1229,8 @@ def _setup_password_with_driver(
     password: str,
     totp_secret: str | None = None,
     timeout_seconds: float = 120.0,
+    password_mode: str = "add",
+    console_compat: bool = False,
 ) -> dict:
     """在 Selenium/Cloak 或同步 Playwright 页面中完成注册后密码设置。
 
@@ -1236,6 +1238,10 @@ def _setup_password_with_driver(
     ``post_login_add_password`` 重认证，再按页面实际挑战选择邮箱 OTP 或 TOTP，
     最后填写密码。Selenium 必须用 ``execute_async_script``，Cloak 适配器会把
     最后一个参数映射到其异步完成回调；Playwright 则直接 ``evaluate`` 异步函数。
+
+    ``password_mode``/``console_compat`` 只供账号页的独立安全扩展使用。默认值
+    保持原注册流程完全不变；扩展可以选择 reset 模式，并补齐控制台脚本使用的
+    connection/reauth 参数。
     """
     from core.registration_password import validate_registration_password
     from core.email_provider import wait_for_otp
@@ -1254,13 +1260,44 @@ def _setup_password_with_driver(
         otp_history = set()
     otp_message_ids = _snapshot_otp_message_ids(email, timeout=2.0)
     requested_at = time.time()
+    normalized_mode = str(password_mode or "add").strip().lower()
+    if normalized_mode not in {"add", "reset"}:
+        return {
+            "ok": False, "status": "failed", "stage": "password_validation",
+            "code": "password_mode_invalid", "message": "password_mode 仅支持 add/reset",
+            "http_status": None,
+        }
+    mode_key = (
+        "post_login_password_reset"
+        if normalized_mode == "reset"
+        else "post_login_add_password"
+    )
+    reauth_js = _PASSWORD_REAUTH_JS.replace("post_login_add_password: 'true'", f"{mode_key}: 'true'")
+    reauth_selenium_js = _PASSWORD_REAUTH_SELENIUM_JS.replace(
+        "post_login_add_password:'true'",
+        f"{mode_key}:'true'",
+    )
+    if console_compat:
+        reauth_js = reauth_js.replace(
+            "  const body = new URLSearchParams({",
+            "  query.set('connection', 'password');\n"
+            "  query.set('reauth', 'password');\n"
+            "  const body = new URLSearchParams({",
+            1,
+        )
+        reauth_selenium_js = reauth_selenium_js.replace(
+            "      const body = new URLSearchParams({csrfToken,",
+            "      query.set('connection','password'); query.set('reauth','password');\n"
+            "      const body = new URLSearchParams({csrfToken,",
+            1,
+        )
     try:
         if _is_playwright_page(driver):
-            reauth = driver.evaluate(_PASSWORD_REAUTH_JS)
+            reauth = driver.evaluate(reauth_js)
         else:
             if not callable(getattr(driver, "execute_async_script", None)):
                 raise RuntimeError("driver_missing_execute_async_script")
-            reauth = driver.execute_async_script(_PASSWORD_REAUTH_SELENIUM_JS)
+            reauth = driver.execute_async_script(reauth_selenium_js)
     except Exception as exc:
         logger.warning("%s[2FA][密码] 重认证请求失败：%s", prefix, type(exc).__name__)
         return {

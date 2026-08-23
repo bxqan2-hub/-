@@ -827,6 +827,14 @@
     .plus-pool-table .acc-v2-twofa-btn:hover:not(:disabled) {
       color: #fff; background: #377dff; border-color: #377dff;
     }
+    #accountsPanelV2 .acc-v2-twofa-btn.danger,
+    .plus-pool-table .acc-v2-twofa-btn.danger {
+      border-color: #f89898; background: #fff5f5; color: #e64545;
+    }
+    #accountsPanelV2 .acc-v2-twofa-btn.danger:hover:not(:disabled),
+    .plus-pool-table .acc-v2-twofa-btn.danger:hover:not(:disabled) {
+      color: #fff; background: #f56c6c; border-color: #f56c6c;
+    }
     #accountsPanelV2 .acc-v2-twofa-btn:disabled,
     .plus-pool-table .acc-v2-twofa-btn:disabled {
       opacity: .55; cursor: not-allowed;
@@ -3105,6 +3113,7 @@ let TARGET_ACCOUNT_GROUP_ID = '';
 const ACCOUNT_SELECTED = new Set();
 const ACTIVE_TOTP_CODES = new Map();
 const PENDING_TOTP_CODES = new Set();
+const ACTIVE_SECURITY_SETUP_POLLS = new Set();
 const ACCOUNT_DRAG_SELECTION = {
   active: false,
   body: null,
@@ -4930,11 +4939,22 @@ function _twoFaCellV2(r) {
   const statusHtml = _accountSecurityStatusV2(r);
   const totpState = ACTIVE_TOTP_CODES.get(accountId);
   const totpPending = PENDING_TOTP_CODES.has(accountId);
+  const securityStatus = String(r.security_setup_status || '');
+  const securityRunning = ['queued','running'].includes(securityStatus);
+  const securityFailed = ['failed','partial'].includes(securityStatus);
+  const securityLabel = securityRunning
+    ? (securityStatus === 'queued' ? '安全设置排队中…' : '安全设置中…')
+    : !passwordReady && !mfaReady ? '补密码+2FA'
+    : !passwordReady ? '补密码'
+    : !mfaReady ? '开启2FA'
+    : '';
+  const securityDetail = r.security_setup_error || r.security_setup_message || '';
   const copyButton = `<button type="button" class="acc-v2-twofa-btn acc-v2-credential-copy" data-account-copy-secret="account_password_2fa" data-account-id="${id}" ${credentialsReady ? '' : 'disabled'} title="${credentialsReady ? '复制为：账号----密码----MFA Secret' : '密码或 2FA 凭据不完整'}">复制</button>`;
   return `<div class="acc-v2-twofa" data-account-twofa="${id}">
     <div class="acc-v2-sub acc-v2-twofa-status" data-account-twofa-value="${id}">${statusHtml}</div>
     <div class="acc-v2-twofa-actions">
       ${copyButton}
+      ${securityLabel ? `<button type="button" class="acc-v2-twofa-btn${securityFailed ? ' danger' : ''}" data-account-security-setup="${id}" ${securityRunning ? 'disabled aria-busy="true"' : ''} title="${esc(securityDetail || '在独立 Roxy 窗口自动邮箱 OTP 登录；登录成功后用页面脚本补密码并执行 MFA enroll/activate，不进入注册主流程')}">${esc(securityLabel)}</button>` : ''}
       ${mfaReady ? `<button type="button" class="acc-v2-twofa-btn acc-v2-totp-code-btn" data-account-totp-code="${id}" ${totpPending ? 'disabled aria-busy="true"' : ''} aria-pressed="${totpState ? 'true' : 'false'}" title="${totpPending ? '正在获取动态验证码' : totpState ? '停止显示动态验证码' : '按已保存 Secret 生成当前 6 位动态验证码'}">${totpPending ? '获取中…' : totpState ? '停止' : '验证码'}</button>` : ''}
     </div>
     <div class="acc-v2-sub acc-v2-totp-code-value" data-account-totp-code-value="${id}" aria-live="polite">${totpState ? `${esc(totpState.code)}（${esc(totpState.remaining)}s）` : ''}</div>
@@ -5416,6 +5436,64 @@ async function tickAccountTotpCode(id) {
   }
 }
 
+async function pollAccountSecuritySetup(id) {
+  const accountId = Number(id);
+  if (ACTIVE_SECURITY_SETUP_POLLS.has(accountId)) return;
+  ACTIVE_SECURITY_SETUP_POLLS.add(accountId);
+  try {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const state = await api(`/api/accounts/${encodeURIComponent(accountId)}/security-setup`);
+      const status = String(state.security_setup_status || '');
+      if (!['queued','running'].includes(status)) {
+        await loadAccounts();
+        if (PLUS_ACCOUNTS.some(row => Number(row.id) === accountId)) await loadPlusAccounts();
+        if (status === 'success') showToast(`${state.email || '账号'}：密码和 2FA 已完成`);
+        else showToast(`${state.email || '账号'}：${state.security_setup_error || state.security_setup_message || '安全设置未完成'}`);
+        return;
+      }
+    }
+    showToast('安全设置仍在运行，可稍后刷新账号页查看结果');
+  } catch (err) {
+    showToast('读取安全设置状态失败: ' + err.message);
+  } finally {
+    ACTIVE_SECURITY_SETUP_POLLS.delete(accountId);
+  }
+}
+
+async function startAccountSecuritySetup(id, button) {
+  const accountId = Number(id);
+  const account = ACCOUNTS.find(row => Number(row.id) === accountId)
+    || PLUS_ACCOUNTS.find(row => Number(row.id) === accountId);
+  if (!account) { showToast('账号不存在或当前列表尚未加载'); return; }
+  let passwordMode = 'add';
+  if (!account.password_configured) {
+    const choice = prompt(
+      `为 ${account.email} 选择密码模式：\n1 = 添加密码（默认，适合尚无密码）\n2 = 重设密码（适合服务端已有密码但本地未保存）`,
+      '1'
+    );
+    if (choice === null) return;
+    passwordMode = String(choice).trim() === '2' ? 'reset' : 'add';
+  }
+  const operation = account.password_configured ? '开启 2FA' : `${passwordMode === 'reset' ? '重设' : '添加'}密码并开启 2FA`;
+  if (!confirm(`确定为以下账号${operation}吗？\n\n${account.email}\n\n将创建独立 Roxy 环境并自动邮箱 OTP 登录；不会进入或改动现有注册任务。`)) return;
+  const oldText = button?.textContent || '';
+  if (button) { button.disabled = true; button.textContent = '入队中…'; }
+  try {
+    const result = await api(`/api/accounts/${encodeURIComponent(accountId)}/security-setup`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({password_mode: passwordMode}),
+    });
+    showToast(result.message || '补密码/2FA 已加入队列');
+    await loadAccounts();
+    void pollAccountSecuritySetup(accountId);
+  } catch (err) {
+    showToast('启动补密码/2FA失败: ' + err.message);
+    if (button) { button.disabled = false; button.textContent = oldText; }
+  }
+}
+
 // 账号操作按钮（事件委托）
 async function onAccountsBodyClick(e) {
   const copyEmailBtn = e.target.closest('[data-plus-copy-email]');
@@ -5455,6 +5533,12 @@ async function onAccountsBodyClick(e) {
   const replaceAtBtn = e.target.closest('[data-account-replace-at]');
   if (replaceAtBtn) {
     openAtReplaceModal(Number(replaceAtBtn.dataset.accountReplaceAt));
+    return;
+  }
+
+  const securitySetupBtn = e.target.closest('[data-account-security-setup]');
+  if (securitySetupBtn) {
+    await startAccountSecuritySetup(Number(securitySetupBtn.dataset.accountSecuritySetup), securitySetupBtn);
     return;
   }
 
