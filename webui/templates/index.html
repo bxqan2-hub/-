@@ -4698,16 +4698,26 @@ function _tokenCellV2(r) {
   else if (live === 'failed') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#e6a23c">查活: 失败</div>`;
   const atStatus = String(r.at_validity_status || '');
   const atError = r.at_validity_error || '';
+  const atErrorCode = String(r.at_validity_error_code || '');
   const atChecked = r.at_validity_checked_at || '';
+  const atAttempts = Number(r.at_validity_attempt_count || 0);
   const atProxy = r.at_validity_proxy_used || '';
   const atRoute = r.at_validity_network_route === 'proxy' ? `代理 ${atProxy || '已配置'}`
     : r.at_validity_network_route === 'direct_fallback' ? `代理不可用后直连${r.at_validity_proxy_fallback_reason ? `：${r.at_validity_proxy_fallback_reason}` : ''}`
+    : r.at_validity_network_route === 'local_vpn' ? '本机 VPN/TUN'
     : r.at_validity_network_route === 'direct' ? '直连' : '';
-  const atTitle = [atError || atChecked, atRoute].filter(Boolean).join('；');
+  const atRetry = atAttempts > 1 ? `已尝试 ${atAttempts} 次` : '';
+  const atTitle = [atError || atChecked, atRetry, atRoute].filter(Boolean).join('；');
   let atHtml = '';
   if (atStatus === 'valid') atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#67c23a">AT: 有效</div>`;
   else if (atStatus === 'invalid_confirmed') atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#f56c6c">AT: 已失效</div>`;
-  else if (atStatus === 'check_error') atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#e6a23c">AT检测: 错误</div>`;
+  else if (atStatus === 'check_error') {
+    const errorLabel = atErrorCode === 'request_error' ? 'AT检测: 网络错误'
+      : atErrorCode === 'http_429' ? 'AT检测: 限流错误'
+      : atErrorCode.startsWith('http_5') ? 'AT检测: 服务错误'
+      : atErrorCode === 'proxy_config_error' ? 'AT检测: 配置错误' : 'AT检测: 错误';
+    atHtml = `<div class="acc-v2-sub" title="${esc(atTitle)}" style="color:#e6a23c">${errorLabel}</div>`;
+  }
   const twoFaHtml = _twoFaCellV2(r);
   if (r.has_access_token) {
     return `<div class="account-token-stack"><button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制 AT</button>${twoFaHtml}${atHtml}${liveHtml}</div>`;
@@ -5606,7 +5616,7 @@ async function saveAtValiditySchedule(button) {
   finally { if (button) { button.disabled = false; button.textContent = old; } }
 }
 async function runAtValidityNow(button) {
-  if (!confirm('立即检测所有未归档且有 AT 的账号吗？\n\n只调用 AT 会话有效性接口；专属代理池非空时只用专属池，空池时使用本地代理；不会查询套餐、0元试用或触发邮箱 OTP。')) return;
+  if (!confirm('立即检测所有未归档且有 AT 的账号吗？\n\n只调用 AT 会话有效性接口；专属代理池非空时只用专属池，空池时只走本机 VPN/系统代理并跳过所有代理池；网络/TLS/超时/限流/服务端错误会多次尝试；不会查询套餐、0元试用或触发邮箱 OTP。')) return;
   const old = button?.textContent || '立即检查AT';
   if (button) { button.disabled = true; button.textContent = '入队中…'; }
   try {
@@ -8288,7 +8298,7 @@ function renderDetectionProxyCountryControlV2(profileField, activeField, purpose
     <div class="detection-proxy-summary-v2" data-detection-proxy-status="${attrEsc(purpose)}">
       ${profiles.length
         ? `已归纳 <strong>${profiles.length}</strong> 个国家、共 <strong>${total}</strong> 条；当前 ${esc(selected?.label || '')}`
-        : (purpose === 'at' ? '当前专属池为空；AT 检测将使用本地代理。' : '当前没有静态代理；动态代理 API 不会被检测任务调用。')}
+        : (purpose === 'at' ? '当前专属池为空；AT 检测将只走本机 VPN/系统代理，不读取 PROXY_POOL。' : '当前没有静态代理；动态代理 API 不会被检测任务调用。')}
     </div>`;
 }
 function renderDetectionProxyPanelV2(fields) {
@@ -8318,7 +8328,7 @@ function renderDetectionProxyPanelV2(fields) {
   const atCard = (atProfiles && atActive) ? `
     <section class="detection-proxy-card-v2" aria-label="AT 有效性检测代理">
       <h4>AT 定时有效性检测专属代理</h4>
-      <p>专属池非空时只用该池；池为空时使用本地代理。只检测 AT 是否失效，不查询套餐或 0 元试用。</p>
+      <p>专属池非空时只用该池；池为空时只走本机 VPN/系统代理，完全跳过 PROXY_POOL。只检测 AT 是否失效，不查询套餐或 0 元试用。</p>
       ${renderDetectionProxyCountryControlV2(atProfiles, atActive, 'at')}
     </section>
   ` : '';

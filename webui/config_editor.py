@@ -36,11 +36,19 @@ EDITABLE_FIELDS = [
     # ---- 账号 AT 有效性 ----
     {
         "key": "AT_VALIDITY_AUTO_CHECK_ENABLED", "file": "at_validity.py", "type": "bool", "group": "账号 AT 有效性",
-        "label": "启用 AT 定时检测", "help": "只调用 AT 会话接口验证未归档账号的 Access Token，不查询套餐或 0 元试用；专属池非空时用专属池，空池时用本地代理",
+        "label": "启用 AT 定时检测", "help": "只调用 AT 会话接口验证未归档账号的 Access Token，不查询套餐或 0 元试用；专属池非空时用专属池，空池时只走本机 VPN/系统代理，不读取任何代理池",
     },
     {
         "key": "AT_VALIDITY_CHECK_INTERVAL_MINUTES", "file": "at_validity.py", "type": "int", "group": "账号 AT 有效性",
         "label": "AT 检测周期（分钟）", "help": "默认 360 分钟；也可直接在账号页顶部修改，范围 1 到 43200 分钟",
+    },
+    {
+        "key": "AT_VALIDITY_REQUEST_ATTEMPTS", "file": "at_validity.py", "type": "int", "group": "账号 AT 有效性",
+        "label": "AT 网络错误尝试次数", "help": "默认 5 次，范围 1 到 10；代理断开、TLS、超时、限流和服务端错误会重新建立会话后继续尝试",
+    },
+    {
+        "key": "AT_VALIDITY_RETRY_DELAY", "file": "at_validity.py", "type": "float", "group": "账号 AT 有效性",
+        "label": "AT 重试基础等待（秒）", "help": "默认 1 秒，随后按 1、2、4、8 秒退避，最长单次等待 8 秒",
     },
     # ---- WebUI 授权 ----
     {
@@ -743,7 +751,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "AT_VALIDITY_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "AT 有效性检测专属代理池", "help": "只供 AT 定时/立即有效性检测使用；非空时只用此池，空池时自动使用本地 PROXY_POOL；不会查询套餐或 0 元试用",
+        "label": "AT 有效性检测专属代理池", "help": "只供 AT 定时/立即有效性检测使用；非空时只用此池，空池时只走本机 VPN/系统代理并完全跳过 PROXY_POOL；不会查询套餐或 0 元试用",
         "storage": "runtime_file", "secret": True,
     },
     {

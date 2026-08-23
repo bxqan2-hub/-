@@ -10,6 +10,14 @@ from webui import config_editor
 
 
 class ConfigDefaultFallbackTests(unittest.TestCase):
+    def test_at_validity_retry_defaults_are_editable(self):
+        fields = {item["key"]: item for item in config_editor.EDITABLE_FIELDS}
+
+        self.assertIn("AT_VALIDITY_REQUEST_ATTEMPTS", fields)
+        self.assertIn("AT_VALIDITY_RETRY_DELAY", fields)
+        self.assertEqual(fields["AT_VALIDITY_REQUEST_ATTEMPTS"]["type"], "int")
+        self.assertEqual(fields["AT_VALIDITY_RETRY_DELAY"]["type"], "float")
+
     def test_registration_timing_budgets_are_editable(self):
         keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
         self.assertTrue({

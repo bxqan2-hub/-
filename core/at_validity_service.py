@@ -67,7 +67,8 @@ def _run_at_validity_check(
         result = check_access_token_validity(
             access_token,
             proxy=proxy,
-            max_attempts=_int_setting("AT_VALIDITY_REQUEST_ATTEMPTS", 2, 1, 3),
+            max_attempts=_int_setting("AT_VALIDITY_REQUEST_ATTEMPTS", 5, 1, 10),
+            retry_delay=_float_setting("AT_VALIDITY_RETRY_DELAY", 1.0, 0.0, 30.0),
         )
         db.update_account_at_validity(account_id, result, trigger=trigger)
         logger.info(
@@ -153,7 +154,8 @@ def queue_settings() -> dict:
     return {
         "workers": _WORKERS,
         "queue_limit": _QUEUE_LIMIT,
-        "request_attempts": _int_setting("AT_VALIDITY_REQUEST_ATTEMPTS", 2, 1, 3),
+        "request_attempts": _int_setting("AT_VALIDITY_REQUEST_ATTEMPTS", 5, 1, 10),
+        "retry_delay": _float_setting("AT_VALIDITY_RETRY_DELAY", 1.0, 0.0, 30.0),
         "min_interval": _float_setting("AT_VALIDITY_MIN_INTERVAL", 0.4, 0.0, 30.0),
         "jitter": _float_setting("AT_VALIDITY_JITTER", 0.2, 0.0, 30.0),
     }

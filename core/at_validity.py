@@ -59,10 +59,10 @@ def _result(
 
 
 def _resolve_at_validity_route(explicit_proxy: str | None = None) -> dict[str, Any]:
-    """选择 AT 检测路径；专属池非空时只用专属池，空池时用本地代理。
+    """选择 AT 检测路径；专属池非空时只用专属池，空池时走本机 VPN。
 
-    显式空串表示调用方要求直连。周期任务不会读取套餐检测池，也不会调用动态
-    代理 API；本地回退只读取 ``PROXY_POOL`` / 系统代理。
+    显式空串表示调用方要求直连。空池回退只读取操作系统/环境代理；若系统没有
+    显式代理则用直连交给本机 VPN/TUN 接管。不会读取任何代理池或动态代理 API。
     """
     if explicit_proxy is not None:
         resolved = detection_proxy.resolve_static_detection_proxy(explicit_proxy)
@@ -79,15 +79,22 @@ def _resolve_at_validity_route(explicit_proxy: str | None = None) -> dict[str, A
         route["proxy_source"] = "at_validity_static_pool"
         return route
 
-    local_proxy = str(proxy_cfg.pick_local_proxy() or "").strip()
-    if not local_proxy:
-        raise ValueError("AT 有效性检测专属代理池为空，且未配置本地代理")
-    resolved = detection_proxy.resolve_static_detection_proxy(local_proxy)
-    if not resolved:
-        raise ValueError("AT 有效性检测本地代理为空或无法识别")
-    route = resolve_plan_check_route(explicit_proxy=resolved)
-    route["proxy_source"] = "local_proxy_fallback"
-    return route
+    system_proxy = str(proxy_cfg.detect_system_proxy() or "").strip()
+    if system_proxy:
+        resolved = detection_proxy.resolve_static_detection_proxy(system_proxy)
+        if not resolved:
+            raise ValueError("AT 有效性检测无法识别本机系统代理")
+        route = resolve_plan_check_route(explicit_proxy=resolved)
+        route["proxy_source"] = "local_vpn_system_proxy"
+        return route
+    return {
+        "proxy": "",
+        "proxy_mode": "local_vpn",
+        "proxy_source": "local_vpn_tun",
+        "network_route": "local_vpn",
+        "proxy_used": None,
+        "proxy_fallback_reason": None,
+    }
 
 
 def _request_headers(env: BrowserSession, token: str) -> dict[str, str]:
@@ -111,7 +118,8 @@ def check_access_token_validity(
     access_token: str,
     *,
     proxy: str | None = None,
-    max_attempts: int = 2,
+    max_attempts: int = 5,
+    retry_delay: float = 1.0,
 ) -> dict[str, Any]:
     """仅检查 AT 是否有效；不会执行任何套餐或 0 元试用判断。"""
     token = normalize_token(access_token)
@@ -139,62 +147,63 @@ def check_access_token_validity(
             error=f"AT 检测代理配置错误: {type(exc).__name__}: {str(exc)[:300]}",
         )
 
-    attempts = max(1, min(3, int(max_attempts or 1)))
-    env: BrowserSession | None = None
+    attempts = max(1, min(10, int(max_attempts or 1)))
+    try:
+        retry_delay = max(0.0, min(30.0, float(retry_delay or 0.0)))
+    except (TypeError, ValueError):
+        retry_delay = 1.0
     last_error = ""
     last_status: int | None = None
     attempt_count = 0
-    try:
-        env = BrowserSession(proxy=str(route.get("proxy") or ""), detect_exit_geo=False)
-        headers = _request_headers(env, token)
-        for attempt in range(1, attempts + 1):
-            attempt_count = attempt
+    for attempt in range(1, attempts + 1):
+        attempt_count = attempt
+        env: BrowserSession | None = None
+        if attempt > 1:
             try:
-                response = env.session.get(
-                    f"https://chatgpt.com{ME_PATH}",
-                    headers=headers,
-                    allow_redirects=False,
-                    timeout=_timeout_seconds(),
-                )
-                last_status = int(getattr(response, "status_code", 0) or 0)
-                if 200 <= last_status < 300:
-                    return _result("valid", http_status=last_status, attempt_count=attempt, route=route)
-                if last_status == 401:
-                    return _result(
-                        "invalid_confirmed",
-                        http_status=last_status,
-                        error_code="http_401",
-                        error="AT 会话接口返回 HTTP 401",
-                        attempt_count=attempt,
-                        route=route,
-                    )
-                last_error = f"AT 会话接口返回 HTTP {last_status}"
-                if last_status not in _RETRYABLE_HTTP_STATUSES or attempt >= attempts:
-                    break
+                # 专属池会在这里轮换下一条；本机 VPN 则重新读取系统代理/TUN 状态。
+                route = _resolve_at_validity_route(proxy)
             except Exception as exc:
+                last_status = None
                 last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
-                if attempt >= attempts:
-                    break
-            time.sleep(0.25)
+        try:
+            env = BrowserSession(proxy=str(route.get("proxy") or ""), detect_exit_geo=False)
+            headers = _request_headers(env, token)
+            response = env.session.get(
+                f"https://chatgpt.com{ME_PATH}",
+                headers=headers,
+                allow_redirects=False,
+                timeout=_timeout_seconds(),
+            )
+            last_status = int(getattr(response, "status_code", 0) or 0)
+            if 200 <= last_status < 300:
+                return _result("valid", http_status=last_status, attempt_count=attempt, route=route)
+            if last_status == 401:
+                return _result(
+                    "invalid_confirmed",
+                    http_status=last_status,
+                    error_code="http_401",
+                    error="AT 会话接口返回 HTTP 401",
+                    attempt_count=attempt,
+                    route=route,
+                )
+            last_error = f"AT 会话接口返回 HTTP {last_status}"
+            if last_status not in _RETRYABLE_HTTP_STATUSES:
+                break
+        except Exception as exc:
+            last_status = None
+            last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+        finally:
+            if env is not None:
+                env.close()
+        if attempt < attempts:
+            time.sleep(min(8.0, retry_delay * (2 ** (attempt - 1))))
 
-        error_code = f"http_{last_status}" if last_status else "request_error"
-        return _result(
-            "check_error",
-            http_status=last_status,
-            error_code=error_code,
-            error=last_error or "AT 检测未得到确定结论",
-            attempt_count=attempt_count,
-            route=route,
-        )
-    except Exception as exc:
-        return _result(
-            "check_error",
-            http_status=last_status,
-            error_code="request_error",
-            error=f"{type(exc).__name__}: {str(exc)[:300]}",
-            attempt_count=attempt_count,
-            route=route,
-        )
-    finally:
-        if env is not None:
-            env.close()
+    error_code = f"http_{last_status}" if last_status else "request_error"
+    return _result(
+        "check_error",
+        http_status=last_status,
+        error_code=error_code,
+        error=last_error or "AT 检测未得到确定结论",
+        attempt_count=attempt_count,
+        route=route,
+    )

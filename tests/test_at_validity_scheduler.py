@@ -21,52 +21,57 @@ class AtValidityProbeTests(unittest.TestCase):
         env.session.get.return_value = SimpleNamespace(status_code=status_code)
         return env
 
-    def test_route_uses_at_dedicated_pool_before_local_proxy(self):
+    def test_route_uses_at_dedicated_pool_before_local_vpn(self):
         with patch.object(
             at_validity.detection_proxy,
             "configured_detection_proxy_spec",
             return_value="JP|socks5h://at-pool.example:1080",
         ) as configured_spec, patch.object(
             at_validity.proxy_cfg,
-            "pick_local_proxy",
+            "detect_system_proxy",
             return_value="http://127.0.0.1:7890",
-        ) as pick_local:
+        ) as detect_system:
             route = at_validity._resolve_at_validity_route()
 
         configured_spec.assert_called_once_with("at")
-        pick_local.assert_not_called()
+        detect_system.assert_not_called()
         self.assertEqual(route["proxy"], "socks5h://at-pool.example:1080")
         self.assertEqual(route["proxy_source"], "at_validity_static_pool")
 
-    def test_route_uses_local_proxy_when_at_pool_is_empty(self):
+    def test_empty_at_pool_uses_system_proxy_and_never_reads_proxy_pool(self):
         with patch.object(
             at_validity.detection_proxy,
             "configured_detection_proxy_spec",
             return_value=None,
         ) as configured_spec, patch.object(
-            at_validity.proxy_cfg, "PROXY_POOL", ["http://127.0.0.1:7890"]
-        ), patch.object(
-            at_validity.proxy_cfg, "PROXY_POOL_ACTIVE", ""
-        ), patch.object(
-            at_validity.proxy_cfg, "PROXY_API_ENABLED", True
-        ), patch.object(
-            at_validity.proxy_cfg, "fetch_proxy_from_api"
-        ) as fetch_dynamic:
+            at_validity.proxy_cfg, "detect_system_proxy", return_value="http://127.0.0.1:7890"
+        ) as detect_system, patch.object(
+            at_validity.proxy_cfg, "pick_local_proxy", side_effect=AssertionError("PROXY_POOL must not be read")
+        ) as pick_pool:
             route = at_validity._resolve_at_validity_route()
 
         configured_spec.assert_called_once_with("at")
-        fetch_dynamic.assert_not_called()
+        detect_system.assert_called_once_with()
+        pick_pool.assert_not_called()
         self.assertEqual(route["proxy"], "http://127.0.0.1:7890")
-        self.assertEqual(route["proxy_source"], "local_proxy_fallback")
+        self.assertEqual(route["proxy_source"], "local_vpn_system_proxy")
 
-    def test_route_fails_closed_when_at_pool_and_local_proxy_are_empty(self):
+    def test_empty_at_pool_without_system_proxy_uses_local_vpn_tun(self):
         with patch.object(
             at_validity.detection_proxy,
             "configured_detection_proxy_spec",
             return_value=None,
-        ), patch.object(at_validity.proxy_cfg, "pick_local_proxy", return_value=""):
-            with self.assertRaisesRegex(ValueError, "专属代理池为空"):
-                at_validity._resolve_at_validity_route()
+        ), patch.object(
+            at_validity.proxy_cfg, "detect_system_proxy", return_value=""
+        ), patch.object(
+            at_validity.proxy_cfg, "pick_local_proxy", side_effect=AssertionError("PROXY_POOL must not be read")
+        ) as pick_pool:
+            route = at_validity._resolve_at_validity_route()
+
+        pick_pool.assert_not_called()
+        self.assertEqual(route["proxy"], "")
+        self.assertEqual(route["proxy_source"], "local_vpn_tun")
+        self.assertEqual(route["network_route"], "local_vpn")
 
     @patch.object(at_validity, "BrowserSession")
     @patch.object(at_validity, "token_claims", return_value={"token_expired": True})
@@ -129,6 +134,68 @@ class AtValidityProbeTests(unittest.TestCase):
         self.assertIsNone(result["valid"])
         self.assertEqual(result["http_status"], 429)
         self.assertEqual(result["attempt_count"], 2)
+
+    @patch.object(at_validity.time, "sleep")
+    @patch.object(at_validity, "_resolve_at_validity_route", return_value={
+        "proxy": "", "network_route": "local_vpn", "proxy_used": None,
+        "proxy_source": "local_vpn_tun",
+    })
+    @patch.object(at_validity, "BrowserSession")
+    @patch.object(at_validity, "token_claims", return_value={"token_expired": False})
+    def test_network_tls_timeout_and_server_errors_retry_with_fresh_sessions(
+        self, _claims, session_cls, resolve_route, sleep
+    ):
+        tls_error = self._session(0)
+        tls_error.session.get.side_effect = RuntimeError("BoringSSL SSL_connect closed")
+        timeout_error = self._session(0)
+        timeout_error.session.get.side_effect = TimeoutError("timed out")
+        server_error = self._session(503)
+        success = self._session(200)
+        session_cls.side_effect = [tls_error, timeout_error, server_error, success]
+
+        result = at_validity.check_access_token_validity(
+            "at-retry",
+            max_attempts=5,
+            retry_delay=1.0,
+        )
+
+        self.assertEqual(result["outcome"], "valid")
+        self.assertEqual(result["attempt_count"], 4)
+        self.assertEqual(session_cls.call_count, 4)
+        self.assertEqual(resolve_route.call_count, 4)
+        sleep.assert_has_calls([unittest.mock.call(1.0), unittest.mock.call(2.0), unittest.mock.call(4.0)])
+        for env in (tls_error, timeout_error, server_error, success):
+            env.close.assert_called_once_with()
+
+    @patch.object(at_validity.time, "sleep")
+    @patch.object(at_validity, "_resolve_at_validity_route", return_value={
+        "proxy": "", "network_route": "local_vpn", "proxy_used": None,
+        "proxy_source": "local_vpn_tun",
+    })
+    @patch.object(at_validity, "BrowserSession")
+    @patch.object(at_validity, "token_claims", return_value={"token_expired": False})
+    def test_network_error_exhausts_five_attempts_without_marking_at_invalid(
+        self, _claims, session_cls, _route, sleep
+    ):
+        sessions = [self._session(0) for _ in range(5)]
+        for env in sessions:
+            env.session.get.side_effect = TimeoutError("timed out")
+        session_cls.side_effect = sessions
+
+        result = at_validity.check_access_token_validity(
+            "at-still-unknown",
+            max_attempts=5,
+            retry_delay=0.5,
+        )
+
+        self.assertEqual(result["outcome"], "check_error")
+        self.assertIsNone(result["valid"])
+        self.assertEqual(result["attempt_count"], 5)
+        self.assertEqual(session_cls.call_count, 5)
+        sleep.assert_has_calls([
+            unittest.mock.call(0.5), unittest.mock.call(1.0),
+            unittest.mock.call(2.0), unittest.mock.call(4.0),
+        ])
 
     @patch.object(at_validity, "_resolve_at_validity_route", side_effect=ValueError("动态代理被拒绝"))
     @patch.object(at_validity, "BrowserSession")
@@ -236,6 +303,9 @@ class AtValidityServiceAndSchedulerTests(unittest.TestCase):
         self.assertNotIn("plan_check_service", scheduler_source)
         self.assertNotIn("check_account_plan", probe_source)
         self.assertNotIn("plus_trial_eligible", probe_source)
+        self.assertNotIn("pick_local_proxy", probe_source)
+        self.assertNotIn("proxy_cfg.PROXY_POOL", probe_source)
+        self.assertIn("detect_system_proxy", probe_source)
         self.assertNotIn("update_account_at_validity", plan_service_source)
 
 
