@@ -340,7 +340,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
     @patch.object(plan_check_service.detection_proxy, "infer_timezone_offset_min", return_value="-540")
     @patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True)
     @patch.object(plan_check_service.db, "update_account_plan_check")
-    def test_account_page_uses_fast_plan_probe_until_result(
+    def test_account_page_uses_legacy_plus_fallback_plan_probe(
         self,
         _update,
         _mark,
@@ -359,7 +359,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
             timezone_offset_min="-",
         )
         resolve.assert_called_once_with("JP|socks5h://proxy.example:1080")
-        self.assertTrue(check.call_args.kwargs["fast_mode"])
+        self.assertFalse(check.call_args.kwargs["fast_mode"])
         self.assertEqual(check.call_args.kwargs["max_attempts"], 0)
         self.assertTrue(callable(check.call_args.kwargs["continue_check"]))
         self.assertTrue(callable(check.call_args.kwargs["retry_proxy_provider"]))
