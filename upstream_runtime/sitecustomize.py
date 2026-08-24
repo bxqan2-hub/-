@@ -17,4 +17,3 @@ if os.name == "nt":
             super().__init__(*args, **kwargs)
 
     subprocess.Popen = _NoWindowPopen
-
