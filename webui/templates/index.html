@@ -2501,8 +2501,7 @@
 
         <div class="acc-v2-btn-group">
           <span class="acc-v2-selected" id="accountsSelectedHintV2">已选 0</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制为：账号----密码----MFA Secret">复制</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopyAllCredentialsV2" title="复制当前账号筛选结果中所有完整的账号----密码----MFA Secret">复制全部密码2FA</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----MFA Secret">复制所选密码2FA</button>
           <label class="acc-v2-inline" title="批量补跑 Codex、查套餐和查活使用的并发线程数">线程
             <span class="el-input-number">
               <input id="codexBulkWorkersV2" type="number" min="1" value="10" inputmode="numeric">
@@ -6836,80 +6835,6 @@ function stopAccountPagePolling() {
   ACTIVE_TOTP_CODES.clear();
 }
 
-async function fetchAllAccountIdsForCredentialCopy() {
-  const pageSize = 500;
-  const ids = [];
-  let page = 1;
-  let total = 0;
-  while (true) {
-    const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
-    const plan = ACCOUNT_PLAN_FILTER;
-    const checkoutKind = ACCOUNT_CHECKOUT_KIND_FILTER;
-    const gcash = ACCOUNT_GCASH_FILTER;
-    const atValidity = ACCOUNT_AT_VALIDITY_FILTER;
-    const q = getAccountsQuery();
-    let result;
-    if (ACCOUNT_EMAIL_FILTER.length) {
-      result = await api('/api/accounts/filter-emails', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page,page_size:pageSize,archived:'all',plan,q,checkout_kind:checkoutKind,gcash,at:atValidity}),
-      });
-    } else {
-      const params = new URLSearchParams({
-        paged:'1', page:String(page), page_size:String(pageSize), archived,
-        plan, checkout_kind:checkoutKind, gcash, at:atValidity, q,
-        group:ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID ? '' : ACTIVE_ACCOUNT_GROUP_ID,
-      });
-      result = await api(`/api/accounts?${params.toString()}`);
-    }
-    const items = Array.isArray(result.items) ? result.items : [];
-    ids.push(...items.map(item => Number(item.id)).filter(Number.isFinite));
-    total = Number(result.total || ids.length);
-    if (!items.length || ids.length >= total || page >= Math.ceil(total / pageSize)) break;
-    page += 1;
-  }
-  return [...new Set(ids)];
-}
-
-async function copyAllAccountPasswordTwoFa(event = null) {
-  const button = event?.currentTarget || $('#btnCopyAllCredentialsV2');
-  const oldText = button?.textContent || '复制全部密码2FA';
-  if (button) {
-    button.disabled = true;
-    button.setAttribute('aria-busy', 'true');
-    button.textContent = '读取全部凭据…';
-  }
-  try {
-    const ids = await fetchAllAccountIdsForCredentialCopy();
-    if (!ids.length) { showToast('当前筛选没有账号'); return; }
-    const lines = [];
-    let skipped = 0;
-    for (let offset = 0; offset < ids.length; offset += 5000) {
-      const result = await api('/api/accounts/secret-bulk', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({account_ids:ids.slice(offset, offset + 5000), field:'account_password_2fa'}),
-      });
-      lines.push(...(result.values || []).map(item => item.value).filter(Boolean));
-      skipped += (result.skipped || []).length;
-    }
-    if (!lines.length) { showToast('当前筛选没有完整的密码和 2FA 凭据'); return; }
-    await copyText(lines.join('\n'));
-    showToast(skipped
-      ? `已复制 ${lines.length} 个账号；跳过 ${skipped} 个凭据不完整账号`
-      : `已复制当前筛选的 ${lines.length} 个账号密码和 2FA`);
-  } catch(err) {
-    showToast('复制全部账号密码2FA失败: ' + err.message);
-  } finally {
-    if (button) {
-      button.removeAttribute('aria-busy');
-      button.textContent = oldText;
-      button.disabled = false;
-    }
-  }
-}
-
 async function stopSelectedCodex() {
   if (ACCOUNT_OPERATION_STOPPING) return;
   if (!confirm('确定停止账号页面的全部后台操作吗？\n\n将停止补密码/2FA、查活、查套餐、GC/GCash、Checkout、OAICS、AT、Codex，并中止页面轮询；GC/Roxy 窗口保留，不执行删除。')) return;
@@ -7099,7 +7024,6 @@ async function findSelectedAccountsInEmailPool() {
   bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnCopySelectedCredentialsV2', copySelectedAccountPasswordTwoFa);
-  bind('btnCopyAllCredentialsV2', copyAllAccountPasswordTwoFa);
   bind('btnCopySelectedAccountMailboxV2', e => copySelectionMailboxLines({account_ids:Array.from(ACCOUNT_SELECTED)}, e.currentTarget));
   bind('btnCopySelectedTokensV2', copySelectedAccountTokens);
   bind('btnDownloadSelectedTxtV2', downloadSelectedAccountTxt);
