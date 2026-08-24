@@ -845,7 +845,7 @@
       min-height: 22px; padding: 1px 8px; border: 1px solid #b3e19d;
       border-radius: 999px; background: #f0f9eb; color: #2f7d32;
       font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: .04em;
-      white-space: nowrap;
+      white-space: nowrap; cursor: pointer;
     }
     #accountsPanelV2 .account-plan-stack .mail-status-pill {
       min-height: 20px; padding: 1px 8px; font-size: 11px; line-height: 18px;
@@ -5162,7 +5162,7 @@ function _twoFaCellV2(r) {
       ${securityLabel ? `<button type="button" class="acc-v2-twofa-btn${securityFailed ? ' danger' : ''}" data-account-security-setup="${id}" ${securityRunning ? 'disabled aria-busy="true"' : ''} title="${esc(securityDetail || '在独立 Roxy 窗口自动邮箱 OTP 登录；登录成功后用页面脚本补密码并执行 MFA enroll/activate，不进入注册主流程')}">${esc(securityLabel)}</button>` : ''}
       ${mfaReady ? `<button type="button" class="acc-v2-twofa-btn acc-v2-totp-code-btn" data-account-totp-code="${id}" ${totpPending ? 'disabled aria-busy="true"' : ''} aria-pressed="${totpState ? 'true' : 'false'}" title="${totpPending ? '正在获取动态验证码' : totpState ? '停止显示动态验证码' : '按已保存 Secret 生成当前 6 位动态验证码'}">${totpPending ? '获取中…' : totpState ? '停止' : '验证码'}</button>` : ''}
     </div>
-    <div class="acc-v2-sub acc-v2-totp-code-value" data-account-totp-code-value="${id}" aria-live="polite">${totpState ? `${esc(totpState.code)}（${esc(totpState.remaining)}s）` : ''}</div>
+    <div class="acc-v2-sub acc-v2-totp-code-value" data-account-totp-code-value="${id}" data-account-totp-copy="${id}" aria-live="polite">${totpState ? `${esc(totpState.code)}（${esc(totpState.remaining)}s）` : ''}</div>
   </div>`;
 }
 function _tokenCellV2(r) {
@@ -5703,6 +5703,15 @@ async function startAccountSecuritySetup(id, button) {
 
 // 账号操作按钮（事件委托）
 async function onAccountsBodyClick(e) {
+  const totpCopyTarget = e.target.closest('[data-account-totp-copy]');
+  if (totpCopyTarget) {
+    const state = ACTIVE_TOTP_CODES.get(Number(totpCopyTarget.dataset.accountTotpCopy));
+    if (state?.code) {
+      await copyText(state.code);
+      showToast('验证码已复制');
+    }
+    return;
+  }
   const copyEmailBtn = e.target.closest('[data-plus-copy-email]');
   if (copyEmailBtn) {
     const id = Number(copyEmailBtn.dataset.plusCopyEmail);
