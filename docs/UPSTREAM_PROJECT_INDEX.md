@@ -8,6 +8,9 @@
 - 当前参考分支：`main`
 - 索引时读取的 commit：`68a1f8faede7e41f10ac5f9af267465fa61d0e3d`
 - commit 页面：<https://github.com/Torin-x/GPT-utral-platform/commit/68a1f8faede7e41f10ac5f9af267465fa61d0e3d>
+- 本地直接拉取路径：`vendor/GPT-utral-platform`（Git submodule，固定到上述 commit）。
+- 注册运行入口：`core/upstream_registration_bridge.py` 直接启动该 submodule 内的
+  `vendor/turb_gpt_free_register/bridge_runner.py`，本地不再复制其注册实现。
 - 上游定位：仓库 README 说明这是基于 `lxf746/any-auto-register` 的多平台二次开发；`vendor/turb_gpt_free_register/` 是其中保留的独立注册组件，来源和许可证以该目录说明为准。
 
 ## 与本仓库最相关的文件
@@ -44,16 +47,26 @@
 
 ## 本地实现映射与维护规则
 
-- 本仓库入口：`core/account_export.py::_setup_totp_with_driver`。
-- 当前优化：支持 `access_token` 显式透传；MFA 浏览器失败消息包含 stage、HTTP 状态和非敏感错误摘要。
-- 注册调用方：`core/roxy_registration.py` 必须从注册阶段的 `session_info` 传入 `access_token`。
+- 当前 Roxy 注册入口：`main.py` → `core/upstream_registration_bridge.py` →
+  `vendor/GPT-utral-platform/vendor/turb_gpt_free_register/bridge_runner.py` → 上游 `core/roxy_registration.py`。
+- 本地 `core/roxy_registration.py` 不再位于 Roxy 注册运行路径，仅保留给独立工具和历史回归测试。
 - 独立账号安全设置：`core/account_security_service.py` 使用同一规则传入现有 token。
-- 不把上游代码整目录覆盖到本仓库；只提取已验证的协议、调用顺序、日志字段和测试思路。
+- 上游注册核心以只读 submodule + 隔离 Bridge 方式直接运行；本站仅保留任务、数据落库和
+  Windows 无控制台窗口适配，不再把上游注册函数复制进本地执行入口。
 - 每次后续修改前：
   1. 打开本文件确认上游锁定 commit；
   2. 读取对应上游 raw 文件并比较本地差异；
   3. 在本文件追加新的 commit、差异和验证结果；
   4. 运行相关 2FA/注册测试后再提交。
+
+## Windows 注册时闪现 CMD 窗口修复（2026-08-24）
+
+- 进程与源码检查确认，注册表单阶段会多次调用 `core/sentinel_runner.py`，它通过
+  `subprocess.run()` 启动 `node.exe`，原实现没有传入 Windows `CREATE_NO_WINDOW`。
+- 本地协议路径已为 Node 子进程加上 `CREATE_NO_WINDOW`。
+- 直接上游 Bridge 进程以 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 启动；隔离 worker
+  通过 `upstream_runtime/sitecustomize.py` 给它内部产生的 Node/命令行子进程统一补上
+  `CREATE_NO_WINDOW`，上游 submodule 文件保持原始哈希不变。
 
 ## 本次 miss.uplink_0a 失败记录
 

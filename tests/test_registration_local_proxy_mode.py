@@ -6,7 +6,7 @@ import main
 
 
 class RegistrationLocalProxyModeTests(unittest.TestCase):
-    @patch("core.roxy_registration.run_roxy_registration", return_value={"success": True})
+    @patch("core.upstream_registration_bridge.run_roxy_registration", return_value={"success": True})
     def test_local_proxy_mode_skips_roxy_preflight(self, run_roxy_registration):
         with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "roxy"):
             result = main.run_registration(
@@ -23,9 +23,7 @@ class RegistrationLocalProxyModeTests(unittest.TestCase):
             name="Local User",
             birthday="1991-02-03",
             proxy="http://127.0.0.1:10808",
-            otp_code=None,
             batch_dir=None,
-            skip_proxy_preflight=True,
         )
 
     @patch("main.BrowserSession")
