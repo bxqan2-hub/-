@@ -215,13 +215,15 @@ def run_registration(
             "error": message,
         }
     if driver_mode in ("roxy", "roxybrowser", "fingerprint", "browser"):
-        from core.upstream_registration_bridge import run_roxy_registration
+        from core.roxy_registration import run_roxy_registration
         return run_roxy_registration(
             email=email,
             name=name,
             birthday=birthday or generate_random_birthday(),
             proxy=proxy,
+            otp_code=otp_code,
             batch_dir=batch_dir,
+            skip_proxy_preflight=str(proxy_mode or "").strip().lower() == "local",
         )
     if driver_mode in ("cloak", "cloakbrowser"):
         from core.cloakbrowser_registration import run_cloak_registration

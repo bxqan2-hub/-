@@ -45,13 +45,6 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-
-def _windows_creation_flags() -> int:
-    """Prevent short-lived Node workers from flashing a console window."""
-    if not sys.platform.startswith("win"):
-        return 0
-    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
-
 # 项目根目录（core 的上一级）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Node 资源放在项目根的 sentinel/ 子目录下
@@ -238,7 +231,6 @@ def generate_sentinel_token(
                 cwd=str(_PROJECT_ROOT),
                 timeout=_RUNNER_TIMEOUT,
                 env=env,
-                creationflags=_windows_creation_flags(),
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
