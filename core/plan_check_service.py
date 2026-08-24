@@ -152,11 +152,7 @@ def _run_plan_check(
             proxy=resolved_proxy,
             timezone_offset_min=resolved_timezone,
             max_attempts=0,
-            # Keep the fast accounts/check probe, then run the legacy AT
-            # subscription/usage/me fallbacks used by the standalone Plus
-            # checker.  This recovers authoritative Plus state when the
-            # accounts/check entitlement is incomplete or stale.
-            fast_mode=False,
+            fast_mode=True,
             continue_check=lambda: bool(
                 (db.get_account(account_id) or {}).get("plan_check_status") == "running"
             ) and not account_operation_control.is_cancelled(operation_generation),

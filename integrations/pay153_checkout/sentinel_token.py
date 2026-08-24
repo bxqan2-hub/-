@@ -18,7 +18,6 @@ sentinel token 结构:
 
 import json
 import base64
-import os
 import uuid
 import random
 import time
@@ -27,15 +26,6 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 from curl_cffi import requests
-
-
-def _windows_creation_flags() -> int:
-    """Keep the short-lived Node VM worker from opening a console on Windows."""
-    import subprocess
-
-    if os.name != "nt":
-        return 0
-    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
 
 
 # ============================================================
@@ -628,7 +618,6 @@ def _run_vm_bundle_via_node(chat_req: dict, xor_key: str, flow: str = "oauth_cre
             text=True,
             timeout=30,
             cwd=os.path.dirname(os.path.abspath(__file__)),
-            creationflags=_windows_creation_flags(),
         )
 
         # 从输出中提取 JSON_OUTPUT。失败时把可执行的诊断带回调用方，

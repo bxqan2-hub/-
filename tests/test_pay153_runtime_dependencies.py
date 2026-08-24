@@ -46,30 +46,6 @@ class Pay153RuntimeDependencyTests(unittest.TestCase):
 
         self.assertIn("Cannot find module 'jsdom'", result["_error"])
 
-    def test_node_helpers_request_hidden_windows_workers(self):
-        sentinel = load_sentinel_module()
-        with patch.object(sentinel.os, "name", "nt"):
-            self.assertTrue(sentinel._windows_creation_flags() & 0x08000000)
-
-        upi_spec = importlib.util.spec_from_file_location(
-            "_test_pay153_upi_runner", PAY153 / "upi_go_runner.py"
-        )
-        upi = importlib.util.module_from_spec(upi_spec)
-        assert upi_spec and upi_spec.loader
-        upi_spec.loader.exec_module(upi)
-        with patch.object(upi.os, "name", "nt"):
-            self.assertTrue(upi._windows_creation_flags() & 0x08000000)
-
-        paypal_path = PAY153 / "paypal_oaics_link_pp" / "protocol" / "sentinel.py"
-        paypal_spec = importlib.util.spec_from_file_location(
-            "_test_paypal_sentinel_runtime", paypal_path
-        )
-        paypal = importlib.util.module_from_spec(paypal_spec)
-        assert paypal_spec and paypal_spec.loader
-        paypal_spec.loader.exec_module(paypal)
-        with patch.object(paypal.os, "name", "nt"):
-            self.assertTrue(paypal._windows_creation_flags() & 0x08000000)
-
     def test_installer_does_not_exit_early_at_npm_cmd(self):
         installer = (ROOT / "install-integrations.bat").read_text(encoding="utf-8")
         one_click = (ROOT / "一键安装.bat").read_text(encoding="utf-8")

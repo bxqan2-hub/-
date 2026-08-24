@@ -13,13 +13,6 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_BINARY = ROOT / "tools" / "upi_go" / "pix_extract_slot"
 
 
-def _windows_creation_flags() -> int:
-    """Run the bundled console worker without creating a visible window."""
-    if os.name != "nt":
-        return 0
-    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
-
-
 def binary_path() -> Path:
     configured = str(os.getenv("PAY153_UPI_GO_BINARY") or "").strip()
     return Path(configured) if configured else DEFAULT_BINARY
@@ -132,7 +125,6 @@ def run_upi(
             stdout=stdout_file,
             stderr=stderr_file,
             text=True,
-            creationflags=_windows_creation_flags(),
         )
         started = time.monotonic()
         while process.poll() is None:

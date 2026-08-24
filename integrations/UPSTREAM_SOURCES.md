@@ -58,15 +58,6 @@ PayPal OAICS extraction core:
 
 ## Local runtime completion
 
-### Windows worker window policy (2026-08-24)
-
-The locked upstream PAY.153 files invoke the Node Sentinel VM and the UPI Go
-worker with ordinary `subprocess.run`/`Popen` calls, which creates a visible
-`node.exe` console on Windows. The vendored runtime keeps the upstream protocol
-and flow unchanged; the local adapter adds `CREATE_NO_WINDOW` at these process
-boundaries in `sentinel_token.py`, `paypal_oaics_link_pp/protocol/sentinel.py`,
-and `upi_go_runner.py`.
-
 The locked PAY.153 revision imports `jsdom` from `gen_token_jsdom.js`, but its
 upstream repository does not currently include a `package.json` or document the
 Node dependency in its installation steps. This site therefore carries a local
