@@ -86,3 +86,14 @@
 - 本地提交 `22dbd68d11db5f8aefd4bed367dcb2dba8b9956e`，修改字段：`core/roxy_registration.py::_submit_signup_password_direct`、`_fill_password_page_if_present`；回归测试新增十路并发密码页回放，覆盖 9 个首轮 click 成功和 1 个第二策略恢复。
 - 本地十路并发回放结果：10/10 返回确认密码，提交策略调用总数 11（第 10 路使用 `click_async → request_submit_async`），未出现“仍停留在密码页”。
 - 验证：注册/密码/2FA/停止相关测试合计 `110 passed`。
+
+## 本次纯协议注册替换（2026-08-25）
+
+- 新协议来源：[`asz798838958/aBaiFreeGPT`](https://github.com/asz798838958/aBaiFreeGPT)。
+- 锁定 commit：`98e0ad6717566dcaec2a2d7feb7b3bea2458de1`（2026-08-25）。
+- 本地复制目录：`core/abais_protocol/`；入口适配：`core/abai_protocol_registration.py`。
+- `main.py` 的 `protocol` / `api` / `http` 分支已直接调用该复制实现；Roxy、CloakBrowser、Browser Use、Skyvern 分支保持原调用。
+- 复制的协议实现包含 `protocol_register.py`、`oauth.py`、`credential_checks.py`、`mfa.py`、`environment_profile.py`、`sentinel_vm.py`、Sentinel SDK/Node 运行时和常量；仅把上游包名改为本地 `core.abais_protocol` 命名空间。
+- 上游流程特征：邮箱 OTP 状态机、注册密码提交、同一注册会话内 TOTP enroll/activate、持久 Sentinel VM、统一环境画像和 Cloudflare 后代理轮换。
+- 本地适配只负责已有账号存储/邮箱回收/Flow 触发及结果字段映射；不再调用旧 `core.chatgpt_auth` / `core.openai_auth` 注册链路。
+- 验证：`.\\venv\\Scripts\\python.exe -m pytest -q tests/test_protocol_strict_alignment.py tests/test_twofa_registration.py tests/test_registration_local_proxy_mode.py`，`65 passed`。

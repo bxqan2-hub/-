@@ -1,0 +1,4 @@
+Source: https://github.com/asz798838958/aBaiFreeGPT
+Commit: 98e0ad6717566dcaec2a2d7feb7b3bea2458de1
+Copied protocol files and Sentinel runtime: 2026-08-25.
+The copied files retain the upstream AGPL-3.0 license; see UPSTREAM_LICENSE.txt.

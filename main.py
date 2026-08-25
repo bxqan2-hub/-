@@ -7,7 +7,6 @@ import sys
 import argparse
 import logging
 import time
-import traceback
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from config import REGISTER_EMAIL, REGISTER_NAME  # 这两个一般不在 WebUI 改
@@ -15,30 +14,8 @@ from config import REGISTER_EMAIL, REGISTER_NAME  # 这两个一般不在 WebUI 
 from config import twofa as _twofa_cfg
 from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
-from config import openai_protocol as _protocol_cfg
-from core.session import BrowserSession
-from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
-from core.openai_auth import (
-    follow_authorize,
-    request_sentinel_token,
-    build_sentinel_header,
-    validate_email_otp,
-    send_email_otp,
-    network_preflight,
-    navigate_about_you,
-    EmailOtpInvalidError,
-    CloudflareChallengeError,
-    create_account,
-)
-from core.account_export import (
-    follow_oauth_callback,
-    fetch_session,
-    save_account_data,
-    create_batch_archive_dir,
-)
-from core.email_provider import acquire_email, wait_for_otp
-from core.humanize import delay as human_delay
-from core.otp_utils import mask_otp, redact_otp_text
+from core.account_export import create_batch_archive_dir
+from core.email_provider import acquire_email
 from core.name_samples import random_display_name
 from core.profile_utils import generate_random_birthday
 
@@ -49,10 +26,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-_FINALIZE_SESSION_MAX_ATTEMPTS = 5
-_FINALIZE_SESSION_BACKOFF_BASE = 2.0
-
 
 def configure_logging(verbose: bool = False) -> None:
     """配置 CLI 日志：默认简洁，--verbose 时显示完整步骤细节。"""
@@ -73,53 +46,6 @@ def configure_logging(verbose: bool = False) -> None:
 def _is_success(result: dict) -> bool:
     """判断单次注册结果是否成功，集中收敛批量统计规则。"""
     return isinstance(result, dict) and bool(result.get("success"))
-
-
-def _finalize_registration_session(
-    session: BrowserSession,
-    continue_url: str,
-    email: str,
-    callback_referer: str = "https://auth.openai.com/about-you",
-) -> tuple[dict, str]:
-    """
-    完成 OAuth 回调并拉取 accessToken。
-
-    create_account 返回只代表创建接口通过，真正可用必须等 chatgpt.com
-    写入登录态 cookie 且 /api/auth/session 返回 accessToken。
-    """
-    if not continue_url:
-        raise RuntimeError("create_account 响应缺少 continue_url，无法完成 OAuth 回调")
-
-    last_exc: Exception | None = None
-    for attempt in range(1, _FINALIZE_SESSION_MAX_ATTEMPTS + 1):
-        try:
-            logger.info(
-                f"[登录态] 完成 OAuth 回调并拉取 Token：{email} "
-                f"(尝试 {attempt}/{_FINALIZE_SESSION_MAX_ATTEMPTS})"
-            )
-            follow_oauth_callback(session, continue_url, referer=callback_referer)
-            human_delay("post_auth")
-            session_info = fetch_session(session)
-            access_token = session_info.get("accessToken")
-            if not access_token:
-                raise RuntimeError("session 响应缺少 accessToken")
-            logger.info(f"[登录态] 已拿到 accessToken：{email}")
-            return session_info, access_token
-        except Exception as exc:
-            last_exc = exc
-            if attempt >= _FINALIZE_SESSION_MAX_ATTEMPTS:
-                break
-            backoff = _FINALIZE_SESSION_BACKOFF_BASE ** (attempt - 1)
-            logger.warning(
-                f"[登录态] 回调或拉取 Token 失败：{email}，"
-                f"{type(exc).__name__}: {str(exc)[:180]}，{backoff:.1f}s 后重试"
-            )
-            time.sleep(backoff)
-
-    raise RuntimeError(
-        f"OAuth 回调/拉取 Token 重试耗尽：{email}，"
-        f"最后错误：{type(last_exc).__name__ if last_exc else 'Unknown'}: {last_exc}"
-    ) from last_exc
 
 
 def generate_display_name() -> str:
@@ -186,24 +112,12 @@ def run_registration(
     #   browser_use  = Browser Use Cloud stealth Chromium + Playwright
     #   skyvern      = Skyvern Browser Sessions + Playwright
     driver_mode = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
-    if bool(getattr(_twofa_cfg, "ENABLE_2FA", False)) and not bool(
-        getattr(_email_cfg, "USE_EMAIL_SERVICE", False)
+    if (
+        driver_mode not in ("protocol", "api", "http")
+        and bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
+        and not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False))
     ):
         message = "密码 + 2FA 已开启，但手动邮箱模式无法自动收取第二次重认证验证码"
-        logger.error("[注册] %s", message)
-        return {
-            "success": False,
-            "email": email,
-            "account_id": None,
-            "access_token": None,
-            "totp_secret": None,
-            "security_ok": False,
-            "error": message,
-        }
-    if bool(getattr(_twofa_cfg, "ENABLE_2FA", False)) and driver_mode in (
-        "protocol", "api", "http"
-    ):
-        message = "密码 + 2FA 需要浏览器注册驱动；protocol 不会先激活 MFA 再留下无密码账号"
         logger.error("[注册] %s", message)
         return {
             "success": False,
@@ -260,440 +174,25 @@ def run_registration(
             f"不支持的 REGISTRATION_DRIVER={driver_mode!r}，可选 protocol / roxy / cloak / browser_use / skyvern"
         )
 
-    # 纯协议注册强制 fail-closed：必须解析到显式代理，并把 TLS impersonate、
-    # User-Agent/Client Hints 与 JS OS 画像绑定为同一份会话配置。
-    session = BrowserSession(
-        proxy=proxy,
-        require_proxy=True,
-        strict_fingerprint=True,
-    )
-
-    # 从代理 URL 中抽取 sid 段做日志，避免把账号密码完整打印
-    proxy_label = "无"
-    if session.proxy:
-        # 形如 socks5h://user-region-JP-sid-XXXX-t-5:pass@host:port
+    if driver_mode in ("protocol", "api", "http"):
+        from core.abai_protocol_registration import run_abai_protocol_registration
         try:
-            sid_part = next(
-                (seg for seg in session.proxy.split("@")[0].split("-") if len(seg) == 8),
-                "***",
+            return run_abai_protocol_registration(
+                email=email,
+                name=name,
+                birthday=birthday or generate_random_birthday(),
+                proxy=proxy,
+                otp_code=otp_code,
+                batch_dir=batch_dir,
             )
-            proxy_label = f"{session.proxy.split('://')[0]}://...sid-{sid_part}...@{session.proxy.split('@')[-1]}"
-        except Exception:
-            proxy_label = "已配置"
-
-    if not birthday:
-        birthday = generate_random_birthday()
-
-    logger.info(f"[注册] 开始：{email}，代理={proxy_label}")
-    logger.info(f"[注册] 本次随机生日: {birthday}")
-    alignment = session.fingerprint_alignment()
-    logger.info(
-        "[注册] 严格三层对齐：TLS=%s UA=Chrome/%s OS=%s "
-        "sec-ch-platform=%s navigator.platform=%s 出口IP=%s",
-        alignment["tls"], alignment["ua_major"], alignment["os"],
-        alignment["sec_ch_ua_platform"], alignment["navigator_platform"],
-        alignment["exit_ip"],
-    )
-    logger.debug(f"[注册] 设备ID={session.device_id}，会话日志ID={session.auth_session_logging_id}")
-
-    create_acknowledged = False
-    try:
-        # 网络预检必须在 signin/follow_authorize 之前完成；预检不带邮箱，不会触发 OTP。
-        network_preflight(session)
-        human_delay("navigate")
-
-        # 根据 2026-07-19 HAR 补齐匿名态 ChatGPT 首屏/模型预热链路。
-        if getattr(_protocol_cfg, "CHATGPT_ANON_BOOTSTRAP_ENABLED", True):
-            from core.chatgpt_bootstrap import anonymous_bootstrap
-            anonymous_bootstrap(
-                session,
-                strict=bool(getattr(_protocol_cfg, "CHATGPT_BOOTSTRAP_STRICT", False)),
-            )
-            human_delay("navigate")
-
-        # ==================== 阶段1: ChatGPT 认证 ====================
-        # 步骤1: 获取 providers
-        providers = get_providers(session)
-        human_delay("api")
-
-        # 步骤2: 获取 CSRF token
-        csrf_token = get_csrf_token(session)
-        human_delay("api")
-
-        # 步骤3: 发起 OAuth signin
-        authorize_url = signin_openai(session, csrf_token, email)
-        human_delay("api")
-
-        # 记录"OTP 触发"前的时间戳，自动取信箱时只看此后的邮件，
-        # 避免取到上次注册留下的旧 OTP。
-        otp_after_ts = time.time()
-
-        # ==================== 阶段2: OpenAI Auth ====================
-        # 步骤4: 跟随 authorize URL（建立 auth.openai.com 的 cookies）
-        # 由于步骤3已携带 login_hint + screen_hint=login_or_signup，
-        # 重定向链会直接走到 /email-verification 并自动触发 OTP 发送，
-        # 不需要 /create-account/password、register_user、单独 send_email_otp 调用。
-        follow_authorize(session, authorize_url)
-        human_delay("navigate")
-
-        # ==================== 阶段3: 验证码验证 ====================
-        # Sentinel Token 不提前生成；等 OTP 到手后紧贴 validate 请求生成，
-        # 避免等待邮箱期间 challenge 过期或与重新发送后的状态不一致。
-
-        # 等待验证码：USE_EMAIL_SERVICE=True 时自动从 Outlook 取件，否则人工输入。
-        # 如果验证码错误/过期，自动重新发送并重新取最新验证码。
-        validate_result = None
-        max_otp_attempts = 3
-        current_otp = otp_code
-        for otp_attempt in range(1, max_otp_attempts + 1):
-            if current_otp is None:
-                if _email_cfg.USE_EMAIL_SERVICE:
-                    logger.info(f"[OTP] 等待验证码：{email}（第 {otp_attempt}/{max_otp_attempts} 次）")
-                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
-                else:
-                    logger.info("")
-                    logger.info(f"[OTP] 请检查邮箱，输入收到的 6 位验证码（第 {otp_attempt}/{max_otp_attempts} 次）:")
-                    current_otp = input(">>> 验证码: ").strip()
-
-            human_delay("otp_input")
-            try:
-                # HAR 对齐：2026-07-19 抓包中的 email-otp/validate 未携带 Sentinel。
-                # 保留开关，必要时可切回旧逻辑。
-                sentinel_header_9 = None
-                so_header_9 = None
-                if getattr(_protocol_cfg, "SEND_SENTINEL_ON_EMAIL_OTP_VALIDATE", False):
-                    sentinel_resp_9 = request_sentinel_token(session, "authorize_continue")
-                    sentinel_header_9, so_header_9 = build_sentinel_header(session, sentinel_resp_9, "authorize_continue")
-                    human_delay("challenge")
-
-                # 步骤10: 提交验证码
-                validate_result = validate_email_otp(session, current_otp, sentinel_header_9, so_header_9)
-                break
-            except EmailOtpInvalidError as exc:
-                if otp_attempt >= max_otp_attempts:
-                    raise
-                logger.warning(
-                    "[OTP] 验证码错误/过期：%s，准备重新发送并重新获取验证码",
-                    redact_otp_text(str(exc)[:180]),
-                )
-                otp_after_ts = time.time()
-                send_email_otp(session)
-                human_delay("api")
-                current_otp = None
-
-        if validate_result is None:
-            raise RuntimeError("OTP 验证未完成")
-        human_delay("api")
-
-        # OTP 校验后的下一步由服务端 auth session 决定：
-        #   - about_you：新账号，需要继续提交姓名/生日 create_account。
-        #   - external_url：通常说明服务端已可直接 OAuth 回调（常见于已有账号/无需资料页），
-        #                   此时再强行调用 create_account 会触发 invalid_auth_step。
-        page = validate_result.get("page") if isinstance(validate_result, dict) else {}
-        page = page if isinstance(page, dict) else {}
-        page_type = str(page.get("type") or "")
-        otp_continue_url = (
-            validate_result.get("continue_url")
-            or validate_result.get("external_url")
-            or validate_result.get("url")
-            or page.get("continue_url")
-            or page.get("external_url")
-            or page.get("url")
-        )
-        logger.info(
-            f"[步骤10] 后续分支判断: page_type={page_type or '空'}, "
-            f"has_continue_url={bool(otp_continue_url)}"
-        )
-
-        # ==================== 阶段5/6: 完成注册或直接 OAuth 回调 ====================
-        otp_continue_text = str(otp_continue_url or "")
-        direct_oauth_after_otp = bool(
-            otp_continue_text
-            and "about-you" not in otp_continue_text
-            and (
-                "chatgpt.com/api/auth/callback" in otp_continue_text
-                or "auth.openai.com/authorize/continue" in otp_continue_text
-                or page_type == "external_url"
-            )
-        )
-        if page_type == "external_url" or direct_oauth_after_otp:
-            if not otp_continue_url:
-                raise RuntimeError(f"OTP external_url 响应缺少可跟随 URL，无法继续: {validate_result}")
-            logger.info(f"[注册] OTP 后进入 OAuth 回调分支，跳过 create_account：{email}")
-            create_acknowledged = True
-            session_info, access_token = _finalize_registration_session(
-                session,
-                otp_continue_url,
-                email,
-                callback_referer="https://auth.openai.com/email-verification",
-            )
-            if getattr(_protocol_cfg, "CHATGPT_AUTH_BOOTSTRAP_ENABLED", True):
-                from core.chatgpt_bootstrap import authenticated_bootstrap
-                authenticated_bootstrap(
-                    session,
-                    access_token,
-                    strict=bool(getattr(_protocol_cfg, "CHATGPT_BOOTSTRAP_STRICT", False)),
-                )
-            human_delay("post_auth")
-        else:
-            # 兼容服务端只返回 continue_url=/about-you 但 page.type 为空/变化的情况。
-            if page_type and page_type not in ("about_you", "about-you"):
-                if otp_continue_url and "about-you" not in str(otp_continue_url):
-                    raise RuntimeError(
-                        f"OTP 后续页面类型未知，不应盲目 create_account: "
-                        f"page_type={page_type}, resp={validate_result}"
-                    )
-                logger.warning(
-                    f"[步骤10] 未知 page_type={page_type}，但 continue_url 指向 about-you，继续 create_account"
-                )
-
-            # 先真实导航到 about-you，让 auth session/page state 与 create_account 一致。
-            about_url = str(otp_continue_url) if otp_continue_url and "about-you" in str(otp_continue_url) else None
-            navigate_about_you(session, about_url)
-            human_delay("navigate")
-
-            # 步骤11: 获取 Sentinel Token（oauth_create_account）
-            sentinel_resp_11 = request_sentinel_token(session, "oauth_create_account")
-            sentinel_header_11, so_header_11 = build_sentinel_header(session, sentinel_resp_11, "oauth_create_account")
-            human_delay("challenge")
-
-            human_delay("form")
-
-            # 步骤12: 提交用户信息，完成注册
-            create_result = create_account(session, name, birthday, sentinel_header_11, so_header_11)
-            create_acknowledged = True
-
-            logger.info(f"[注册] 创建接口已通过：{email}，继续完成 OAuth 回调")
-            human_delay("post_auth")
-
-            # 步骤12.5: 跟随 create_account 返回的 continue_url 完成 OAuth 回调
-            continue_url = create_result.get("continue_url")
-            if not continue_url:
-                raise RuntimeError(
-                    f"create_account 响应缺少 continue_url，无法继续: {create_result}"
-                )
-
-            # 步骤13: 拉 /api/auth/session 提取 accessToken
-            session_info, access_token = _finalize_registration_session(session, continue_url, email)
-            if getattr(_protocol_cfg, "CHATGPT_AUTH_BOOTSTRAP_ENABLED", True):
-                from core.chatgpt_bootstrap import authenticated_bootstrap
-                authenticated_bootstrap(
-                    session,
-                    access_token,
-                    strict=bool(getattr(_protocol_cfg, "CHATGPT_BOOTSTRAP_STRICT", False)),
-                )
-            human_delay("post_auth")
-
-        # ==================== 阶段7: 设置 2FA（受 config.ENABLE_2FA 控制）====================
-        totp_secret = None
-        twofa_result = None
-        twofa_error = None
-        password_setup = None
-        if _twofa_cfg.ENABLE_2FA:
-            # 步骤14-20: 重认证（要再收一次邮箱 OTP）→ enroll TOTP → activate
-            try:
-                from core.account_export import setup_2fa_result
-                twofa_result = setup_2fa_result(session, email)
-                totp_secret = twofa_result.secret
-                password_setup = getattr(twofa_result, "password_setup", None)
-                # 重认证会产生带新鲜 pwd_auth_time 的 Token；优先保存它。
-                access_token = twofa_result.access_token
-                logger.info(
-                    "[2FA] 已完成，Token 校验=%s",
-                    bool(getattr(twofa_result, "validation_ok", True)),
-                )
-                if not bool(getattr(twofa_result, "validation_ok", True)):
-                    twofa_error = {
-                        "stage": "totp_validate",
-                        "code": getattr(twofa_result, "validation_code", "totp_token_validation_failed"),
-                        "http_status": getattr(twofa_result, "validation_status", None),
-                        "message": redact_otp_text(getattr(twofa_result, "validation_message", "") or ""),
-                    }
-            except Exception as exc:
-                logger.error("2FA 设置失败: %s", redact_otp_text(exc))
-                logger.debug("2FA 错误详情:\n%s", redact_otp_text(traceback.format_exc()))
-                twofa_error = {
-                    "stage": getattr(exc, "stage", "totp_setup"),
-                    "code": getattr(exc, "code", "totp_setup_failed"),
-                    "http_status": getattr(exc, "http_status", None),
-                    "message": redact_otp_text(str(exc)[:240]),
-                }
-                if _twofa_cfg.ENABLE_2FA:
-                    password_setup = {
-                        "ok": False,
-                        "status": "failed",
-                        "stage": "totp_setup",
-                        "code": twofa_error["code"],
-                        "http_status": twofa_error["http_status"],
-                        "message": twofa_error["message"],
-                    }
-                logger.warning("将继续保存账号信息（不含 TOTP secret），可后续手动设置")
-        else:
-            logger.debug("已跳过 2FA 设置 (config.ENABLE_2FA=False)")
-
-        # ==================== 阶段 7.5: Codex OAuth（注册成功→拿回调/CPA凭证）====================
-        # 用全新干净 session 从头登录该邮箱，走 邮箱OTP→手机短信验证(接码)→选workspace
-        # →拿 code 的标准路径（不复用注册 session，避免撞 choose-an-account）。
-        # 产出：
-        #   1) codex_result["callback_url"]  命中 redirect_uri 的整条 Location（携带 code/state）
-        #   2) codex_result["file_path"]     CPA 可直接导入的 codex-{email}.json
-        codex_result = {"status": "skipped", "ok": False, "message": "未触发"}
-        try:
-            from core.codex_oauth import run_codex_oauth
-            codex_result = run_codex_oauth(email)
         except Exception as exc:
-            codex_result = {
-                "status": "failed",
-                "ok": False,
-                "message": f"{type(exc).__name__}: {str(exc)[:180]}",
-            }
-
-        if codex_result.get("ok"):
-            logger.info(
-                f"[Codex] 成功：{email}，file={codex_result.get('file_path')}，"
-                f"callback={codex_result.get('callback_url')}"
-            )
-        elif codex_result.get("status") == "skipped":
-            logger.info(f"[Codex] 跳过：{email}，原因={codex_result.get('message')}")
-        else:
-            logger.warning(
-                f"[Codex] 失败：{email}，原因={codex_result.get('message')}"
-            )
-
-        # ==================== 阶段8: 持久化账号 ====================
-        from core.email_provider import resolve_email_source
-        exit_geo = getattr(session, "exit_geo", {}) or {}
-        account_id = save_account_data(
-            email=email,
-            access_token=access_token,
-            totp_secret=totp_secret,
-            email_source=resolve_email_source(email),
-            proxy_used=session.proxy or None,
-            batch_dir=batch_dir,
-            registration_name=name,
-            birth_date=birthday,
-            registration_exit_ip=exit_geo.get("ip"),
-            registration_exit_country=exit_geo.get("country"),
-            extra={
-                "user": session_info.get("user"),
-                "account": session_info.get("account"),
-                "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
-                "device_id": session.device_id,
-                "sentinel_sid": getattr(session, "sentinel_sid", None),
-                "browser_profile": getattr(session, "browser_profile", None),
-                "twofa": {
-                    "status": (
-                        "success" if twofa_result and getattr(twofa_result, "validation_ok", True)
-                        and not (password_setup and not password_setup.get("ok"))
-                        else "partial_success" if twofa_result
-                        else "failed" if (_twofa_cfg.ENABLE_2FA or password_setup) else "skipped"
-                    ),
-                    "activated": bool(twofa_result),
-                    "validated": bool(twofa_result and getattr(twofa_result, "validation_ok", True)),
-                    "validation_status": getattr(twofa_result, "validation_status", None) if twofa_result else None,
-                    "activated_at": twofa_result.activated_at if twofa_result else None,
-                    "validation": twofa_result.validation if twofa_result else None,
-                    "error": twofa_error,
-                    "password_setup": password_setup,
-                    "checkpoint": (getattr(twofa_result, "checkpoint", None) if twofa_result else None),
-                },
-                "registration_password": (twofa_result.password if twofa_result else None),
-                "codex": codex_result,
-            },
-        )
-
-        logger.info(f"[完成] {email}，账号ID={account_id}，Token={access_token[:16]}...")
-
-        # ==================== 阶段9: 后置自动触发 flow ====================
-        # 只有走完回调、拿到 token 并保存成功的账号，才会触发 flow。
-        # flow 请求不影响账号保存状态，但会记录结果并参与批量统计。
-        flow_result = {"status": "skipped", "ok": False, "message": "未触发"}
-        try:
-            from core.flow_trigger import trigger_flow
-            flow_result = trigger_flow(access_token)
-        except Exception as exc:
-            flow_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {exc}"}
-
-        if flow_result.get("ok"):
-            logger.info(
-                f"[Flow] 成功：{email}，HTTP={flow_result.get('http_status')}, "
-                f"flow_id={flow_result.get('flow_id') or '未解析'}"
-            )
-        elif flow_result.get("status") == "skipped":
-            logger.info(f"[Flow] 跳过：{email}，原因={flow_result.get('message')}")
-        else:
-            logger.warning(
-                f"[Flow] 失败：{email}，HTTP={flow_result.get('http_status') or '无'}, "
-                f"原因={flow_result.get('message')}"
-            )
-
-        logger.debug(
-            "[完成] TOTP Secret: %s",
-            mask_otp(totp_secret) if totp_secret else "(未设置)",
-        )
-
-        # 注册任务的成功判定：账号本身(注册+token)+Codex 授权都成功才算 success。
-        # Codex 失败时账号仍保存（token 拿到了、有补跑机会），但任务状态标失败，
-        # 让 WebUI 任务表能清楚区分"完整成功"和"差 Codex"两种结果。
-        codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
-        security_ok = (
-            not bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
-            or bool(twofa_result and getattr(twofa_result, "security_ok", False))
-        )
-        task_success = codex_ok and security_ok
-        task_error = None
-        if not task_success:
-            if not security_ok:
-                detail = (
-                    (twofa_error or {}).get("message")
-                    if isinstance(twofa_error, dict)
-                    else None
-                ) or (password_setup or {}).get("message") or "密码或 MFA 未完成"
-                task_error = f"账号安全设置未完成: {detail}"
-            else:
-                task_error = f"Codex 未完成: {codex_result.get('message', '未知')}"
-            logger.warning(f"[任务结果] {email} 账号已保存但任务标失败，原因: {task_error}")
-
-        return {"success": task_success, "email": email, "account_id": account_id,
-                "access_token": access_token, "totp_secret": totp_secret,
-                "flow": flow_result, "codex": codex_result,
-                "error": task_error}
-
-    except Exception as e:
-        logger.error(f"[失败] {email}: {type(e).__name__}: {e}")
-        logger.debug("详细错误信息:", exc_info=True)
-        # 邮箱状态回收策略，三种情况：
-        #   1. 账号已废（account_deactivated 等）：邮箱素材本身不可用，标 failed 直接剔除。
-        #   2. 创建接口通过后失败：远端已消耗这个邮箱，直接废弃，避免重复注册。
-        #   3. 创建接口通过前的普通失败：邮箱还可以下次继续尝试，放回 available。
-        from core.openai_auth import AccountUnusableError
-        account_dead = isinstance(e, AccountUnusableError)
-        try:
-            if email:
+            logger.error("[aBaiFreeGPT协议] %s 注册失败: %s", email, exc)
+            try:
                 from core.email_provider import release_email
-                if account_dead:
-                    src = release_email(
-                        email, status="failed",
-                        note=f"账号已废弃，邮箱不可用: {str(e)[:180]}",
-                    )
-                    logger.warning(f"[邮箱:{src}] {email} 账号已废弃，标记为 failed，不再重新注册")
-                elif create_acknowledged:
-                    src = release_email(
-                        email, status="failed",
-                        note=f"创建接口已通过但后续失败，已废弃: {str(e)[:180]}",
-                    )
-                    logger.warning(f"[邮箱:{src}] {email} 已创建但后续失败，标记为 failed，不再重新注册")
-                else:
-                    src = release_email(email, status="available", note=f"上次失败: {str(e)[:180]}")
-                    logger.info(f"[邮箱:{src}] {email} 已恢复 available")
-        except Exception:
-            pass
-        result = {"success": False, "email": email, "error": str(e)}
-        if isinstance(e, CloudflareChallengeError):
-            result["error_code"] = e.error_code
-            result["retryable"] = False
-        return result
-
+                release_email(email, status="available", note=f"协议注册失败: {str(exc)[:180]}")
+            except Exception:
+                pass
+            return {"success": False, "email": email, "account_id": None, "access_token": None, "totp_secret": None, "security_ok": False, "error": str(exc)}
 
 def main():
     """主函数"""
@@ -789,7 +288,7 @@ def run_one_batch_item(index: int, total: int, batch_dir=None) -> dict:
             name=name,
             birthday=birthday,
             batch_dir=batch_dir,
-            # proxy 不传 → BrowserSession 会从 PROXY_POOL 随机抽
+            # proxy 不传 → 协议适配器从 PROXY_POOL 严格抽取
         )
     except Exception as exc:
         logger.error(f"[批量] 第 {index + 1} 个注册准备阶段失败: {type(exc).__name__}: {exc}")

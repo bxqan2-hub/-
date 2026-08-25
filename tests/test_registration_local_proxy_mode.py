@@ -28,8 +28,8 @@ class RegistrationLocalProxyModeTests(unittest.TestCase):
             skip_proxy_preflight=True,
         )
 
-    @patch("main.BrowserSession")
-    def test_password_mfa_blocks_protocol_before_remote_registration(self, session_cls):
+    @patch("core.abai_protocol_registration.run_abai_protocol_registration", return_value={"success": True})
+    def test_password_mfa_uses_vendored_protocol_flow(self, run_abai):
         with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "protocol"), \
              patch.object(main._twofa_cfg, "ENABLE_2FA", True), \
              patch.object(main._email_cfg, "USE_EMAIL_SERVICE", True):
@@ -39,10 +39,8 @@ class RegistrationLocalProxyModeTests(unittest.TestCase):
                 birthday="1991-02-03",
             )
 
-        self.assertFalse(result["success"])
-        self.assertFalse(result["security_ok"])
-        self.assertIn("protocol", result["error"])
-        session_cls.assert_not_called()
+        self.assertTrue(result["success"])
+        run_abai.assert_called_once()
 
     @patch("core.roxy_registration.run_roxy_registration")
     def test_password_mfa_blocks_manual_email_before_browser_registration(self, run_roxy_registration):

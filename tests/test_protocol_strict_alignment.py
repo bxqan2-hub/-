@@ -264,23 +264,8 @@ class ProtocolFingerprintAlignmentTests(TestCase):
         with self.assertRaisesRegex(RuntimeError, "会话代理被修改"):
             session.get("https://example.invalid/")
 
-    @patch("main.network_preflight", side_effect=RuntimeError("stop-after-construction"))
-    @patch("main.BrowserSession")
-    def test_protocol_driver_enables_both_strict_guards(self, session_cls, _network_preflight):
-        fake = MagicMock()
-        fake.proxy = "http://127.0.0.1:65535"
-        fake.device_id = "device-id"
-        fake.auth_session_logging_id = "logging-id"
-        fake.fingerprint_alignment.return_value = {
-            "tls": "chrome146",
-            "ua_major": "146",
-            "os": "macOS",
-            "sec_ch_ua_platform": '"macOS"',
-            "navigator_platform": "MacIntel",
-            "exit_ip": "203.0.113.7",
-        }
-        session_cls.return_value = fake
-
+    @patch("core.abai_protocol_registration.run_abai_protocol_registration", return_value={"success": True})
+    def test_protocol_driver_calls_vendored_abai_flow(self, run_abai):
         with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "protocol"), \
              patch.object(main._twofa_cfg, "ENABLE_2FA", False):
             result = main.run_registration(
@@ -290,10 +275,12 @@ class ProtocolFingerprintAlignmentTests(TestCase):
                 proxy="http://127.0.0.1:65535",
             )
 
-        self.assertFalse(result["success"])
-        self.assertIn("stop-after-construction", result["error"])
-        session_cls.assert_called_once_with(
+        self.assertTrue(result["success"])
+        run_abai.assert_called_once_with(
+            email="strict@example.com",
+            name="Strict Example",
+            birthday="1990-01-01",
             proxy="http://127.0.0.1:65535",
-            require_proxy=True,
-            strict_fingerprint=True,
+            otp_code=None,
+            batch_dir=None,
         )
