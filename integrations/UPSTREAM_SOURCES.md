@@ -43,10 +43,11 @@ GoPay qualification reference:
   - Audited reference commit: `3d2af69d848e6f292ef5abcb763c89dac3fbbea5`
   - Reference only; its standalone Flask workbench, batch scheduler, payment
     confirmation, approval, polling, and redirect extraction are not deployed.
-  - The account-page detector reuses the source eligibility boundary: create
-    one promoted ID/IDR custom Plus Checkout, require a Stripe `cs_*` session,
-    initialize Stripe once, and report eligible only when amount is zero,
-    currency is IDR, and `gopay` is published. It stops before Elements,
+  - The account-page detector reuses the source Checkout/Stripe boundary:
+    create one promoted ID/IDR custom Plus Checkout, require a Stripe `cs_*`
+    session, initialize Stripe once, and report eligible when currency is IDR
+    and `gopay` is published. Per the local qualification requirement, the
+    Checkout amount is diagnostic only and does not affect eligibility. It stops before Elements,
     taxes, PaymentMethod, confirm, approval, polling, or redirect extraction.
   - GoPay requires an Indonesia (`ID`) exit. Settings therefore keep one
     qualification card with separate per-qualification pools: GCash uses

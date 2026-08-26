@@ -3455,9 +3455,10 @@ def _gopay_payment_method_available(methods: Any) -> bool:
 def detect_gopay(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
     """Create one zero-due ID/IDR Checkout and read GoPay eligibility only.
 
-    This follows the public link-gp qualification boundary: create the
+    This follows the public link-gp Checkout/Stripe boundary: create the
     Indonesia Checkout with the Plus promotion, initialize Stripe once, then
-    stop after checking amount/currency/payment methods.  It deliberately does
+    stop after checking currency/payment methods.  The account qualification
+    decision intentionally ignores the Checkout amount.  It deliberately does
     not create an Elements session, update taxes, attach a PaymentMethod,
     confirm, approve, or poll the Checkout.
     """
@@ -3534,7 +3535,7 @@ def detect_gopay(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         amount = ctx.get("checkout_amount")
         currency = str(ctx.get("currency") or init_data.get("currency") or "").lower()
         methods = list(ctx.get("payment_method_types") or sc._extract_payment_method_types(init_data))
-        gopay = amount in (0, "0", "0.0", "0.00") and currency == "idr" and _gopay_payment_method_available(methods)
+        gopay = currency == "idr" and _gopay_payment_method_available(methods)
         return {
             "ok": True,
             "gopay": gopay,
@@ -3547,7 +3548,7 @@ def detect_gopay(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
             "checkout_currency": currency.upper() or "IDR",
             "checkout_amount": amount,
             "checked_at": int(time.time()),
-            "error": None if gopay else f"ID/IDR Stripe Checkout 未发布 GoPay（amount={amount}, currency={currency or 'missing'}）",
+            "error": None if gopay else f"ID/IDR Stripe Checkout 未发布 GoPay（currency={currency or 'missing'}）",
         }, 200
     except Exception as exc:
         error_text = f"{type(exc).__name__}: {str(exc)[:500]}"

@@ -60,6 +60,25 @@ class GoPayProtocolBoundaryTests(unittest.TestCase):
         self.assertEqual(result["detection_outcome"], "unsupported_custom_checkout")
         init_checkout.assert_not_called()
 
+    @patch.object(pay153_app.sc, "init_checkout")
+    @patch.object(pay153_app, "create_checkout")
+    def test_nonzero_idr_checkout_is_eligible_when_gopay_is_published(self, create_checkout, init_checkout):
+        create_checkout.return_value = {
+            "data": {"checkout_session_id": "cs_live_paid", "publishable_key": "pk_live_example"},
+            "http": Mock(),
+        }
+        init_checkout.return_value = (
+            {"currency": "idr", "payment_method_types": ["card", "gopay"]},
+            "version",
+            {"checkout_amount": 34900000, "currency": "idr", "payment_method_types": ["card", "gopay"]},
+        )
+
+        result, status = pay153_app.detect_gopay({"token": "aaa.bbb.ccc"})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(result["gopay"])
+        self.assertEqual(result["checkout_amount"], 34900000)
+
 
 class GoPayServiceTests(unittest.TestCase):
     def test_http_proxy_transport_falls_back_to_https(self):
