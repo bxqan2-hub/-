@@ -4969,9 +4969,11 @@ function _qualificationBadges(r) {
   const gopayTitle = r.gopay_eligible === true
     ? [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；')
     : gopayChecking ? 'GoPay 资格检测中' : '尚未确认 GoPay 资格';
-  const gcashClass = r.gcash_eligible === true ? 'qualification-badge-gcash' : 'qualification-badge-muted';
-  const gopayClass = r.gopay_eligible === true ? 'qualification-badge-gopay' : 'qualification-badge-muted';
-  return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">GCash</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">GoPay</span></div>`;
+  const gcashClass = r.gcash_eligible === true ? 'qualification-badge-gcash' : (gcashChecking ? 'status-running' : 'qualification-badge-muted');
+  const gopayClass = r.gopay_eligible === true ? 'qualification-badge-gopay' : (gopayChecking ? 'status-running' : 'qualification-badge-muted');
+  const gcashLabel = gcashChecking && r.gcash_eligible !== true ? 'GCash 检测中' : 'GCash';
+  const gopayLabel = gopayChecking && r.gopay_eligible !== true ? 'GoPay 检测中' : 'GoPay';
+  return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">${gcashLabel}</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">${gopayLabel}</span></div>`;
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();
@@ -6679,6 +6681,25 @@ function qualificationQueueSummary(label, payload) {
   const firstProblem = String(payload.failed?.[0]?.error || payload.skipped?.[0]?.reason || payload.busy?.[0]?.error || '').trim();
   return `${label} 入队 ${payload.started_count || 0}${skipped ? `，跳过/忙碌/失败 ${skipped}` : ''}${firstProblem ? `（${firstProblem}）` : ''}`;
 }
+function markQualificationChecksQueued(payloads) {
+  const queuedByType = new Map();
+  (payloads || []).forEach(item => {
+    const ids = new Set((item.payload?.started || []).map(row => Number(row.id)).filter(Number.isFinite));
+    if (ids.size) queuedByType.set(item.value, ids);
+  });
+  ACCOUNTS.forEach(account => {
+    const id = Number(account.id);
+    if (queuedByType.get('gcash')?.has(id)) {
+      account.gcash_status = 'queued';
+      account.gcash_eligible = false;
+    }
+    if (queuedByType.get('gopay')?.has(id)) {
+      account.gopay_status = 'queued';
+      account.gopay_eligible = false;
+    }
+  });
+  if (queuedByType.size) renderAccounts();
+}
 async function checkSelectedQualification(kind) {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (!ids.length) { closeQualificationQueryModal(); showToast('请先选择账号'); return; }
@@ -6702,10 +6723,15 @@ async function checkSelectedQualification(kind) {
       return {value, label, payload};
     }));
     const messages = [];
+    const fulfilled = [];
     outcomes.forEach((outcome, index) => {
-      if (outcome.status === 'fulfilled') messages.push(qualificationQueueSummary(outcome.value.label, outcome.value.payload));
+      if (outcome.status === 'fulfilled') {
+        fulfilled.push(outcome.value);
+        messages.push(qualificationQueueSummary(outcome.value.label, outcome.value.payload));
+      }
       else messages.push(`${endpoints[requested[index]][1]} 提交失败：${outcome.reason?.message || outcome.reason}`);
     });
+    markQualificationChecksQueued(fulfilled);
     if (result) result.innerHTML = messages.map(message => `<div>${esc(message)}</div>`).join('');
     showToast(messages.join('；'));
     await pollAccountPlanStatuses();
