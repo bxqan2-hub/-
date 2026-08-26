@@ -713,6 +713,17 @@
       color: #475467; padding: 8px 10px; text-align: left; font: inherit; font-size: 12px; cursor: pointer;
     }
     .qualification-filter-menu-v2 button:hover { background: #eef4ff; color: #1d4ed8; }
+    .qualification-query-wrap-v2 { position: relative; display: inline-flex; }
+    .qualification-query-menu-v2 {
+      position: absolute; top: calc(100% + 6px); right: 0; z-index: 80;
+      min-width: 170px; padding: 5px; border: 1px solid #d9e2ec; border-radius: 8px;
+      background: #fff; box-shadow: 0 10px 24px rgba(15,23,42,.14);
+    }
+    .qualification-query-menu-v2 button {
+      display: block; width: 100%; border: 0; border-radius: 5px; background: transparent;
+      color: #475467; padding: 8px 10px; text-align: left; font: inherit; font-size: 12px; cursor: pointer;
+    }
+    .qualification-query-menu-v2 button:hover { background: #eef4ff; color: #1d4ed8; }
     #accountsPanelV2 .accounts-table-v2 th.col-gcash,
     #accountsPanelV2 .accounts-table-v2 td.col-gcash {
       text-align: center; vertical-align: middle;
@@ -2628,7 +2639,14 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="一次查询当前套餐、是否已开通 Plus，以及 Free 账号是否可试用 Plus">检测套餐/Plus/试用</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedCheckoutKindV2" disabled title="使用下方检测代理创建一次最小 Plus Checkout，只判断返回 oaics 或 cs_live，不执行支付确认">检测 OAICS/CSLIVE</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedQualificationsV2" disabled title="选择单独查询 GCash、GoPay，或一次查询当前已有的全部资格">查询资格</button>
+          <span class="qualification-query-wrap-v2">
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedQualificationsV2" disabled aria-expanded="false" title="展开后直接选择 GCash、GoPay，或全部查询">查询资格</button>
+            <span class="qualification-query-menu-v2 hidden" id="qualificationQueryMenuV2" role="menu" aria-label="查询资格">
+              <button type="button" data-query-qualification="gcash">查询 GCash</button>
+              <button type="button" data-query-qualification="gopay">查询 GoPay</button>
+              <button type="button" data-query-qualification="all">查询全部资格</button>
+            </span>
+          </span>
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">邮箱检测</span>
@@ -6762,17 +6780,16 @@ function markQualificationChecksQueued(payloads) {
 }
 async function checkSelectedQualification(kind) {
   const ids = Array.from(ACCOUNT_SELECTED);
-  if (!ids.length) { closeQualificationQueryModal(); showToast('请先选择账号'); return; }
+  if (!ids.length) { closeQualificationQueryMenu(); showToast('请先选择账号'); return; }
   const workers = Math.min(ids.length, 8);
   const requested = kind === 'all' ? ['gcash', 'gopay'] : [kind];
   const endpoints = {
     gcash: ['/api/accounts/check-gcash-bulk', 'GCash'],
     gopay: ['/api/accounts/check-gopay-bulk', 'GoPay'],
   };
-  const buttons = Array.from(document.querySelectorAll('#qualificationQueryModal [data-query-qualification]'));
+  const buttons = Array.from(document.querySelectorAll('#qualificationQueryMenuV2 [data-query-qualification]'));
   buttons.forEach(button => { button.disabled = true; });
-  const result = $('#qualificationQueryResultV2');
-  if (result) result.textContent = `正在提交 ${requested.map(value => endpoints[value][1]).join('、')} 查询…`;
+  showToast(`正在提交 ${requested.map(value => endpoints[value][1]).join('、')} 查询…`);
   try {
     const outcomes = await Promise.allSettled(requested.map(async value => {
       const [endpoint, label] = endpoints[value];
@@ -6792,14 +6809,38 @@ async function checkSelectedQualification(kind) {
       else messages.push(`${endpoints[requested[index]][1]} 提交失败：${outcome.reason?.message || outcome.reason}`);
     });
     markQualificationChecksQueued(fulfilled);
-    if (result) result.innerHTML = messages.map(message => `<div>${esc(message)}</div>`).join('');
     showToast(messages.join('；'));
     await pollAccountPlanStatuses();
-    setTimeout(closeQualificationQueryModal, 900);
+    closeQualificationQueryMenu();
   } finally {
     buttons.forEach(button => { button.disabled = false; });
     updateAccountSelectionUi();
   }
+}
+function openQualificationQueryMenu() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  const menu = $('#qualificationQueryMenuV2');
+  menu?.classList.toggle('hidden');
+  $('#btnCheckSelectedQualificationsV2')?.setAttribute('aria-expanded', menu?.classList.contains('hidden') ? 'false' : 'true');
+}
+function closeQualificationQueryMenu() {
+  $('#qualificationQueryMenuV2')?.classList.add('hidden');
+  $('#btnCheckSelectedQualificationsV2')?.setAttribute('aria-expanded', 'false');
+}
+function bindQualificationQueryMenu() {
+  const button = $('#btnCheckSelectedQualificationsV2');
+  const menu = $('#qualificationQueryMenuV2');
+  if (!button || !menu || menu.dataset.bound) return;
+  menu.dataset.bound = '1';
+  button.addEventListener('click', event => { event.stopPropagation(); openQualificationQueryMenu(); });
+  menu.querySelectorAll('[data-query-qualification]').forEach(item => item.addEventListener('click', event => {
+    event.stopPropagation();
+    checkSelectedQualification(item.dataset.queryQualification).catch(error => showToast('资格查询失败: ' + error.message));
+  }));
+  document.addEventListener('click', event => {
+    if (!menu.contains(event.target) && event.target !== button) closeQualificationQueryMenu();
+  });
 }
 function bindQualificationQueryModal() {
   const modal = $('#qualificationQueryModal');
@@ -7173,8 +7214,7 @@ async function findSelectedAccountsInEmailPool() {
   });
   bind('btnCheckSelectedPlansV2', checkSelectedPlans);
   bind('btnCheckSelectedCheckoutKindV2', checkSelectedCheckoutKinds);
-  bind('btnCheckSelectedQualificationsV2', openQualificationQueryModal);
-  bindQualificationQueryModal();
+  bindQualificationQueryMenu();
   bind('btnExtractSelectedOaicsV2', extractSelectedOaics);
   bind('btnCopyAllOaicsLinksV2', copyAllOaicsLinks);
   bind('btnCheckSelectedAccountMailV2', e => checkAccountMailboxes({all:false}, e.currentTarget));

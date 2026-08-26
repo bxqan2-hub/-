@@ -233,6 +233,8 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('class="col-gcash"', html)
         self.assertIn('id="btnCheckSelectedQualificationsV2"', html)
         self.assertIn('id="qualificationQueryModal"', html)
+        self.assertIn('id="qualificationQueryMenuV2"', html)
+        self.assertIn('function bindQualificationQueryMenu()', html)
         self.assertIn('id="btnQualificationFilterV2"', html)
         self.assertIn('data-account-qualification-filter="gcash"', html)
         self.assertIn('data-account-qualification-filter="gopay"', html)
