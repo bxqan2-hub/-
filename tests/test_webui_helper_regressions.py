@@ -46,6 +46,18 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("extra_json", current)
         self.assertFalse(current["password_configured"])
 
+    @patch("webui.app.db.list_accounts")
+    def test_account_qualification_filter_separates_gcash_and_gopay(self, list_accounts):
+        list_accounts.return_value = [
+            {"id": 1, "email": "gcash@test.com", "gcash_eligible": True, "gopay_eligible": False},
+            {"id": 2, "email": "gopay@test.com", "gcash_eligible": False, "gopay_eligible": True},
+            {"id": 3, "email": "both@test.com", "gcash_eligible": True, "gopay_eligible": True},
+        ]
+        for value, expected in (("gcash", {1, 3}), ("gopay", {2, 3}), ("any", {1, 2, 3})):
+            response = self.client.get(f"/api/accounts?paged=1&page=1&page_size=20&qualification={value}")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual({row["id"] for row in response.get_json()["items"]}, expected)
+
         secured = _compact_account_for_list({
             "id": 3,
             "email": "secured@test.com",
@@ -221,6 +233,10 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('class="col-gcash"', html)
         self.assertIn('id="btnCheckSelectedQualificationsV2"', html)
         self.assertIn('id="qualificationQueryModal"', html)
+        self.assertIn('id="btnQualificationFilterV2"', html)
+        self.assertIn('data-account-qualification-filter="gcash"', html)
+        self.assertIn('data-account-qualification-filter="gopay"', html)
+        self.assertNotIn('id="showGcashAccountsOnlyV2"', html)
         self.assertIn("/api/accounts/check-gcash-bulk", html)
         self.assertIn("/api/accounts/check-gopay-bulk", html)
         self.assertIn("/api/accounts/extract-oaics-bulk", html)

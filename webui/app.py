@@ -1029,6 +1029,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         plan_filter = str(request.args.get("plan", default="") or "").lower()
         checkout_kind = str(request.args.get("checkout_kind", default="") or "").strip().lower()
         gcash = str(request.args.get("gcash", default="") or "").strip().lower()
+        qualification = str(request.args.get("qualification", default="") or "").strip().lower()
         at_filter = str(request.args.get("at", default="") or "").strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
         group_id = str(request.args.get("group", default="") or "").strip()
@@ -1042,6 +1043,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             if gcash in {"1", "true", "yes"}
             else rows
         )
+        def apply_qualification_filter(rows):
+            if qualification == "gcash":
+                return [row for row in rows if row.get("gcash_eligible") is True]
+            if qualification == "gopay":
+                return [row for row in rows if row.get("gopay_eligible") is True]
+            if qualification in {"any", "either"}:
+                return [row for row in rows if row.get("gcash_eligible") is True or row.get("gopay_eligible") is True]
+            return rows
         if group_id:
             rows = _filter_account_rows_by_group(
                 db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter),
@@ -1050,6 +1059,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             if checkout_kind:
                 rows = [row for row in rows if str(row.get("checkout_kind") or "").strip().lower() == checkout_kind]
             rows = apply_gcash_filter(rows)
+            rows = apply_qualification_filter(rows)
             if paged or page_arg is not None or page_size_arg is not None:
                 page = max(1, int(page_arg or 1))
                 page_size = max(1, min(500, int(page_size_arg or limit or 50)))
@@ -1061,10 +1071,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            if checkout_kind or gcash in {"1", "true", "yes"}:
+            if checkout_kind or gcash in {"1", "true", "yes"} or qualification in {"gcash", "gopay", "any", "either"}:
                 rows = [row for row in db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
                         if (not checkout_kind or str(row.get("checkout_kind") or "").strip().lower() == checkout_kind)
                         and (gcash not in {"1", "true", "yes"} or row.get("gcash_eligible") is True)]
+                rows = apply_qualification_filter(rows)
                 result = _paginate_items(_compact_accounts_for_list(rows), page=page, page_size=page_size)
             else:
                 result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
@@ -1075,6 +1086,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         if checkout_kind:
             rows = [row for row in rows if str(row.get("checkout_kind") or "").strip().lower() == checkout_kind]
         rows = apply_gcash_filter(rows)
+        rows = apply_qualification_filter(rows)
         return jsonify(rows)
 
     @app.get("/api/account-groups")
@@ -1397,6 +1409,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         plan_filter = str(data.get("plan") or "").lower()
         checkout_kind = str(data.get("checkout_kind") or "").strip().lower()
         gcash = str(data.get("gcash") or "").strip().lower()
+        qualification = str(data.get("qualification") or "").strip().lower()
         at_filter = str(data.get("at") or "").strip().lower()
         q = str(data.get("q") or "").strip()
         page = max(1, int(data.get("page") or 1))
@@ -1407,6 +1420,12 @@ def create_app(auth_code: str | None = None) -> Flask:
             rows = [row for row in rows if str(row.get("checkout_kind") or "").strip().lower() == checkout_kind]
         if gcash in {"1", "true", "yes"}:
             rows = [row for row in rows if row.get("gcash_eligible") is True]
+        if qualification == "gcash":
+            rows = [row for row in rows if row.get("gcash_eligible") is True]
+        elif qualification == "gopay":
+            rows = [row for row in rows if row.get("gopay_eligible") is True]
+        elif qualification in {"any", "either"}:
+            rows = [row for row in rows if row.get("gcash_eligible") is True or row.get("gopay_eligible") is True]
         result = _paginate_items(_compact_accounts_for_list(rows), page=page, page_size=page_size)
         result["filter_email_count"] = len(email_set)
         return jsonify(result)

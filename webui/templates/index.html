@@ -702,6 +702,17 @@
       display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: center;
       width: 100%; min-height: 26px; box-sizing: border-box;
     }
+    .qualification-filter-wrap-v2 { position: relative; display: inline-flex; }
+    .qualification-filter-menu-v2 {
+      position: absolute; top: calc(100% + 6px); left: 0; z-index: 80;
+      min-width: 150px; padding: 5px; border: 1px solid #d9e2ec; border-radius: 8px;
+      background: #fff; box-shadow: 0 10px 24px rgba(15,23,42,.14);
+    }
+    .qualification-filter-menu-v2 button {
+      display: block; width: 100%; border: 0; border-radius: 5px; background: transparent;
+      color: #475467; padding: 8px 10px; text-align: left; font: inherit; font-size: 12px; cursor: pointer;
+    }
+    .qualification-filter-menu-v2 button:hover { background: #eef4ff; color: #1d4ed8; }
     #accountsPanelV2 .accounts-table-v2 th.col-gcash,
     #accountsPanelV2 .accounts-table-v2 td.col-gcash {
       text-align: center; vertical-align: middle;
@@ -2543,7 +2554,15 @@
           <button type="button" class="acc-v2-toggle" id="showDiscountTrialAccountsOnlyV2" aria-pressed="false" title="只显示其他折扣或活动折扣比例暂未返回的 Free 账号">其他优惠</button>
           <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测成功且明确没有 Plus 试用活动的 Free 账号">无试用资格</button>
           <button type="button" class="acc-v2-toggle" id="showOaicsAccountsOnlyV2" aria-pressed="false" title="只显示 Checkout 类型已检测为 OAICS 的账号">OAICS</button>
-          <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">有GCash</button>
+          <span class="qualification-filter-wrap-v2">
+            <button type="button" class="acc-v2-toggle" id="btnQualificationFilterV2" aria-expanded="false" title="按 GCash 或 GoPay 资格筛选账号">资格筛选</button>
+            <span class="qualification-filter-menu-v2 hidden" id="qualificationFilterMenuV2" role="menu" aria-label="资格筛选">
+              <button type="button" data-account-qualification-filter="">全部账号</button>
+              <button type="button" data-account-qualification-filter="gcash">有 GCash 资格</button>
+              <button type="button" data-account-qualification-filter="gopay">有 GoPay 资格</button>
+              <button type="button" data-account-qualification-filter="any">有任一资格</button>
+            </span>
+          </span>
           <button type="button" class="acc-v2-toggle" id="showAtInvalidAccountsOnlyV2" aria-pressed="false" title="只显示 AT 已确认失效或检测遇到错误的账号；检测只验证 AT，不查询套餐或 0 元试用，网络错误不会误标成失效">AT失效/错误</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnAtQualificationCheckV2" title="粘贴一个或多个 AT，选择资格并显示每个 AT 对应的邮箱与结果">AT检测大全</button>
           <button type="button" class="acc-v2-toggle" id="atValidityEnabledV2" aria-pressed="true" title="启用或停用 AT 定时有效性检测；修改后点击保存">定时AT检测</button>
@@ -3247,6 +3266,7 @@ let SHOW_ARCHIVED_ACCOUNTS = false;
 let ACCOUNT_PLAN_FILTER = '';
 let ACCOUNT_CHECKOUT_KIND_FILTER = '';
 let ACCOUNT_GCASH_FILTER = '';
+let ACCOUNT_QUALIFICATION_FILTER = '';
 let ACCOUNT_AT_VALIDITY_FILTER = '';
 let AT_VALIDITY_SCHEDULE = {enabled:true, interval_minutes:360};
 let ACCOUNT_GROUPS = [];
@@ -4762,15 +4782,16 @@ async function loadAccounts() {
     const plan = ACCOUNT_PLAN_FILTER;
     const checkoutKind = ACCOUNT_CHECKOUT_KIND_FILTER;
     const gcash = ACCOUNT_GCASH_FILTER;
+    const qualification = ACCOUNT_QUALIFICATION_FILTER;
     const atValidity = ACCOUNT_AT_VALIDITY_FILTER;
     const q = getAccountsQuery();
     const p = PAGERS.accounts;
     const res = ACCOUNT_EMAIL_FILTER.length
       ? await api('/api/accounts/filter-emails', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page:p.page,page_size:p.size,archived:'all',plan,q,checkout_kind:checkoutKind,gcash,at:atValidity}),
+          body:JSON.stringify({emails:ACCOUNT_EMAIL_FILTER,page:p.page,page_size:p.size,archived:'all',plan,q,checkout_kind:checkoutKind,gcash,qualification,at:atValidity}),
         })
-      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&gcash=${encodeURIComponent(gcash)}&at=${encodeURIComponent(atValidity)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID ? '' : ACTIVE_ACCOUNT_GROUP_ID)}`);
+      : await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&checkout_kind=${encodeURIComponent(checkoutKind)}&gcash=${encodeURIComponent(gcash)}&qualification=${encodeURIComponent(qualification)}&at=${encodeURIComponent(atValidity)}&q=${encodeURIComponent(q)}&group=${encodeURIComponent(ACTIVE_ACCOUNT_GROUP_ID === ARCHIVED_ACCOUNT_GROUP_ID ? '' : ACTIVE_ACCOUNT_GROUP_ID)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -4782,7 +4803,7 @@ async function loadAccounts() {
 async function pollAccountPlanStatuses() {
   if (planStatusLoading || accountsLoading) return;
   if (document.activeElement?.id?.startsWith('pagerSizeInput-')) return;
-  if (ACCOUNT_CHECKOUT_KIND_FILTER || ACCOUNT_GCASH_FILTER) { await loadAccounts(); return; }
+  if (ACCOUNT_CHECKOUT_KIND_FILTER || ACCOUNT_GCASH_FILTER || ACCOUNT_QUALIFICATION_FILTER) { await loadAccounts(); return; }
   if (ACCOUNT_EMAIL_FILTER.length || ACTIVE_ACCOUNT_GROUP_ID !== 'default') { await loadAccounts(); return; }
   planStatusLoading = true;
   try {
@@ -6282,8 +6303,27 @@ async function refreshAccountsList(btn) {
   });
   const oaicsV2 = $('#showOaicsAccountsOnlyV2');
   if (oaicsV2) oaicsV2.addEventListener('click', applyAccountsCheckoutKindFilter);
-  const gcashV2 = $('#showGcashAccountsOnlyV2');
-  if (gcashV2) gcashV2.addEventListener('click', applyAccountsGcashFilter);
+  const qualificationButton = $('#btnQualificationFilterV2');
+  const qualificationMenu = $('#qualificationFilterMenuV2');
+  if (qualificationButton && qualificationMenu) {
+    qualificationButton.addEventListener('click', event => {
+      event.stopPropagation();
+      qualificationMenu.classList.toggle('hidden');
+      updateQualificationFilterButton();
+    });
+    qualificationMenu.querySelectorAll('[data-account-qualification-filter]').forEach(item => {
+      item.addEventListener('click', event => {
+        event.stopPropagation();
+        applyAccountsQualificationFilter(item.dataset.accountQualificationFilter || '');
+      });
+    });
+    document.addEventListener('click', event => {
+      if (!qualificationMenu.contains(event.target) && event.target !== qualificationButton) {
+        qualificationMenu.classList.add('hidden');
+        updateQualificationFilterButton();
+      }
+    });
+  }
   const atInvalidV2 = $('#showAtInvalidAccountsOnlyV2');
   if (atInvalidV2) atInvalidV2.addEventListener('click', applyAccountsAtValidityFilter);
   $('#atValidityEnabledV2')?.addEventListener('click', () => {
@@ -6680,6 +6720,26 @@ function qualificationQueueSummary(label, payload) {
   const skipped = Number(payload.skipped_count || 0) + Number(payload.busy_count || 0) + Number(payload.failed_count || 0);
   const firstProblem = String(payload.failed?.[0]?.error || payload.skipped?.[0]?.reason || payload.busy?.[0]?.error || '').trim();
   return `${label} 入队 ${payload.started_count || 0}${skipped ? `，跳过/忙碌/失败 ${skipped}` : ''}${firstProblem ? `（${firstProblem}）` : ''}`;
+}
+function updateQualificationFilterButton() {
+  const button = $('#btnQualificationFilterV2');
+  if (!button) return;
+  const labels = {'':'资格筛选', gcash:'资格：GCash', gopay:'资格：GoPay', any:'资格：任一'};
+  const active = Boolean(ACCOUNT_QUALIFICATION_FILTER);
+  button.textContent = labels[ACCOUNT_QUALIFICATION_FILTER] || '资格筛选';
+  button.classList.toggle('is-active', active);
+  button.setAttribute('aria-expanded', $('#qualificationFilterMenuV2')?.classList.contains('hidden') ? 'false' : 'true');
+}
+async function applyAccountsQualificationFilter(filter) {
+  ACCOUNT_QUALIFICATION_FILTER = String(filter || '').toLowerCase();
+  ACCOUNT_GCASH_FILTER = '';
+  const menu = $('#qualificationFilterMenuV2');
+  menu?.classList.add('hidden');
+  updateQualificationFilterButton();
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
 }
 function markQualificationChecksQueued(payloads) {
   const queuedByType = new Map();
