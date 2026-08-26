@@ -12,8 +12,16 @@
       "name": "qualification-test",
       "url": "https://github.com/yeying-xingchen/qualification-test",
       "commit": "aaeb077ec2b6b6db68ac3339bf6e4181ebdd22dc",
+      "latest_audited_commit": "42abb133980a681330740b01a7d5928625f936b4",
       "audited_at": "2026-08-23",
       "usage": "GCash qualification reference only; not a runtime service"
+    },
+    {
+      "name": "link-gp",
+      "url": "https://github.com/eatWhitePorridge/link-gp",
+      "commit": "3d2af69d848e6f292ef5abcb763c89dac3fbbea5",
+      "audited_at": "2026-08-26",
+      "usage": "GoPay Checkout/Stripe-init qualification reference only; extraction and payment continuation are not deployed"
     },
     {
       "name": "link-pp",

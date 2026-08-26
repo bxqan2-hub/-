@@ -37,6 +37,21 @@ GCash qualification reference:
     eight workers (maximum 32) with whole-pool proxy rotation on retryable
     creation failures.
 
+GoPay qualification reference:
+
+- [link-gp](https://github.com/eatWhitePorridge/link-gp)
+  - Audited reference commit: `3d2af69d848e6f292ef5abcb763c89dac3fbbea5`
+  - Reference only; its standalone Flask workbench, batch scheduler, payment
+    confirmation, approval, polling, and redirect extraction are not deployed.
+  - The account-page detector reuses the source eligibility boundary: create
+    one promoted ID/IDR custom Plus Checkout, require a Stripe `cs_*` session,
+    initialize Stripe once, and report eligible only when amount is zero,
+    currency is IDR, and `gopay` is published. It stops before Elements,
+    taxes, PaymentMethod, confirm, approval, polling, or redirect extraction.
+  - GoPay requires an Indonesia (`ID`) exit. Settings therefore extend the
+    shared payment-qualification proxy pool with country groups: GCash selects
+    `PH`, GoPay selects `ID`, and future detectors can select their own country.
+
 PayPal OAICS extraction core:
 
 - [link-pp](https://github.com/eatWhitePorridge/link-pp)

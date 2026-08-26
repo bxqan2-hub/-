@@ -96,6 +96,11 @@ CHECKOUT_CHECK_PROXY_ACTIVE = ""
 # GCash 资格检测专用代理池；需要 PH 出口代理。每行 `名称|代理或代理API`。
 GC_CHECK_PROXY_PROFILES = []
 
+# 支付资格检测按国家静态代理池；GCash 固定读取 PH，GoPay 固定读取 ID。
+# 后续新增资格类型时继续在这个池中按目标国家取代理。
+QUALIFICATION_CHECK_PROXY_PROFILES = []
+QUALIFICATION_CHECK_PROXY_ACTIVE = ""
+
 # PayPal OAICS 提链专用代理池；格式支持 `名称|代理` 或直接代理，每行一条。
 PAYPAL_OAICS_PROXY_PROFILES = []
 PAYPAL_OAICS_PROXY_ACTIVE = ""
@@ -329,6 +334,8 @@ _PROXY_REGION_LABELS = {
     "TW": "中国台湾",
     "BR": "巴西",
     "IN": "印度",
+    "ID": "印度尼西亚",
+    "PH": "菲律宾",
     "NL": "荷兰",
     "IT": "意大利",
     "ES": "西班牙",
@@ -701,6 +708,8 @@ apply_env_overrides(globals(), {
     'CHECKOUT_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'CHECKOUT_CHECK_PROXY_ACTIVE': 'str',
     'GC_CHECK_PROXY_PROFILES': 'list_str_multiline',
+    'QUALIFICATION_CHECK_PROXY_PROFILES': 'list_str_multiline',
+    'QUALIFICATION_CHECK_PROXY_ACTIVE': 'str',
     'PAYPAL_OAICS_PROXY_PROFILES': 'list_str_multiline',
     'PAYPAL_OAICS_PROXY_ACTIVE': 'str',
     'PAYPAL_OAICS_WORKERS': 'int',
@@ -717,6 +726,7 @@ for _runtime_key in (
     "PLAN_CHECK_PROXY_PROFILES",
     "AT_VALIDITY_PROXY_PROFILES",
     "CHECKOUT_CHECK_PROXY_PROFILES",
+    "QUALIFICATION_CHECK_PROXY_PROFILES",
 ):
     _runtime_values = read_runtime_list_file(_runtime_key)
     if _runtime_values is not None:

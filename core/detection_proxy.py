@@ -156,6 +156,18 @@ def configured_detection_proxy_spec(purpose: str) -> str | None:
     )
 
 
+def qualification_proxy_specs(country: str) -> list[str]:
+    """Return every static qualification proxy for one exact country."""
+    requested = str(country or "").strip().upper()
+    if not _COUNTRY_CODE_RE.fullmatch(requested):
+        raise ValueError("资格检测国家必须是两位国家代码")
+    entries = getattr(proxy_cfg, "QUALIFICATION_CHECK_PROXY_PROFILES", []) or []
+    for group in detection_proxy_country_groups(entries):
+        if str(group["country"]) == requested:
+            return list(group["specs"])
+    return []
+
+
 def _split_label(spec: str) -> tuple[str, str]:
     text = str(spec or "").strip()
     if "|" in text and not text.lower().startswith(("http://", "https://", "socks5://", "socks5h://")):
@@ -361,6 +373,7 @@ __all__ = [
     "is_detection_proxy_api",
     "parse_detection_proxy_pool",
     "pool_spec_for_index",
+    "qualification_proxy_specs",
     "resolve_detection_proxy",
     "resolve_static_detection_proxy",
 ]

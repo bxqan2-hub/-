@@ -219,8 +219,10 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("_oaicsLinkCell", html)
         self.assertIn('colspan="11"', html)
         self.assertIn('class="col-gcash"', html)
-        self.assertIn('id="btnCheckSelectedGcashV2"', html)
+        self.assertIn('id="btnCheckSelectedQualificationsV2"', html)
+        self.assertIn('id="qualificationQueryModal"', html)
         self.assertIn("/api/accounts/check-gcash-bulk", html)
+        self.assertIn("/api/accounts/check-gopay-bulk", html)
         self.assertIn("/api/accounts/extract-oaics-bulk", html)
         self.assertNotIn('data-account-reveal-secret="totp_secret"', html)
         self.assertNotIn('>显示2FA</button>', html)
@@ -373,6 +375,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("renderDetectionProxyCountryControlV2(checkoutProfiles, checkoutActive, 'checkout')", html)
         self.assertIn("renderDetectionProxyCountryControlV2(planProfiles, planActive, 'plan')", html)
         self.assertIn("renderDetectionProxyCountryControlV2(atProfiles, atActive, 'at')", html)
+        self.assertIn("renderDetectionProxyCountryControlV2(qualificationProfiles, qualificationActive, 'qualification')", html)
         self.assertIn('AT_VALIDITY_PROXY_PROFILES', html)
         self.assertIn('专属池非空时只用该池；池为空时只走本机 VPN/系统代理', html)
         self.assertIn('完全跳过 PROXY_POOL', html)
@@ -392,13 +395,17 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn('${renderConfigPlainFieldV2(checkoutProfiles)}', html)
         self.assertNotIn('${renderConfigPlainFieldV2(atProfiles)}', html)
 
-    def test_gcash_ui_uses_fast_direct_checkout_concurrency(self):
+    def test_qualification_ui_offers_individual_and_all_queries(self):
         html = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("const workers = Math.min(ids.length, 8)", html)
-        self.assertIn("不识别 OAICS 类型", html)
-        self.assertIn("不轮询 Checkout", html)
-        self.assertIn("不提交税区", html)
+        self.assertIn('data-query-qualification="gcash"', html)
+        self.assertIn('data-query-qualification="gopay"', html)
+        self.assertIn('data-query-qualification="all"', html)
+        self.assertIn('>资格</th>', html)
+        self.assertIn("function _qualificationBadges(r)", html)
+        self.assertIn("if (r.gcash_eligible === true)", html)
+        self.assertIn("if (r.gopay_eligible === true)", html)
         self.assertNotIn("合并查询：创建 Checkout 同时判定类型与 GCash 资格", html)
 
     def test_settings_ui_filters_irrelevant_drivers_and_has_real_status_cards(self):

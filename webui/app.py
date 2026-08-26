@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request
 from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-from core import account_operation_control, codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, at_validity_scheduler
+from core import account_operation_control, codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, gopay_service, at_validity_scheduler
 from core import chatgpt_plan, integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
@@ -594,6 +594,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "plan_check_status", "plan_detection_source", "plan_authority", "plan_confidence",
         "checkout_kind_status", "checkout_kind",
         "gcash_status", "gcash_eligible", "gcash_payment_method_id",
+        "gopay_status", "gopay_eligible",
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error", "jp_trial_checked_at",
         "codex_status", "codex_agent_status",
         "email_rebind_status", "email_rebind_label", "email_rebind_from", "email_rebound_at",
@@ -641,6 +642,10 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "gcash_ok", "gcash_checkout_country", "gcash_checkout_currency",
         "gcash_checked_at", "gcash_completed_at", "gcash_error",
         "gcash_attempt_count", "gcash_retried_proxies",
+        # GoPay 资格检测。
+        "gopay_ok", "gopay_checkout_country", "gopay_checkout_currency", "gopay_checkout_amount",
+        "gopay_checked_at", "gopay_completed_at", "gopay_error",
+        "gopay_attempt_count", "gopay_retried_proxies",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_queued_at", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",
         # 邮箱检测结果：账号页直接展示并支持单账号刷新。
@@ -966,6 +971,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_gcash = db.recover_interrupted_gcash_checks()
     if recovered_gcash:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 GCash 资格检测状态", recovered_gcash)
+    recovered_gopay = db.recover_interrupted_gopay_checks()
+    if recovered_gopay:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 GoPay 资格检测状态", recovered_gopay)
     at_validity_scheduler.ensure_started()
     # ----------------------------------------------------------
     # 页面
@@ -2002,24 +2010,28 @@ def create_app(auth_code: str | None = None) -> Flask:
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
         workers = max(1, min(workers, max_workers, len(ids)))
-        # GCash 探测必须走 PH 出口；代理池为设置在“gc查询代理池”的 PH 代理列表。
-        pool_specs = detection_proxy.parse_detection_proxy_pool(
-            getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
-        )
+        # 新资格池按国家归类；未迁移时继续兼容旧 gc查询代理池。
+        pool_specs = detection_proxy.qualification_proxy_specs("PH")
+        use_legacy_gc_pool = not pool_specs
         if not pool_specs:
-            return jsonify({"ok": False, "error": "尚未配置 gc查询代理池（PH 出口代理）"}), 409
+            pool_specs = detection_proxy.parse_detection_proxy_pool(
+                getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
+            )
+        if not pool_specs:
+            return jsonify({"ok": False, "error": "尚未配置资格检测 PH 国家代理池"}), 409
         executor = gcash_service.get_executor(workers)
         # 解析整个代理池一次：每个账号拿到一个随机起点，失败时按池顺序换代理重试。
         proxy_urls: list[str] = []
         for spec in pool_specs:
             try:
-                url = detection_proxy.resolve_detection_proxy(spec) or ""
+                resolver = detection_proxy.resolve_detection_proxy if use_legacy_gc_pool else detection_proxy.resolve_static_detection_proxy
+                url = resolver(spec) or ""
                 if url:
                     proxy_urls.append(url)
             except Exception:
                 continue
         if not proxy_urls:
-            return jsonify({"ok": False, "error": "gc查询代理池全部无法解析"}), 409
+            return jsonify({"ok": False, "error": "资格检测 PH 国家代理池全部无法解析"}), 409
         started, busy, failed, skipped = [], [], [], []
         seen: set[int] = set()
         for raw_id in ids:
@@ -2072,6 +2084,84 @@ def create_app(auth_code: str | None = None) -> Flask:
             "message": "每个账号只创建一次 PH/PHP Checkout 并从创建响应直读 GCash；不识别 OAICS 类型，代理/风控类失败自动换代理重试",
         }), 202
 
+    @app.post("/api/accounts/check-gopay-bulk")
+    def api_accounts_check_gopay_bulk():
+        """Create one ID/IDR Checkout and stop after GoPay eligibility is known."""
+        from core import detection_proxy
+        import random
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多检测 500 个账号"}), 400
+        try:
+            workers = _positive_worker_count(data.get("workers"), gopay_service.DEFAULT_WORKERS)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
+        workers = max(1, min(workers, gopay_service.MAX_WORKERS, len(ids)))
+        pool_specs = detection_proxy.qualification_proxy_specs("ID")
+        if not pool_specs:
+            return jsonify({"ok": False, "error": "尚未配置资格检测 ID（印度尼西亚）国家代理池"}), 409
+        proxy_urls: list[str] = []
+        for spec in pool_specs:
+            try:
+                value = detection_proxy.resolve_static_detection_proxy(spec) or ""
+                if value:
+                    proxy_urls.append(value)
+            except Exception:
+                continue
+        if not proxy_urls:
+            return jsonify({"ok": False, "error": "资格检测 ID 国家代理池全部无法解析"}), 409
+        executor = gopay_service.get_executor(workers)
+        started, busy, failed, skipped = [], [], [], []
+        seen: set[int] = set()
+        for raw_id in ids:
+            try:
+                account_id = int(raw_id)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if account_id in seen:
+                continue
+            seen.add(account_id)
+            account = db.get_account(account_id)
+            if not account:
+                skipped.append({"id": account_id, "reason": "账号不存在"})
+                continue
+            token = str(account.get("access_token") or "").strip()
+            if not token:
+                skipped.append({"id": account_id, "email": account.get("email"), "reason": "缺少 AT/access_token"})
+                continue
+            candidates = list(proxy_urls)
+            random.shuffle(candidates)
+            queued = gopay_service.enqueue(
+                account_id=account_id,
+                access_token=token,
+                trigger="manual_gopay_bulk",
+                proxies=candidates,
+                max_retries=gopay_service.MAX_PROXY_RETRIES,
+                executor=executor,
+            )
+            item = {"id": account_id, "email": account.get("email"), **queued}
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "started": started, "started_count": len(started),
+            "busy": busy, "busy_count": len(busy),
+            "failed": failed, "failed_count": len(failed),
+            "skipped": skipped, "skipped_count": len(skipped),
+            "workers": workers,
+            "confirm_sent": False,
+            "message": "每个账号只创建一次 ID/IDR Checkout 并初始化 Stripe 判断 GoPay，随后立即停止",
+        }), 202
+
     @app.post("/api/accounts/at-qualification-check")
     def api_accounts_at_qualification_check():
         """Use the existing qualification detector for pasted ATs.
@@ -2117,21 +2207,25 @@ def create_app(auth_code: str | None = None) -> Flask:
         if not tokens:
             return jsonify({"ok": False, "error": "没有可检测的有效 AT", "invalid": invalid}), 400
 
-        pool_specs = detection_proxy.parse_detection_proxy_pool(
-            getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
-        )
+        pool_specs = detection_proxy.qualification_proxy_specs("PH")
+        use_legacy_gc_pool = not pool_specs
         if not pool_specs:
-            return jsonify({"ok": False, "error": "尚未配置 gc查询代理池（PH 出口代理）", "invalid": invalid}), 409
+            pool_specs = detection_proxy.parse_detection_proxy_pool(
+                getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
+            )
+        if not pool_specs:
+            return jsonify({"ok": False, "error": "尚未配置资格检测 PH 国家代理池", "invalid": invalid}), 409
         proxy_urls: list[str] = []
         for spec in pool_specs:
             try:
-                url = detection_proxy.resolve_detection_proxy(spec) or ""
+                resolver = detection_proxy.resolve_detection_proxy if use_legacy_gc_pool else detection_proxy.resolve_static_detection_proxy
+                url = resolver(spec) or ""
             except Exception:
                 continue
             if url:
                 proxy_urls.append(url)
         if not proxy_urls:
-            return jsonify({"ok": False, "error": "gc查询代理池全部无法解析", "invalid": invalid}), 409
+            return jsonify({"ok": False, "error": "资格检测 PH 国家代理池全部无法解析", "invalid": invalid}), 409
 
         generation = account_operation_control.snapshot()
         workers = max(1, min(8, len(tokens)))
@@ -4321,9 +4415,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             "plan": ("PLAN_CHECK_PROXY_PROFILES", "PLAN_CHECK_PROXY_ACTIVE"),
             "at": ("AT_VALIDITY_PROXY_PROFILES", "AT_VALIDITY_PROXY_ACTIVE"),
             "checkout": ("CHECKOUT_CHECK_PROXY_PROFILES", "CHECKOUT_CHECK_PROXY_ACTIVE"),
+            "qualification": ("QUALIFICATION_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_ACTIVE"),
         }
         if purpose not in field_map:
-            return jsonify({"ok": False, "error": "purpose 必须是 plan、at 或 checkout"}), 400
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout 或 qualification"}), 400
 
         from config import proxy as proxy_cfg
         from core import detection_proxy
@@ -4459,9 +4554,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             "plan": ("PLAN_CHECK_PROXY_PROFILES", "PLAN_CHECK_PROXY_ACTIVE"),
             "at": ("AT_VALIDITY_PROXY_PROFILES", "AT_VALIDITY_PROXY_ACTIVE"),
             "checkout": ("CHECKOUT_CHECK_PROXY_PROFILES", "CHECKOUT_CHECK_PROXY_ACTIVE"),
+            "qualification": ("QUALIFICATION_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_ACTIVE"),
         }
         if purpose not in field_map:
-            return jsonify({"ok": False, "error": "purpose 必须是 plan、at 或 checkout"}), 400
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout 或 qualification"}), 400
         if len(country) != 2 or not country.isalpha():
             return jsonify({"ok": False, "error": "country 必须是两位国家代码"}), 400
 

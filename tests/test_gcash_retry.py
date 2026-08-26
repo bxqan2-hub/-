@@ -212,10 +212,10 @@ class GcashBulkApiTests(unittest.TestCase):
         # A small proxy pool must not silently lower account concurrency; the
         # single proxy can serve multiple direct one-request Checkout probes.
         profiles = ["PH|http://proxy.example:8080"]
-        with patch.object(proxy_cfg, "GC_CHECK_PROXY_PROFILES", profiles), \
+        with patch.object(detection_proxy, "qualification_proxy_specs", return_value=profiles), \
              patch.object(
                  detection_proxy,
-                 "resolve_detection_proxy",
+                 "resolve_static_detection_proxy",
                  side_effect=lambda spec: spec.split("|", 1)[-1],
              ), patch("webui.app.db.get_account", side_effect=lambda account_id: {
                  "id": account_id,

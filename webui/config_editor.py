@@ -18,7 +18,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES", "AT_VALIDITY_PROXY_PROFILES",
-    "CHECKOUT_CHECK_PROXY_PROFILES", "GC_CHECK_PROXY_PROFILES",
+    "CHECKOUT_CHECK_PROXY_PROFILES", "GC_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_PROFILES",
     "PAYPAL_OAICS_PROXY_PROFILES",
 }
 
@@ -775,6 +775,15 @@ EDITABLE_FIELDS = [
         "key": "GC_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
         "label": "gc查询代理池", "help": "GCash 资格检测专用 PH 出口代理；每行一个，支持 名称|代理 或 名称|API。只影响账号页“查询GC”",
         "storage": "env", "secret": True,
+    },
+    {
+        "key": "QUALIFICATION_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "资格检测按国家代理池", "help": "GCash 固定调用 PH 国家池，GoPay 固定调用 ID 国家池；设置页可一次加入多国静态代理，后续资格检测继续复用此池",
+        "storage": "runtime_file", "secret": True,
+    },
+    {
+        "key": "QUALIFICATION_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "资格代理管理国家", "help": "只用于设置页选择和删除国家池；实际检测由资格类型固定选择 PH 或 ID",
     },
     {
         "key": "PAYPAL_OAICS_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",

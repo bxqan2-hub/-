@@ -697,7 +697,8 @@
     .accounts-table-v2 .col-token { width: 105px; }
     .accounts-table-v2 .col-plan { width: 120px; }
     .accounts-table-v2 .col-checkout { width: 125px; }
-    .accounts-table-v2 .col-gcash { width: 90px; }
+    .accounts-table-v2 .col-gcash { width: 140px; }
+    .qualification-badges-v2 { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
     .accounts-table-v2 .col-mail { width: 130px; }
     .accounts-table-v2 .col-trial { width: 130px; }
     .accounts-table-v2 .col-small { width: 72px; }
@@ -730,7 +731,7 @@
     #accountsPanelV2 .accounts-table-v2 .col-token { width: 190px; }
     #accountsPanelV2 .accounts-table-v2 .col-plan { width: 220px; }
     #accountsPanelV2 .accounts-table-v2 .col-checkout { width: 145px; }
-    #accountsPanelV2 .accounts-table-v2 .col-gcash { width: 105px; }
+    #accountsPanelV2 .accounts-table-v2 .col-gcash { width: 140px; }
     #accountsPanelV2 .accounts-table-v2 .col-status { width: 105px; }
     #accountsPanelV2 .accounts-table-v2 .col-time { width: 120px; }
     #accountsPanelV2 .accounts-table-v2 .col-sms { width: 145px; }
@@ -1725,6 +1726,7 @@
     #manualAccountAddModal:not(.hidden),
     #atReplaceModal:not(.hidden),
     #atQualificationModal:not(.hidden),
+    #qualificationQueryModal:not(.hidden),
     #proxyApiImportModal:not(.hidden),
     #detectionProxyImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
@@ -2521,7 +2523,7 @@
           <button type="button" class="acc-v2-toggle" id="showDiscountTrialAccountsOnlyV2" aria-pressed="false" title="只显示其他折扣或活动折扣比例暂未返回的 Free 账号">其他优惠</button>
           <button type="button" class="acc-v2-toggle" id="showNoTrialAccountsOnlyV2" aria-pressed="false" title="只显示套餐检测成功且明确没有 Plus 试用活动的 Free 账号">无试用资格</button>
           <button type="button" class="acc-v2-toggle" id="showOaicsAccountsOnlyV2" aria-pressed="false" title="只显示 Checkout 类型已检测为 OAICS 的账号">OAICS</button>
-          <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">GC资格</button>
+          <button type="button" class="acc-v2-toggle" id="showGcashAccountsOnlyV2" aria-pressed="false" title="只显示已查询到 GCash 支付资格的账号">有GCash</button>
           <button type="button" class="acc-v2-toggle" id="showAtInvalidAccountsOnlyV2" aria-pressed="false" title="只显示 AT 已确认失效或检测遇到错误的账号；检测只验证 AT，不查询套餐或 0 元试用，网络错误不会误标成失效">AT失效/错误</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnAtQualificationCheckV2" title="粘贴一个或多个 AT，选择资格并显示每个 AT 对应的邮箱与结果">AT检测大全</button>
           <button type="button" class="acc-v2-toggle" id="atValidityEnabledV2" aria-pressed="true" title="启用或停用 AT 定时有效性检测；修改后点击保存">定时AT检测</button>
@@ -2583,11 +2585,11 @@
           </div>
         </div>
         <div class="acc-v2-btn-group">
-          <span class="acc-v2-btn-group-title">套餐</span>
+          <span class="acc-v2-btn-group-title">套餐 / 资格</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="一次查询当前套餐、是否已开通 Plus，以及 Free 账号是否可试用 Plus">检测套餐/Plus/试用</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedCheckoutKindV2" disabled title="使用下方检测代理创建一次最小 Plus Checkout，只判断返回 oaics 或 cs_live，不执行支付确认">检测 OAICS/CSLIVE</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedGcashV2" disabled title="使用 gc查询代理池 的 PH 出口代理创建一次最小 PH/PHP Checkout，读取是否支持 GCash 支付方式，不执行支付确认">查询GC</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedQualificationsV2" disabled title="选择单独查询 GCash、GoPay，或一次查询当前已有的全部资格">查询资格</button>
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">邮箱检测</span>
@@ -2604,7 +2606,7 @@
           <span class="acc-v2-btn-group-title">停止 / 接码 / Codex</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRetrySelectedCodexV2" disabled title="所选账号重新登录收邮箱 OTP，HeroSMS 自动选择 0.15 上限内的国家和号码，绑定手机后完成 Codex OAuth">一键接码所选账号</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedCpaV2" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载CPA</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" title="全局停止账号页面的所有后台操作：补密码/2FA、查活、查套餐、GC、Checkout、OAICS、AT 和 Codex">全局停止</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" title="全局停止账号页面的所有后台操作：补密码/2FA、查活、查套餐、GCash/GoPay 资格、Checkout、OAICS、AT 和 Codex">全局停止</button>
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">批量</span>
@@ -2631,7 +2633,7 @@
               <th class="col-token">凭据</th>
               <th class="col-plan">套餐</th>
               <th class="col-checkout" title="OpenAI Checkout 返回的会话类型">Checkout类型</th>
-              <th class="col-gcash" title="PH/PHP Checkout 是否返回 GCash 支付方式">GC</th>
+              <th class="col-gcash" title="只显示已经检测为有资格的支付方式">资格</th>
               <th class="col-status">Codex</th>
               <th class="col-time">注册时间</th>
               <th class="col-sms">接码授权</th>
@@ -3155,6 +3157,26 @@
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelProxyApiImport">取消</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitProxyApiImport">导入并保存</button>
+    </div>
+  </div>
+</div>
+<div id="qualificationQueryModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="qualificationQueryTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="qualificationQueryTitle">查询账号资格</h3>
+        <p id="qualificationQueryHelp">选择一个资格单独查询，或查询当前已有的全部资格。账号表只显示检测成功且确实具备的资格。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseQualificationQuery" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="outlook-import-result" id="qualificationQueryResultV2"></div>
+      <div class="acc-v2-btn-group" style="justify-content:flex-start;gap:10px;flex-wrap:wrap;">
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" data-query-qualification="gcash">单独查询 GCash</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" data-query-qualification="gopay">单独查询 GoPay</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" data-query-qualification="all">查询全部已有资格</button>
+      </div>
+      <span class="outlook-import-hint">GCash 创建 PH/PHP Checkout 后读取创建响应；GoPay 创建带活动的 ID/IDR Checkout 并完成一次 Stripe init。两者得到资格结论后都立即停止，不执行 confirm、approve 或后续提链。</span>
     </div>
   </div>
 </div>
@@ -3920,6 +3942,7 @@ function updateModalScrollLock() {
     || !$('#manualAccountAddModal').classList.contains('hidden')
     || !$('#atReplaceModal').classList.contains('hidden')
     || !$('#atQualificationModal').classList.contains('hidden')
+    || !$('#qualificationQueryModal').classList.contains('hidden')
     || !$('#proxyApiImportModal').classList.contains('hidden')
     || !$('#detectionProxyImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
@@ -4739,7 +4762,7 @@ async function loadAccounts() {
 async function pollAccountPlanStatuses() {
   if (planStatusLoading || accountsLoading) return;
   if (document.activeElement?.id?.startsWith('pagerSizeInput-')) return;
-  if (ACCOUNT_CHECKOUT_KIND_FILTER || ACCOUNT_GCASH_FILTER) return;
+  if (ACCOUNT_CHECKOUT_KIND_FILTER || ACCOUNT_GCASH_FILTER) { await loadAccounts(); return; }
   if (ACCOUNT_EMAIL_FILTER.length || ACTIVE_ACCOUNT_GROUP_ID !== 'default') { await loadAccounts(); return; }
   planStatusLoading = true;
   try {
@@ -4776,11 +4799,14 @@ async function pollAccountPlanStatuses() {
         const isOaicsExtracting = ['queued', 'running'].includes(item.oaics_extract_status);
         const wasGcashChecking = ['queued', 'running'].includes(account?.gcash_status);
         const isGcashChecking = ['queued', 'running'].includes(item.gcash_status);
+        const wasGopayChecking = ['queued', 'running'].includes(account?.gopay_status);
+        const isGopayChecking = ['queued', 'running'].includes(item.gopay_status);
         if ((wasChecking && !isChecking) || planCompletedChanged) needsFullReload = true;
         if (wasKindChecking && !isKindChecking) needsFullReload = true;
         if (wasAgenting && !isAgenting) needsFullReload = true;
         if (wasOaicsExtracting && !isOaicsExtracting) needsFullReload = true;
         if (wasGcashChecking && !isGcashChecking) needsFullReload = true;
+        if (wasGopayChecking && !isGopayChecking) needsFullReload = true;
         Object.assign(account, item);
       });
       planStatusRevision = snapshot.revision || '';
@@ -4914,44 +4940,20 @@ function _trialOfferView(r) {
     ['discount','trial'].includes(kind) ? 'discount' : 'none';
   return {kind, label, percentage, duration, meta, tone};
 }
-function _gcashBadge(r) {
-  const status = String(r.gcash_status || '').toLowerCase();
-  if (status === 'queued') return '<span class="pill status-running" title="已排队；通过 PH 代理创建 Checkout 只读 GCash，不会 confirm">待检测</span>';
-  if (status === 'running') return '<span class="pill status-running" title="正在通过 PH 代理创建 Checkout 读取 GCash 支付方式；不会 confirm">检测中</span>';
-  // 没查询过就不显示“无GC”，保持“未检测”，方便区分哪些账号还没查。
-  if (status !== 'success' && status !== 'failed') {
-    return '<span class="pill status-muted" title="尚未检测 GCash 资格；选中后点击上方“查询GC”">未检测</span>';
-  }
+function _qualificationBadges(r) {
+  const badges = [];
   if (r.gcash_eligible === true) {
-    const title = [
-      r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '',
-      r.gcash_payment_method_id ? `payment_method: ${r.gcash_payment_method_id}` : '',
-      `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-      '只读取 PH/PHP Checkout 创建响应中的 GCash 资格；未识别 OAICS 类型，未执行 confirm',
-    ].filter(Boolean).join('；');
-    return `<span class="pill status-available" title="${esc(title)}">有GC</span>`;
+    const title = [r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '', 'PH/PHP Checkout 已发布 GCash'].filter(Boolean).join('；');
+    badges.push(`<span class="pill status-available" title="${esc(title)}">GCash</span>`);
   }
-  // 探测失败（风控/代理/网络）绝不归为“无GC”，要明确显示原因。
-  if (status === 'failed') {
-    const retried = r.gcash_attempt_count > 1 ? `已尝试 ${r.gcash_attempt_count} 个代理；` : '';
-    const title = [
-      `检测: ${r.gcash_checked_at || ''}`,
-      `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-      retried + (r.gcash_error || 'GCash 检测失败'),
-      '未执行 confirm',
-    ].filter(Boolean).join('；');
-    return `<span class="pill status-failed" title="${esc(title)}">${r.gcash_attempt_count > 1 ? `失败(${r.gcash_attempt_count}代理)` : '失败'}</span>`;
+  if (r.gopay_eligible === true) {
+    const title = [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；');
+    badges.push(`<span class="pill status-success" title="${esc(title)}">GoPay</span>`);
   }
-  // 只有完成完整成功探测仍未发现 cpmt_ 才算“无GC”。
-  const typeTag = String(r.checkout_kind || '').toLowerCase() === 'oaics' ? 'OAICS·' : '';
-  const title = [
-    `检测: ${r.gcash_checked_at || ''}`,
-    `类型: ${esc(r.checkout_kind || '未知')}`,
-    `地区: ${esc(r.gcash_checkout_country || 'PH')}/${esc(r.gcash_checkout_currency || 'PHP')}`,
-    '完整探测未发现 cpmt_ GCash 支付方式',
-    '未执行 confirm',
-  ].filter(Boolean).join('；');
-  return `<span class="pill status-used" title="${esc(title)}">${typeTag}无GC</span>`;
+  const checking = ['queued','running'].includes(String(r.gcash_status || '').toLowerCase())
+    || ['queued','running'].includes(String(r.gopay_status || '').toLowerCase());
+  if (checking) badges.push('<span class="pill status-running" title="正在查询所选资格">查询中</span>');
+  return badges.length ? `<div class="qualification-badges-v2">${badges.join(' ')}</div>` : '<span class="acc-v2-muted">-</span>';
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();
@@ -5325,7 +5327,7 @@ function renderAccounts() {
       <td class="col-token">${_tokenCellV2(r)}</td>
       <td class="col-plan">${_planAndMailCell(r)}</td>
       <td class="col-checkout">${_checkoutKindBadge(r)}</td>
-      <td class="col-gcash">${_gcashBadge(r)}</td>
+      <td class="col-gcash">${_qualificationBadges(r)}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
       <td class="col-time">${_accountCreatedCell(r)}</td>
       <td class="col-sms">${_smsOauthAction(r)}</td>
@@ -5413,7 +5415,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const archiveLabel = SHOW_ARCHIVED_ACCOUNTS ? '恢复选中' : '归档选中';
   const archiveTitle = SHOW_ARCHIVED_ACCOUNTS ? '把选中的归档账号恢复到默认账号列表' : '归档选中的账号；默认账号列表将不再查询/显示这些账号';
   const v2Ids = [
-    'btnCheckSelectedPlansV2', 'btnCheckSelectedCheckoutKindV2', 'btnCheckSelectedGcashV2', 'btnCheckSelectedAccountMailV2',
+    'btnCheckSelectedPlansV2', 'btnCheckSelectedCheckoutKindV2', 'btnCheckSelectedQualificationsV2', 'btnCheckSelectedAccountMailV2',
    'btnExtractSelectedOaicsV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2',
@@ -6639,32 +6641,78 @@ async function checkSelectedCheckoutKinds() {
   }
 }
 
-async function checkSelectedGcash() {
+function openQualificationQueryModal() {
   const ids = Array.from(ACCOUNT_SELECTED);
-  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  const modal = $('#qualificationQueryModal');
+  const help = $('#qualificationQueryHelp');
+  const result = $('#qualificationQueryResultV2');
+  if (help) help.textContent = `已选择 ${ids.length} 个账号。可单独查询一种资格，或一次查询当前已有的 GCash 与 GoPay。`;
+  if (result) result.innerHTML = '';
+  modal?.classList.remove('hidden');
+  updateModalScrollLock();
+}
+function closeQualificationQueryModal() {
+  $('#qualificationQueryModal')?.classList.add('hidden');
+  updateModalScrollLock();
+}
+function qualificationQueueSummary(label, payload) {
+  const skipped = Number(payload.skipped_count || 0) + Number(payload.busy_count || 0) + Number(payload.failed_count || 0);
+  const firstProblem = String(payload.failed?.[0]?.error || payload.skipped?.[0]?.reason || payload.busy?.[0]?.error || '').trim();
+  return `${label} 入队 ${payload.started_count || 0}${skipped ? `，跳过/忙碌/失败 ${skipped}` : ''}${firstProblem ? `（${firstProblem}）` : ''}`;
+}
+async function checkSelectedQualification(kind) {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (!ids.length) { closeQualificationQueryModal(); showToast('请先选择账号'); return; }
   const workers = Math.min(ids.length, 8);
-  if (!confirm(`确定查询选中的 ${ids.length} 个账号的 GCash 资格吗？\n\n每个账号通过 gc查询代理池 随机挑一条 PH 出口代理，只创建一次 PH/PHP Checkout 并直接读取返回的 GCash 支付方式；不识别 OAICS 类型，不轮询 Checkout，不提交税区，不创建 PaymentMethod，不生成 ctoken，也不会 confirm。\n\n并发线程数：${workers}`)) return;
-  const btn = $('#btnCheckSelectedGcashV2');
-  if (!btn) return;
-  const old = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'GC查询中…';
+  const requested = kind === 'all' ? ['gcash', 'gopay'] : [kind];
+  const endpoints = {
+    gcash: ['/api/accounts/check-gcash-bulk', 'GCash'],
+    gopay: ['/api/accounts/check-gopay-bulk', 'GoPay'],
+  };
+  const buttons = Array.from(document.querySelectorAll('#qualificationQueryModal [data-query-qualification]'));
+  buttons.forEach(button => { button.disabled = true; });
+  const result = $('#qualificationQueryResultV2');
+  if (result) result.textContent = `正在提交 ${requested.map(value => endpoints[value][1]).join('、')} 查询…`;
   try {
-    const r = await api('/api/accounts/check-gcash-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, workers}),
+    const outcomes = await Promise.allSettled(requested.map(async value => {
+      const [endpoint, label] = endpoints[value];
+      const payload = await api(endpoint, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({account_ids:ids, workers}),
+      });
+      return {value, label, payload};
+    }));
+    const messages = [];
+    outcomes.forEach((outcome, index) => {
+      if (outcome.status === 'fulfilled') messages.push(qualificationQueueSummary(outcome.value.label, outcome.value.payload));
+      else messages.push(`${endpoints[requested[index]][1]} 提交失败：${outcome.reason?.message || outcome.reason}`);
     });
-    const skipped = (r.skipped_count || 0) + (r.busy_count || 0) + (r.failed_count || 0);
-    const firstProblem = (r.failed?.[0]?.error || r.skipped?.[0]?.reason || r.busy?.[0]?.error || '').trim();
-    showToast(`已入队 ${r.started_count || 0} 个 GCash 检测${skipped ? `，跳过/忙碌/失败 ${skipped} 个` : ''}${firstProblem ? `：${firstProblem}` : ''}；不会执行 confirm`);
+    if (result) result.innerHTML = messages.map(message => `<div>${esc(message)}</div>`).join('');
+    showToast(messages.join('；'));
     await pollAccountPlanStatuses();
-  } catch(err) {
-    showToast('GCash 检测失败: ' + err.message);
+    setTimeout(closeQualificationQueryModal, 900);
   } finally {
-    btn.textContent = old;
+    buttons.forEach(button => { button.disabled = false; });
     updateAccountSelectionUi();
   }
+}
+function bindQualificationQueryModal() {
+  const modal = $('#qualificationQueryModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  $('#btnCloseQualificationQuery')?.addEventListener('click', closeQualificationQueryModal);
+  modal.querySelectorAll('[data-query-qualification]').forEach(button => button.addEventListener('click', () => {
+    checkSelectedQualification(button.dataset.queryQualification).catch(error => {
+      const result = $('#qualificationQueryResultV2');
+      if (result) result.innerHTML = `<span style="color:var(--red);">查询提交失败：${esc(error.message)}</span>`;
+      showToast('资格查询提交失败: ' + error.message);
+    });
+  }));
+  modal.addEventListener('click', event => { if (event.target === modal) closeQualificationQueryModal(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeQualificationQueryModal();
+  });
 }
 
 async function extractSelectedOaics() {
@@ -7021,7 +7069,8 @@ async function findSelectedAccountsInEmailPool() {
   });
   bind('btnCheckSelectedPlansV2', checkSelectedPlans);
   bind('btnCheckSelectedCheckoutKindV2', checkSelectedCheckoutKinds);
-  bind('btnCheckSelectedGcashV2', checkSelectedGcash);
+  bind('btnCheckSelectedQualificationsV2', openQualificationQueryModal);
+  bindQualificationQueryModal();
   bind('btnExtractSelectedOaicsV2', extractSelectedOaics);
   bind('btnCopyAllOaicsLinksV2', copyAllOaicsLinks);
   bind('btnCheckSelectedAccountMailV2', e => checkAccountMailboxes({all:false}, e.currentTarget));
@@ -8466,7 +8515,7 @@ function bindProxyApiImportModalV2() {
 
 let DETECTION_PROXY_IMPORT_PURPOSE_V2 = 'plan';
 function openDetectionProxyImportModalV2(purpose) {
-  DETECTION_PROXY_IMPORT_PURPOSE_V2 = purpose === 'checkout' ? 'checkout' : (purpose === 'at' ? 'at' : 'plan');
+  DETECTION_PROXY_IMPORT_PURPOSE_V2 = purpose === 'qualification' ? 'qualification' : (purpose === 'checkout' ? 'checkout' : (purpose === 'at' ? 'at' : 'plan'));
   const modal = $('#detectionProxyImportModal');
   const textarea = $('#detectionProxyImportTextV2');
   const result = $('#detectionProxyImportResultV2');
@@ -8475,8 +8524,11 @@ function openDetectionProxyImportModalV2(purpose) {
   if (!modal || !textarea) return;
   const isCheckout = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'checkout';
   const isAt = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'at';
-  if (title) title.textContent = isCheckout ? '加入 Checkout 检测代理池' : (isAt ? '加入 AT 有效性检测专属代理池' : '加入套餐检测代理池');
-  if (help) help.textContent = isCheckout
+  const isQualification = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'qualification';
+  if (title) title.textContent = isQualification ? '加入支付资格检测代理池' : (isCheckout ? '加入 Checkout 检测代理池' : (isAt ? '加入 AT 有效性检测专属代理池' : '加入套餐检测代理池'));
+  if (help) help.textContent = isQualification
+    ? '读取 region-XX 或检测真实出口并按国家归类；GCash 使用 PH，GoPay 使用 ID，后续资格类型继续扩展此池。'
+    : isCheckout
     ? '读取每条代理用户名中的 region-XX，并归入 Checkout 独立池，不会加入套餐检测池。'
     : (isAt
       ? '读取每条代理用户名中的 region-XX，并归入 AT 有效性检测专属池，不会加入套餐或 Checkout 检测池。'
@@ -8524,9 +8576,10 @@ async function submitDetectionProxyImportV2() {
 
 async function saveDetectionProxyCountryV2(select) {
   const requestedPurpose = select.dataset.detectionCountrySelect;
-  const purpose = requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan');
-  const activeKey = purpose === 'checkout' ? 'CHECKOUT_CHECK_PROXY_ACTIVE'
-    : (purpose === 'at' ? 'AT_VALIDITY_PROXY_ACTIVE' : 'PLAN_CHECK_PROXY_ACTIVE');
+  const purpose = requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan'));
+  const activeKey = purpose === 'qualification' ? 'QUALIFICATION_CHECK_PROXY_ACTIVE'
+    : (purpose === 'checkout' ? 'CHECKOUT_CHECK_PROXY_ACTIVE'
+      : (purpose === 'at' ? 'AT_VALIDITY_PROXY_ACTIVE' : 'PLAN_CHECK_PROXY_ACTIVE'));
   const status = document.querySelector(`[data-detection-proxy-status="${purpose}"]`);
   const country = String(select.value || '').toUpperCase();
   if (!country) return;
@@ -8582,13 +8635,13 @@ function bindDetectionProxyPoolToolsV2() {
 
 async function deleteDetectionProxyCountryV2(button) {
   const requestedPurpose = button.dataset.deleteDetectionProxyCountry;
-  const purpose = requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan');
+  const purpose = requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan'));
   const select = document.querySelector(`[data-detection-country-select="${purpose}"]`);
   const country = String(select?.value || '').trim().toUpperCase();
   if (!country) { showToast('当前没有可删除的国家代理池'); return; }
   const option = select?.selectedOptions?.[0];
   const label = option?.textContent || proxyRegionLabelV2(country);
-  const scope = purpose === 'plan' ? '套餐' : (purpose === 'at' ? 'AT 有效性' : 'Checkout');
+  const scope = purpose === 'qualification' ? '支付资格' : (purpose === 'plan' ? '套餐' : (purpose === 'at' ? 'AT 有效性' : 'Checkout'));
   if (!confirm(`确定删除 ${label} 的全部代理吗？\n\n只删除 ${scope} 检测池中的 ${country} 分组，不影响其他代理池。`)) return;
   button.disabled = true;
   try {
@@ -8794,6 +8847,7 @@ function renderConfigPlainFieldV2(f) {
     PLAN_CHECK_PROXY_ACTIVE: 'PLAN_CHECK_PROXY_PROFILES',
     AT_VALIDITY_PROXY_ACTIVE: 'AT_VALIDITY_PROXY_PROFILES',
     CHECKOUT_CHECK_PROXY_ACTIVE: 'CHECKOUT_CHECK_PROXY_PROFILES',
+    QUALIFICATION_CHECK_PROXY_ACTIVE: 'QUALIFICATION_CHECK_PROXY_PROFILES',
   };
   if (detectionProfileMap[f.key]) {
     const profiles = detectionProxyProfileOptionsV2(detectionProfileMap[f.key]);
@@ -8880,7 +8934,8 @@ function detectionProxyProfileOptionsV2(profileKey) {
 }
 function refreshDetectionProxySelectV2(profileKey) {
   const activeKey = profileKey === 'PLAN_CHECK_PROXY_PROFILES' ? 'PLAN_CHECK_PROXY_ACTIVE'
-    : (profileKey === 'AT_VALIDITY_PROXY_PROFILES' ? 'AT_VALIDITY_PROXY_ACTIVE' : 'CHECKOUT_CHECK_PROXY_ACTIVE');
+    : (profileKey === 'AT_VALIDITY_PROXY_PROFILES' ? 'AT_VALIDITY_PROXY_ACTIVE'
+      : (profileKey === 'QUALIFICATION_CHECK_PROXY_PROFILES' ? 'QUALIFICATION_CHECK_PROXY_ACTIVE' : 'CHECKOUT_CHECK_PROXY_ACTIVE'));
   const select = document.querySelector(`#configSectionsV2 [data-key="${activeKey}"]`);
   if (!select) return;
   const profiles = detectionProxyProfileOptionsV2(profileKey);
@@ -8905,7 +8960,7 @@ function renderDetectionProxyCountryControlV2(profileField, activeField, purpose
     <div class="detection-proxy-controls-v2">
       <label class="fld">
         选择国家
-        <span class="hint">新任务会从所选国家的静态代理池随机洗牌取用</span>
+        <span class="hint">${purpose === 'qualification' ? '此选择只用于管理国家池；GCash 固定取 PH，GoPay 固定取 ID' : '新任务会从所选国家的静态代理池随机洗牌取用'}</span>
         <select data-key="${attrEsc(activeField.key)}" data-detection-country-select="${attrEsc(purpose)}">
           ${profiles.length
             ? profiles.map(item => `<option value="${attrEsc(item.key)}"${item.key === active ? ' selected' : ''}>${esc(item.label)}</option>`).join('')
@@ -8929,8 +8984,9 @@ function renderDetectionProxyPanelV2(fields) {
   const atActive = byKey.AT_VALIDITY_PROXY_ACTIVE;
   const checkoutProfiles = byKey.CHECKOUT_CHECK_PROXY_PROFILES;
   const checkoutActive = byKey.CHECKOUT_CHECK_PROXY_ACTIVE;
-  const gcProfiles = byKey.GC_CHECK_PROXY_PROFILES;
-  if (!gcProfiles) return '';
+  const qualificationProfiles = byKey.QUALIFICATION_CHECK_PROXY_PROFILES;
+  const qualificationActive = byKey.QUALIFICATION_CHECK_PROXY_ACTIVE;
+  if (!qualificationProfiles || !qualificationActive) return '';
   const checkoutCard = (checkoutProfiles && checkoutActive) ? `
     <section class="detection-proxy-card-v2" aria-label="Checkout 检测代理">
       <h4>Checkout 检测代理</h4>
@@ -8955,17 +9011,18 @@ function renderDetectionProxyPanelV2(fields) {
   return `
     <div class="detection-proxy-panel-v2">
       <div class="detection-proxy-panel-v2-head">
-        <div><b>检测代理（套餐、AT 与 Checkout 三套独立池）</b></div>
+        <div><b>检测代理（套餐、AT、Checkout 与支付资格四套独立池）</b></div>
         <span>加入静态代理后自动识别国家；选择国家即可使用该国家代理池</span>
       </div>
       <div class="detection-proxy-grid-v2">
         ${planCard}
         ${atCard}
         ${checkoutCard}
-        <section class="detection-proxy-card-v2" aria-label="GCash 检测代理">
-          <h4>GCash 检测代理</h4>
-          <p>只用于账号页“查询GC”，需 PH 出口代理；每行一个，按钮按行轮询调用。</p>
-          ${renderConfigPlainFieldV2(gcProfiles)}
+        <section class="detection-proxy-card-v2" aria-label="支付资格检测代理">
+          <h4>支付资格检测代理</h4>
+          <p>GCash 固定使用 PH 国家池，GoPay 固定使用 ID 国家池；以后新增的资格方式继续在这里按国家扩展。</p>
+          ${renderDetectionProxyCountryControlV2(qualificationProfiles, qualificationActive, 'qualification')}
+          ${byKey.GC_CHECK_PROXY_PROFILES ? `<details><summary>旧 GCash PH 代理池（兼容）</summary><p>新 PH 池为空时继续使用这里的旧配置，不影响 GoPay 的 ID 池。</p>${renderConfigPlainFieldV2(byKey.GC_CHECK_PROXY_PROFILES)}</details>` : ''}
         </section>
       </div>
     </div>
@@ -8979,6 +9036,7 @@ function renderMixedConfigSectionV2(name, fields, intro) {
     'PLAN_CHECK_PROXY_PROFILES', 'PLAN_CHECK_PROXY_ACTIVE',
     'AT_VALIDITY_PROXY_PROFILES', 'AT_VALIDITY_PROXY_ACTIVE',
     'CHECKOUT_CHECK_PROXY_PROFILES', 'CHECKOUT_CHECK_PROXY_ACTIVE',
+    'QUALIFICATION_CHECK_PROXY_PROFILES', 'QUALIFICATION_CHECK_PROXY_ACTIVE', 'GC_CHECK_PROXY_PROFILES',
   ]);
   const inputs = fields.filter(f => f.type !== 'bool' && !(name === '代理池' && proxyInternalFields.has(f.key)));
   const extra = name === 'RoxyBrowser' ? renderRoxyWorkspaceToolsV2() : (name === '代理池' ? renderProxyApiToolsV2() : '');
@@ -9592,7 +9650,7 @@ function trackConfigFieldChange(e) {
   if (!f) return;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
   if (f.key === 'PROXY_POOL') updateProxyPoolEditorMetaV2(el);
-  if (['PLAN_CHECK_PROXY_PROFILES', 'AT_VALIDITY_PROXY_PROFILES', 'CHECKOUT_CHECK_PROXY_PROFILES'].includes(f.key)) {
+  if (['PLAN_CHECK_PROXY_PROFILES', 'AT_VALIDITY_PROXY_PROFILES', 'CHECKOUT_CHECK_PROXY_PROFILES', 'QUALIFICATION_CHECK_PROXY_PROFILES'].includes(f.key)) {
     refreshDetectionProxySelectV2(f.key);
     return;
   }

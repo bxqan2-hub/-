@@ -3341,7 +3341,7 @@ def health():
     return jsonify({
         "ok": True,
         "service": "pay153",
-        "capabilities": ["checkout_kind_v1"],
+        "capabilities": ["checkout_kind_v1", "gopay_qualification_v1"],
         "time": int(time.time()),
     })
 
@@ -3432,6 +3432,136 @@ def detect_gcash(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         }, 502
 
 
+def _gopay_payment_method_available(methods: Any) -> bool:
+    """Return whether Stripe published GoPay for the ID/IDR Checkout."""
+    if not isinstance(methods, list):
+        return False
+    for method in methods:
+        if isinstance(method, str):
+            value = method.strip().lower()
+            if value in {"gopay", "go_pay"} or "gopay" in value.replace("_", ""):
+                return True
+            continue
+        if isinstance(method, dict):
+            raw = " ".join(
+                str(method.get(key) or "")
+                for key in ("type", "name", "display_name", "payment_method_type", "provider", "id")
+            ).lower()
+            if "gopay" in raw.replace("_", ""):
+                return True
+    return False
+
+
+def detect_gopay(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
+    """Create one zero-due ID/IDR Checkout and read GoPay eligibility only.
+
+    This follows the public link-gp qualification boundary: create the
+    Indonesia Checkout with the Plus promotion, initialize Stripe once, then
+    stop after checking amount/currency/payment methods.  It deliberately does
+    not create an Elements session, update taxes, attach a PaymentMethod,
+    confirm, approve, or poll the Checkout.
+    """
+    data = data if isinstance(data, dict) else {}
+    token_raw = str(data.get("token") or "").strip()
+    if not token_raw:
+        return {"ok": False, "gopay": False, "error": "缺少 AT/access_token"}, 400
+    try:
+        token, meta = extract_access_token(token_raw)
+    except Exception as exc:
+        return {"ok": False, "gopay": False, "error": f"AT 解析失败：{exc}"}, 400
+    proxy = str(data.get("proxy") or "").strip()
+    proxy_source = "request" if proxy else "direct"
+    if proxy:
+        try:
+            proxy = normalize_proxy(proxy)
+        except ValueError as exc:
+            return {"ok": False, "gopay": False, "error": f"代理格式错误：{exc}"}, 400
+    device_id = str(uuid.uuid4())
+    did = str(uuid.uuid4())
+    options = {
+        "plan": "plus",
+        "link_type": "detection",
+        "country": "ID",
+        "currency": "IDR",
+        "checkout_country": "ID",
+        "checkout_currency": "IDR",
+        "use_promo": True,
+        "promo_campaign": "plus-1-month-free",
+    }
+    try:
+        created = create_checkout(
+            token,
+            checkout_payload(options, meta),
+            proxy,
+            device_id,
+            did,
+            lambda _message: None,
+            use_sen=True,
+            use_so=True,
+        )
+        checkout = dict(created.get("data") or {})
+        http = created.get("http")
+        session_id = str(checkout.get("checkout_session_id") or "")
+        if not re.fullmatch(r"cs_(?:live|test)_[A-Za-z0-9]+", session_id):
+            return {
+                "ok": True,
+                "gopay": False,
+                "detection_outcome": "unsupported_custom_checkout",
+                "checkout_created": bool(session_id or checkout.get("checkout_url") or checkout.get("url")),
+                "confirm_sent": False,
+                "proxy_source": proxy_source,
+                "checkout_country": "ID",
+                "checkout_currency": "IDR",
+                "checked_at": int(time.time()),
+                "error": "ID/IDR Checkout 未返回可用于 GoPay 资格判断的 Stripe cs_* 会话",
+            }, 200
+        stripe_pk = str(
+            checkout.get("stripe_publishable_key")
+            or checkout.get("publishable_key")
+            or checkout.get("publishableKey")
+            or checkout.get("key")
+            or ""
+        ).strip()
+        profile = dict(getattr(sc, "LOCALE_PROFILES", {}).get("ID") or {})
+        profile.setdefault("browser_locale", "id-ID")
+        profile.setdefault("browser_timezone", "Asia/Jakarta")
+        profile.setdefault("browser_language", "id-ID")
+        if not stripe_pk:
+            stripe_pk = sc.verify_pk(http, session_id, lambda _message: None)
+        init_data, _version, ctx = sc.init_checkout(
+            http, session_id, stripe_pk, profile, lambda _message: None,
+        )
+        amount = ctx.get("checkout_amount")
+        currency = str(ctx.get("currency") or init_data.get("currency") or "").lower()
+        methods = list(ctx.get("payment_method_types") or sc._extract_payment_method_types(init_data))
+        gopay = amount in (0, "0", "0.0", "0.00") and currency == "idr" and _gopay_payment_method_available(methods)
+        return {
+            "ok": True,
+            "gopay": gopay,
+            "detection_outcome": "qualified" if gopay else "no_gopay_in_stripe_init",
+            "payment_method_types": methods,
+            "checkout_created": True,
+            "confirm_sent": False,
+            "proxy_source": proxy_source,
+            "checkout_country": "ID",
+            "checkout_currency": currency.upper() or "IDR",
+            "checkout_amount": amount,
+            "checked_at": int(time.time()),
+            "error": None if gopay else f"ID/IDR Stripe Checkout 未发布 GoPay（amount={amount}, currency={currency or 'missing'}）",
+        }, 200
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}: {str(exc)[:500]}"
+        upstream_status = re.search(r"OpenAI Checkout HTTP\s+(\d{3})", error_text)
+        return {
+            "ok": False,
+            "gopay": False,
+            "confirm_sent": False,
+            "promo_update_sent": False,
+            "upstream_http_status": int(upstream_status.group(1)) if upstream_status else None,
+            "error": error_text,
+        }, 502
+
+
 def detect_checkout_kind(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
     """Create the smallest DE/EUR Plus Checkout and classify its backend."""
     data = data if isinstance(data, dict) else {}
@@ -3514,6 +3644,13 @@ def checkout_kind():
 def gcash():
     """HTTP compatibility wrapper for the in-process GCash eligibility detector."""
     payload, status = detect_gcash(request.get_json(silent=True) or {})
+    return jsonify(payload), status
+
+
+@app.post("/api/gopay")
+def gopay():
+    """HTTP compatibility wrapper for the GoPay qualification detector."""
+    payload, status = detect_gopay(request.get_json(silent=True) or {})
     return jsonify(payload), status
 
 

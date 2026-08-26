@@ -1652,6 +1652,94 @@ def recover_interrupted_gcash_checks() -> int:
         return recovered
 
 
+def claim_account_gopay(acc_id: int, trigger: str = "manual") -> bool:
+    """Atomically reserve a non-confirming GoPay qualification task."""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("gopay_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "gopay_queued_at" if current_status == "queued" else "gopay_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row.update({
+            "gopay_status": "queued", "gopay_ok": False, "gopay_eligible": False,
+            "gopay_trigger": str(trigger or "manual"), "gopay_error": None,
+            "gopay_queued_at": now, "gopay_started_at": None, "gopay_completed_at": None,
+            "updated_at": now,
+        })
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_gopay_running(acc_id: int) -> bool:
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("gopay_status") not in {"queued", "running"}:
+            return False
+        row["gopay_status"] = "running"
+        row["gopay_started_at"] = _now()
+        row["gopay_error"] = None
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def update_account_gopay(acc_id: int, result: dict | None = None) -> bool:
+    """Persist GoPay eligibility metadata without tokens or Checkout URLs."""
+    result = result or {}
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        eligible = bool(result.get("gopay"))
+        ok = bool(result.get("ok")) or eligible
+        row["gopay_status"] = "success" if ok else "failed"
+        row["gopay_ok"] = ok
+        row["gopay_eligible"] = eligible
+        row["gopay_checkout_country"] = str(result.get("checkout_country") or "ID")[:8]
+        row["gopay_checkout_currency"] = str(result.get("checkout_currency") or "IDR")[:8]
+        row["gopay_checkout_amount"] = result.get("checkout_amount")
+        row["gopay_checked_at"] = result.get("checked_at") or _now()
+        row["gopay_completed_at"] = _now()
+        row["gopay_error"] = None if ok else str(result.get("error") or "GoPay 检测失败")[:500]
+        row["gopay_attempt_count"] = int(result.get("attempt_count") or 1)
+        row["gopay_retried_proxies"] = result.get("retried_proxies")
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_gopay_checks() -> int:
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("gopay_status") not in {"queued", "running"}:
+                continue
+            row["gopay_status"] = "failed"
+            row["gopay_ok"] = False
+            row["gopay_eligible"] = False
+            row["gopay_error"] = "WebUI 重启导致 GoPay 检测中断，请重新检测"
+            row["gopay_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
 def stop_account_page_operations(reason: str = "账号页操作已停止") -> dict:
     """把账号页后台队列中尚未完成的项目标记为停止。
 
@@ -1663,6 +1751,7 @@ def stop_account_page_operations(reason: str = "账号页操作已停止") -> di
         ("plan_check_status", "plan_check_error", "plan_check_completed_at", "failed"),
         ("checkout_kind_status", "checkout_kind_error", "checkout_kind_completed_at", "failed"),
         ("gcash_status", "gcash_error", "gcash_completed_at", "failed"),
+        ("gopay_status", "gopay_error", "gopay_completed_at", "failed"),
         ("oaics_extract_status", "oaics_extract_error", "oaics_extract_completed_at", "failed"),
         ("live_check_status", "live_check_error", "live_checked_at", "failed"),
         ("codex_agent_status", "codex_agent_error", "codex_agent_completed_at", "failed"),
@@ -1685,6 +1774,9 @@ def stop_account_page_operations(reason: str = "账号页操作已停止") -> di
                 elif status_key == "gcash_status":
                     row["gcash_ok"] = False
                     row["gcash_eligible"] = False
+                elif status_key == "gopay_status":
+                    row["gopay_ok"] = False
+                    row["gopay_eligible"] = False
                 elif status_key == "oaics_extract_status":
                     row["oaics_extract_ok"] = False
                     row["oaics_extract_stage"] = "账号页操作已停止"
@@ -2116,6 +2208,9 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "gcash_status", "gcash_ok", "gcash_eligible",
         "gcash_payment_method_id", "gcash_checkout_country", "gcash_checkout_currency",
         "gcash_checked_at", "gcash_error", "gcash_completed_at",
+        "gopay_status", "gopay_ok", "gopay_eligible",
+        "gopay_checkout_country", "gopay_checkout_currency", "gopay_checkout_amount",
+        "gopay_checked_at", "gopay_error", "gopay_completed_at", "gopay_attempt_count",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error",
@@ -2189,6 +2284,9 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     "gcash_status": row.get("gcash_status"),
                     "gcash_ok": row.get("gcash_ok"),
                     "gcash_eligible": row.get("gcash_eligible"),
+                    "gopay_status": row.get("gopay_status"),
+                    "gopay_ok": row.get("gopay_ok"),
+                    "gopay_eligible": row.get("gopay_eligible"),
                     "oaics_extract_status": row.get("oaics_extract_status"),
                     "oaics_extract_ok": row.get("oaics_extract_ok"),
                     "oaics_extract_error": row.get("oaics_extract_error"),
