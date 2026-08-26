@@ -699,6 +699,10 @@
     .accounts-table-v2 .col-checkout { width: 125px; }
     .accounts-table-v2 .col-gcash { width: 140px; }
     .qualification-badges-v2 { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+    .qualification-proxy-card-v2 { grid-column: 1 / -1; }
+    .qualification-proxy-entry-v2 { padding: 10px 0; border-top: 1px solid #ebeef5; }
+    .qualification-proxy-entry-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .qualification-proxy-entry-v2 .fld { margin-bottom: 8px; }
     .accounts-table-v2 .col-mail { width: 130px; }
     .accounts-table-v2 .col-trial { width: 130px; }
     .accounts-table-v2 .col-small { width: 72px; }
@@ -8515,7 +8519,7 @@ function bindProxyApiImportModalV2() {
 
 let DETECTION_PROXY_IMPORT_PURPOSE_V2 = 'plan';
 function openDetectionProxyImportModalV2(purpose) {
-  DETECTION_PROXY_IMPORT_PURPOSE_V2 = purpose === 'qualification' ? 'qualification' : (purpose === 'checkout' ? 'checkout' : (purpose === 'at' ? 'at' : 'plan'));
+  DETECTION_PROXY_IMPORT_PURPOSE_V2 = ['gcash','gopay'].includes(purpose) ? purpose : (purpose === 'qualification' ? 'qualification' : (purpose === 'checkout' ? 'checkout' : (purpose === 'at' ? 'at' : 'plan')));
   const modal = $('#detectionProxyImportModal');
   const textarea = $('#detectionProxyImportTextV2');
   const result = $('#detectionProxyImportResultV2');
@@ -8524,15 +8528,17 @@ function openDetectionProxyImportModalV2(purpose) {
   if (!modal || !textarea) return;
   const isCheckout = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'checkout';
   const isAt = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'at';
-  const isQualification = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'qualification';
-  if (title) title.textContent = isQualification ? '加入支付资格检测代理池' : (isCheckout ? '加入 Checkout 检测代理池' : (isAt ? '加入 AT 有效性检测专属代理池' : '加入套餐检测代理池'));
-  if (help) help.textContent = isQualification
-    ? '读取 region-XX 或检测真实出口并按国家归类；GCash 使用 PH，GoPay 使用 ID，后续资格类型继续扩展此池。'
-    : isCheckout
-    ? '读取每条代理用户名中的 region-XX，并归入 Checkout 独立池，不会加入套餐检测池。'
-    : (isAt
-      ? '读取每条代理用户名中的 region-XX，并归入 AT 有效性检测专属池，不会加入套餐或 Checkout 检测池。'
-      : '读取每条代理用户名中的 region-XX，并归入套餐独立池，不会加入 AT 或 Checkout 检测池。');
+  const isQualification = ['gcash','gopay','qualification'].includes(DETECTION_PROXY_IMPORT_PURPOSE_V2);
+  if (title) title.textContent = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gcash' ? '加入 GCash 资格代理池' : (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gopay' ? '加入 GoPay 资格代理池' : (isQualification ? '加入支付资格检测代理池' : (isCheckout ? '加入 Checkout 检测代理池' : (isAt ? '加入 AT 有效性检测专属代理池' : '加入套餐检测代理池'))));
+  if (help) help.textContent = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gcash'
+    ? '只加入 GCash 的 PH（菲律宾）出口代理。'
+    : (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gopay'
+      ? '只加入 GoPay 的 ID（印度尼西亚）出口代理。'
+      : isQualification
+        ? '读取 region-XX 或检测真实出口并按国家归类。'
+        : isCheckout
+          ? '读取每条代理用户名中的 region-XX，并归入 Checkout 独立池。'
+          : (isAt ? '读取每条代理用户名中的 region-XX，并归入 AT 有效性检测专属池。' : '读取每条代理用户名中的 region-XX，并归入套餐独立池。'));
   textarea.value = '';
   if (result) result.textContent = '';
   modal.classList.remove('hidden');
@@ -8576,10 +8582,8 @@ async function submitDetectionProxyImportV2() {
 
 async function saveDetectionProxyCountryV2(select) {
   const requestedPurpose = select.dataset.detectionCountrySelect;
-  const purpose = requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan'));
-  const activeKey = purpose === 'qualification' ? 'QUALIFICATION_CHECK_PROXY_ACTIVE'
-    : (purpose === 'checkout' ? 'CHECKOUT_CHECK_PROXY_ACTIVE'
-      : (purpose === 'at' ? 'AT_VALIDITY_PROXY_ACTIVE' : 'PLAN_CHECK_PROXY_ACTIVE'));
+  const purpose = ['gcash','gopay'].includes(requestedPurpose) ? requestedPurpose : (requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan')));
+  const activeKey = ({gcash:'GCASH_CHECK_PROXY_ACTIVE', gopay:'GOPAY_CHECK_PROXY_ACTIVE', qualification:'QUALIFICATION_CHECK_PROXY_ACTIVE', checkout:'CHECKOUT_CHECK_PROXY_ACTIVE', at:'AT_VALIDITY_PROXY_ACTIVE', plan:'PLAN_CHECK_PROXY_ACTIVE'})[purpose];
   const status = document.querySelector(`[data-detection-proxy-status="${purpose}"]`);
   const country = String(select.value || '').toUpperCase();
   if (!country) return;
@@ -8635,13 +8639,13 @@ function bindDetectionProxyPoolToolsV2() {
 
 async function deleteDetectionProxyCountryV2(button) {
   const requestedPurpose = button.dataset.deleteDetectionProxyCountry;
-  const purpose = requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan'));
+  const purpose = ['gcash','gopay'].includes(requestedPurpose) ? requestedPurpose : (requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan')));
   const select = document.querySelector(`[data-detection-country-select="${purpose}"]`);
   const country = String(select?.value || '').trim().toUpperCase();
   if (!country) { showToast('当前没有可删除的国家代理池'); return; }
   const option = select?.selectedOptions?.[0];
   const label = option?.textContent || proxyRegionLabelV2(country);
-  const scope = purpose === 'qualification' ? '支付资格' : (purpose === 'plan' ? '套餐' : (purpose === 'at' ? 'AT 有效性' : 'Checkout'));
+  const scope = purpose === 'gcash' ? 'GCash 资格' : (purpose === 'gopay' ? 'GoPay 资格' : (purpose === 'qualification' ? '支付资格' : (purpose === 'plan' ? '套餐' : (purpose === 'at' ? 'AT 有效性' : 'Checkout'))));
   if (!confirm(`确定删除 ${label} 的全部代理吗？\n\n只删除 ${scope} 检测池中的 ${country} 分组，不影响其他代理池。`)) return;
   button.disabled = true;
   try {
@@ -8848,6 +8852,8 @@ function renderConfigPlainFieldV2(f) {
     AT_VALIDITY_PROXY_ACTIVE: 'AT_VALIDITY_PROXY_PROFILES',
     CHECKOUT_CHECK_PROXY_ACTIVE: 'CHECKOUT_CHECK_PROXY_PROFILES',
     QUALIFICATION_CHECK_PROXY_ACTIVE: 'QUALIFICATION_CHECK_PROXY_PROFILES',
+    GCASH_CHECK_PROXY_ACTIVE: 'GCASH_CHECK_PROXY_PROFILES',
+    GOPAY_CHECK_PROXY_ACTIVE: 'GOPAY_CHECK_PROXY_PROFILES',
   };
   if (detectionProfileMap[f.key]) {
     const profiles = detectionProxyProfileOptionsV2(detectionProfileMap[f.key]);
@@ -8933,9 +8939,11 @@ function detectionProxyProfileOptionsV2(profileKey) {
   }));
 }
 function refreshDetectionProxySelectV2(profileKey) {
-  const activeKey = profileKey === 'PLAN_CHECK_PROXY_PROFILES' ? 'PLAN_CHECK_PROXY_ACTIVE'
-    : (profileKey === 'AT_VALIDITY_PROXY_PROFILES' ? 'AT_VALIDITY_PROXY_ACTIVE'
-      : (profileKey === 'QUALIFICATION_CHECK_PROXY_PROFILES' ? 'QUALIFICATION_CHECK_PROXY_ACTIVE' : 'CHECKOUT_CHECK_PROXY_ACTIVE'));
+  const activeKey = profileKey === 'GCASH_CHECK_PROXY_PROFILES' ? 'GCASH_CHECK_PROXY_ACTIVE'
+    : (profileKey === 'GOPAY_CHECK_PROXY_PROFILES' ? 'GOPAY_CHECK_PROXY_ACTIVE'
+      : (profileKey === 'PLAN_CHECK_PROXY_PROFILES' ? 'PLAN_CHECK_PROXY_ACTIVE'
+        : (profileKey === 'AT_VALIDITY_PROXY_PROFILES' ? 'AT_VALIDITY_PROXY_ACTIVE'
+          : (profileKey === 'QUALIFICATION_CHECK_PROXY_PROFILES' ? 'QUALIFICATION_CHECK_PROXY_ACTIVE' : 'CHECKOUT_CHECK_PROXY_ACTIVE'))));
   const select = document.querySelector(`#configSectionsV2 [data-key="${activeKey}"]`);
   if (!select) return;
   const profiles = detectionProxyProfileOptionsV2(profileKey);
@@ -8960,7 +8968,7 @@ function renderDetectionProxyCountryControlV2(profileField, activeField, purpose
     <div class="detection-proxy-controls-v2">
       <label class="fld">
         选择国家
-        <span class="hint">${purpose === 'qualification' ? '此选择只用于管理国家池；GCash 固定取 PH，GoPay 固定取 ID' : '新任务会从所选国家的静态代理池随机洗牌取用'}</span>
+        <span class="hint">${purpose === 'gcash' ? '固定国家：PH（菲律宾）' : (purpose === 'gopay' ? '固定国家：ID（印度尼西亚）' : (purpose === 'qualification' ? '此选择只用于管理国家池' : '新任务会从所选国家的静态代理池随机洗牌取用'))}</span>
         <select data-key="${attrEsc(activeField.key)}" data-detection-country-select="${attrEsc(purpose)}">
           ${profiles.length
             ? profiles.map(item => `<option value="${attrEsc(item.key)}"${item.key === active ? ' selected' : ''}>${esc(item.label)}</option>`).join('')
@@ -8984,9 +8992,11 @@ function renderDetectionProxyPanelV2(fields) {
   const atActive = byKey.AT_VALIDITY_PROXY_ACTIVE;
   const checkoutProfiles = byKey.CHECKOUT_CHECK_PROXY_PROFILES;
   const checkoutActive = byKey.CHECKOUT_CHECK_PROXY_ACTIVE;
-  const qualificationProfiles = byKey.QUALIFICATION_CHECK_PROXY_PROFILES;
-  const qualificationActive = byKey.QUALIFICATION_CHECK_PROXY_ACTIVE;
-  if (!qualificationProfiles || !qualificationActive) return '';
+  const gcashProfiles = byKey.GCASH_CHECK_PROXY_PROFILES;
+  const gcashActive = byKey.GCASH_CHECK_PROXY_ACTIVE;
+  const gopayProfiles = byKey.GOPAY_CHECK_PROXY_PROFILES;
+  const gopayActive = byKey.GOPAY_CHECK_PROXY_ACTIVE;
+  const qualificationPoolCount = field => detectionProxyProfileOptionsV2(field.key).reduce((sum, item) => sum + item.count, 0);
   const checkoutCard = (checkoutProfiles && checkoutActive) ? `
     <section class="detection-proxy-card-v2" aria-label="Checkout 检测代理">
       <h4>Checkout 检测代理</h4>
@@ -9018,11 +9028,19 @@ function renderDetectionProxyPanelV2(fields) {
         ${planCard}
         ${atCard}
         ${checkoutCard}
-        <section class="detection-proxy-card-v2" aria-label="支付资格检测代理">
-          <h4>支付资格检测代理</h4>
-          <p>GCash 固定使用 PH 国家池，GoPay 固定使用 ID 国家池；以后新增的资格方式继续在这里按国家扩展。</p>
-          ${renderDetectionProxyCountryControlV2(qualificationProfiles, qualificationActive, 'qualification')}
-          ${byKey.GC_CHECK_PROXY_PROFILES ? `<details><summary>旧 GCash PH 代理池（兼容）</summary><p>新 PH 池为空时继续使用这里的旧配置，不影响 GoPay 的 ID 池。</p>${renderConfigPlainFieldV2(byKey.GC_CHECK_PROXY_PROFILES)}</details>` : ''}
+        <section class="detection-proxy-card-v2 qualification-proxy-card-v2" aria-label="支付资格代理池">
+          <h4>支付资格代理池</h4>
+          <p>每种资格使用独立代理池；当前支持 GCash（PH）和 GoPay（ID）。后续资格继续添加在本卡片内。</p>
+          <div class="qualification-proxy-entry-v2">
+            <div class="qualification-proxy-entry-head"><strong>GCash 资格</strong><span class="pill status-muted">固定国家：PH（菲律宾）</span></div>
+            <div class="detection-proxy-summary-v2">当前已加入 <strong>${qualificationPoolCount(gcashProfiles)}</strong> 条 GCash 专属代理</div>
+            <button type="button" class="btn primary" data-add-detection-proxy="gcash">加入 GCash 代理</button>
+          </div>
+          <div class="qualification-proxy-entry-v2">
+            <div class="qualification-proxy-entry-head"><strong>GoPay 资格</strong><span class="pill status-muted">固定国家：ID（印度尼西亚）</span></div>
+            <div class="detection-proxy-summary-v2">当前已加入 <strong>${qualificationPoolCount(gopayProfiles)}</strong> 条 GoPay 专属代理</div>
+            <button type="button" class="btn primary" data-add-detection-proxy="gopay">加入 GoPay 代理</button>
+          </div>
         </section>
       </div>
     </div>
@@ -9037,6 +9055,8 @@ function renderMixedConfigSectionV2(name, fields, intro) {
     'AT_VALIDITY_PROXY_PROFILES', 'AT_VALIDITY_PROXY_ACTIVE',
     'CHECKOUT_CHECK_PROXY_PROFILES', 'CHECKOUT_CHECK_PROXY_ACTIVE',
     'QUALIFICATION_CHECK_PROXY_PROFILES', 'QUALIFICATION_CHECK_PROXY_ACTIVE', 'GC_CHECK_PROXY_PROFILES',
+    'GCASH_CHECK_PROXY_PROFILES', 'GCASH_CHECK_PROXY_ACTIVE',
+    'GOPAY_CHECK_PROXY_PROFILES', 'GOPAY_CHECK_PROXY_ACTIVE',
   ]);
   const inputs = fields.filter(f => f.type !== 'bool' && !(name === '代理池' && proxyInternalFields.has(f.key)));
   const extra = name === 'RoxyBrowser' ? renderRoxyWorkspaceToolsV2() : (name === '代理池' ? renderProxyApiToolsV2() : '');

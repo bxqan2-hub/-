@@ -312,11 +312,13 @@ class WebUiHelperRegressionTests(unittest.TestCase):
 
     @patch("webui.app.gcash_service.probe_access_token")
     @patch("core.detection_proxy.resolve_detection_proxy", return_value="http://proxy.test")
+    @patch("core.detection_proxy.resolve_static_detection_proxy", return_value="http://proxy.test")
     @patch("core.detection_proxy.parse_detection_proxy_pool", return_value=["gc-profile"])
+    @patch("core.detection_proxy.qualification_proxy_specs", return_value=["PH|http://proxy.test"])
     @patch("webui.app._access_token_identity")
     @patch("webui.app._parse_at_import_text", return_value=(["entry-1", "entry-2"], []))
     def test_at_qualification_returns_at_only_for_successful_rows(
-        self, _parse_import, identity, _parse_pool, _resolve_proxy, probe
+        self, _parse_import, identity, _parse_pool, _qualification_pool, _resolve_proxy, _resolve_static_proxy, probe
     ):
         identity.side_effect = [
             {"email": "eligible@test.com", "access_token": "AT-ELIGIBLE"},
@@ -375,7 +377,13 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("renderDetectionProxyCountryControlV2(checkoutProfiles, checkoutActive, 'checkout')", html)
         self.assertIn("renderDetectionProxyCountryControlV2(planProfiles, planActive, 'plan')", html)
         self.assertIn("renderDetectionProxyCountryControlV2(atProfiles, atActive, 'at')", html)
-        self.assertIn("renderDetectionProxyCountryControlV2(qualificationProfiles, qualificationActive, 'qualification')", html)
+        self.assertIn('GCash 资格', html)
+        self.assertIn('GoPay 资格', html)
+        self.assertIn('data-add-detection-proxy="gcash"', html)
+        self.assertIn('data-add-detection-proxy="gopay"', html)
+        self.assertIn('当前已加入 <strong>${qualificationPoolCount(gcashProfiles)}</strong> 条 GCash 专属代理', html)
+        self.assertIn('当前已加入 <strong>${qualificationPoolCount(gopayProfiles)}</strong> 条 GoPay 专属代理', html)
+        self.assertNotIn('旧 GCash PH 代理池', html)
         self.assertIn('AT_VALIDITY_PROXY_PROFILES', html)
         self.assertIn('专属池非空时只用该池；池为空时只走本机 VPN/系统代理', html)
         self.assertIn('完全跳过 PROXY_POOL', html)

@@ -20,6 +20,8 @@ _RUNTIME_LIST_PATHS = {
     "AT_VALIDITY_PROXY_PROFILES": _PROJECT_ROOT / "data" / "at_validity_proxy_pool.txt",
     "CHECKOUT_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "checkout_check_proxy_pool.txt",
     "QUALIFICATION_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "qualification_check_proxy_pool.txt",
+    "GCASH_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "gcash_check_proxy_pool.txt",
+    "GOPAY_CHECK_PROXY_PROFILES": _PROJECT_ROOT / "data" / "gopay_check_proxy_pool.txt",
 }
 _LOADED = False
 
@@ -27,7 +29,8 @@ _LOADED = False
 # 例如 WebUI 清空代理池后会写入 PROXY_POOL="" / PROXY_POOL="[]"，不能再回退到源码默认本地代理。
 EXPLICIT_EMPTY_LIST_ENV_KEYS = {
     "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES", "AT_VALIDITY_PROXY_PROFILES",
-    "CHECKOUT_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_PROFILES", "PAYPAL_OAICS_PROXY_PROFILES",
+    "CHECKOUT_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_PROFILES",
+    "GCASH_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_PROFILES", "PAYPAL_OAICS_PROXY_PROFILES",
 }
 
 # 统一管理：env key -> 说明（.env.example 用）

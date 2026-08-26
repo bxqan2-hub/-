@@ -1995,7 +1995,6 @@ def create_app(auth_code: str | None = None) -> Flask:
         """Create one PH/PHP Checkout per selected account and read GCash
         availability without confirming or starting any payment method."""
         from core import detection_proxy
-        from config import proxy as proxy_cfg
         import random
 
         data = request.get_json(silent=True) or {}
@@ -2010,13 +2009,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
         workers = max(1, min(workers, max_workers, len(ids)))
-        # 新资格池按国家归类；未迁移时继续兼容旧 gc查询代理池。
-        pool_specs = detection_proxy.qualification_proxy_specs("PH")
-        use_legacy_gc_pool = not pool_specs
-        if not pool_specs:
-            pool_specs = detection_proxy.parse_detection_proxy_pool(
-                getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
-            )
+        # GCash 使用独立的 PH 资格代理池。
+        pool_specs = detection_proxy.qualification_proxy_specs("PH", "gcash")
         if not pool_specs:
             return jsonify({"ok": False, "error": "尚未配置资格检测 PH 国家代理池"}), 409
         executor = gcash_service.get_executor(workers)
@@ -2024,8 +2018,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         proxy_urls: list[str] = []
         for spec in pool_specs:
             try:
-                resolver = detection_proxy.resolve_detection_proxy if use_legacy_gc_pool else detection_proxy.resolve_static_detection_proxy
-                url = resolver(spec) or ""
+                url = detection_proxy.resolve_static_detection_proxy(spec) or ""
                 if url:
                     proxy_urls.append(url)
             except Exception:
@@ -2101,7 +2094,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
         workers = max(1, min(workers, gopay_service.MAX_WORKERS, len(ids)))
-        pool_specs = detection_proxy.qualification_proxy_specs("ID")
+        pool_specs = detection_proxy.qualification_proxy_specs("ID", "gopay")
         if not pool_specs:
             return jsonify({"ok": False, "error": "尚未配置资格检测 ID（印度尼西亚）国家代理池"}), 409
         proxy_urls: list[str] = []
@@ -2171,7 +2164,6 @@ def create_app(auth_code: str | None = None) -> Flask:
         token claims so multiple pasted ATs remain distinguishable.
         """
         from core import detection_proxy
-        from config import proxy as proxy_cfg
         import random
 
         data = request.get_json(silent=True) or {}
@@ -2207,19 +2199,13 @@ def create_app(auth_code: str | None = None) -> Flask:
         if not tokens:
             return jsonify({"ok": False, "error": "没有可检测的有效 AT", "invalid": invalid}), 400
 
-        pool_specs = detection_proxy.qualification_proxy_specs("PH")
-        use_legacy_gc_pool = not pool_specs
-        if not pool_specs:
-            pool_specs = detection_proxy.parse_detection_proxy_pool(
-                getattr(proxy_cfg, "GC_CHECK_PROXY_PROFILES", []) or []
-            )
+        pool_specs = detection_proxy.qualification_proxy_specs("PH", "gcash")
         if not pool_specs:
             return jsonify({"ok": False, "error": "尚未配置资格检测 PH 国家代理池", "invalid": invalid}), 409
         proxy_urls: list[str] = []
         for spec in pool_specs:
             try:
-                resolver = detection_proxy.resolve_detection_proxy if use_legacy_gc_pool else detection_proxy.resolve_static_detection_proxy
-                url = resolver(spec) or ""
+                url = detection_proxy.resolve_static_detection_proxy(spec) or ""
             except Exception:
                 continue
             if url:
@@ -4416,12 +4402,15 @@ def create_app(auth_code: str | None = None) -> Flask:
             "at": ("AT_VALIDITY_PROXY_PROFILES", "AT_VALIDITY_PROXY_ACTIVE"),
             "checkout": ("CHECKOUT_CHECK_PROXY_PROFILES", "CHECKOUT_CHECK_PROXY_ACTIVE"),
             "qualification": ("QUALIFICATION_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_ACTIVE"),
+            "gcash": ("GCASH_CHECK_PROXY_PROFILES", "GCASH_CHECK_PROXY_ACTIVE"),
+            "gopay": ("GOPAY_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_ACTIVE"),
         }
         if purpose not in field_map:
-            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout 或 qualification"}), 400
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout、gcash、gopay 或 qualification"}), 400
 
         from config import proxy as proxy_cfg
         from core import detection_proxy
+        expected_country = {"gcash": "PH", "gopay": "ID"}.get(purpose)
 
         try:
             submitted = detection_proxy.parse_detection_proxy_pool(
@@ -4492,14 +4481,29 @@ def create_app(auth_code: str | None = None) -> Flask:
         merged: dict[str, tuple[str, str]] = {}
         for profile in detection_proxy.detection_proxy_profiles(existing):
             try:
+                if expected_country and str(profile.get("country") or "").upper() != expected_country:
+                    continue
                 normalized = detection_proxy.resolve_static_detection_proxy(profile["spec"]) or ""
                 if normalized:
                     merged[normalized] = (str(profile["country"]), normalized)
             except Exception:
                 continue
+        accepted_detected: list[tuple[int, dict[str, str]]] = []
         for _line_number, inspection in detected:
+            if expected_country and str(inspection.get("country") or "").upper() != expected_country:
+                failures.append({"line": _line_number, "error": f"该代理出口不是 {expected_country}，未加入 {purpose} 代理池"})
+                continue
+            accepted_detected.append((_line_number, inspection))
             normalized = str(inspection["proxy"])
             merged[normalized] = (str(inspection["country"]), normalized)
+
+        if not merged:
+            return jsonify({
+                "ok": False,
+                "error": f"没有符合 {expected_country or '所选国家'} 的代理可加入",
+                "failed_count": len(failures),
+                "failures": failures,
+            }), 400
 
         saved_profiles = [f"{country}|{proxy}" for country, proxy in merged.values()]
         try:
@@ -4513,7 +4517,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 400
         countries = [str(group["country"]) for group in groups]
         current_active = str(getattr(proxy_cfg, active_key, "") or "").strip().upper()
-        active = current_active if current_active in countries else str(detected[0][1]["country"])
+        active = current_active if current_active in countries else (expected_country or str(detected[0][1]["country"]))
         result = config_editor.update_config({profiles_key: saved_profiles, active_key: active})
 
         reload_ok = True
@@ -4528,7 +4532,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "ok": True,
             "purpose": purpose,
             "active_country": active,
-            "added_count": len(detected),
+            "added_count": len(accepted_detected),
             "failed_count": len(failures),
             "failures": failures,
             "total_count": len(saved_profiles),
@@ -4555,9 +4559,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             "at": ("AT_VALIDITY_PROXY_PROFILES", "AT_VALIDITY_PROXY_ACTIVE"),
             "checkout": ("CHECKOUT_CHECK_PROXY_PROFILES", "CHECKOUT_CHECK_PROXY_ACTIVE"),
             "qualification": ("QUALIFICATION_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_ACTIVE"),
+            "gcash": ("GCASH_CHECK_PROXY_PROFILES", "GCASH_CHECK_PROXY_ACTIVE"),
+            "gopay": ("GOPAY_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_ACTIVE"),
         }
         if purpose not in field_map:
-            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout 或 qualification"}), 400
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout、gcash、gopay 或 qualification"}), 400
         if len(country) != 2 or not country.isalpha():
             return jsonify({"ok": False, "error": "country 必须是两位国家代码"}), 400
 

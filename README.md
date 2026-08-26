@@ -889,7 +889,7 @@ MIT
 账号页面不再提供 GCash、PIX、PP、KK 提链或资格检测入口，所有提链统一在“提链中心”完成。Kakao 的 `oaics_*` 路径在 PAY.153 内部参考并署名
 [kakao_oaics_source](https://github.com/m1243808154/kakao_oaics_source)，不会作为第三个服务运行。
 
-账号页面保留独立的“检测 OAICS/CSLIVE”能力：每个账号只创建一次最小 custom Plus Checkout，按返回的 `oaics_*`、`checkout_provider=open_ai/oaics` 或 `cs_live_*` 分类后立即停止。检测不附加促销，也不会执行税区、支付方式、ConfirmationToken 或 confirm。账号表的支付列统一显示为“资格”，只展示检测后确认具备的 `GCash` / `GoPay` 标签；“查询资格”可单独查询任一方式或查询当前已有的全部方式。GCash 使用 PH/PHP Checkout，GoPay 依照 link-gp 的早停边界使用带活动的 ID/IDR Checkout 并只执行一次 Stripe init，二者都不执行支付确认或后续提链。设置页维护按国家归类的支付资格代理池：GCash 固定使用 PH，GoPay 固定使用 ID，后续资格方式可继续扩展国家池。
+账号页面保留独立的“检测 OAICS/CSLIVE”能力：每个账号只创建一次最小 custom Plus Checkout，按返回的 `oaics_*`、`checkout_provider=open_ai/oaics` 或 `cs_live_*` 分类后立即停止。检测不附加促销，也不会执行税区、支付方式、ConfirmationToken 或 confirm。账号表的支付列统一显示为“资格”，只展示检测后确认具备的 `GCash` / `GoPay` 标签；“查询资格”可单独查询任一方式或查询当前已有的全部方式。GCash 使用 PH/PHP Checkout，GoPay 依照 link-gp 的早停边界使用带活动的 ID/IDR Checkout 并只执行一次 Stripe init，二者都不执行支付确认或后续提链。设置页只有一个“支付资格代理池”卡片，卡片内部按资格维护独立代理：`GCASH_CHECK_PROXY_PROFILES` 固定 PH，`GOPAY_CHECK_PROXY_PROFILES` 固定 ID，后续资格方式继续在同一卡片内增加独立池。
 
 “检测套餐/Plus/试用”一次读取 `accounts/check` 的当前套餐、Plus entitlement 与 `eligible_promo_campaigns.plus`。Free 账号会继续解析活动 `metadata.discount.percentage`、标题、周期和 campaign，明确显示“Free · 0元试用”“Free · 半价试用”“Free · 其他优惠”或“Free · 无试用资格”，并提供对应筛选；比例缺失时只标记“优惠未知”，不会猜成 0 元或半价。是否出现日本活动由套餐检测当前选择的日本出口决定。
 

@@ -62,7 +62,9 @@ def test_at_qualification_route_accepts_multiple_tokens_and_returns_each_email()
         }
 
     with patch("webui.app._access_token_identity", side_effect=identity), \
+         patch("core.detection_proxy.qualification_proxy_specs", return_value=["PH|ph-spec"]), \
          patch("core.detection_proxy.parse_detection_proxy_pool", return_value=["ph-spec"]), \
+         patch("core.detection_proxy.resolve_static_detection_proxy", return_value="http://ph.example:80"), \
          patch("core.detection_proxy.resolve_detection_proxy", return_value="http://ph.example:80"), \
          patch("webui.app.gcash_service.probe_access_token", side_effect=probe) as probe_mock:
         response = client.post(

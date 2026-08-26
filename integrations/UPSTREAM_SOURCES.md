@@ -48,9 +48,11 @@ GoPay qualification reference:
     initialize Stripe once, and report eligible only when amount is zero,
     currency is IDR, and `gopay` is published. It stops before Elements,
     taxes, PaymentMethod, confirm, approval, polling, or redirect extraction.
-  - GoPay requires an Indonesia (`ID`) exit. Settings therefore extend the
-    shared payment-qualification proxy pool with country groups: GCash selects
-    `PH`, GoPay selects `ID`, and future detectors can select their own country.
+  - GoPay requires an Indonesia (`ID`) exit. Settings therefore keep one
+    qualification card with separate per-qualification pools: GCash uses
+    `GCASH_CHECK_PROXY_PROFILES`/`PH`, GoPay uses
+    `GOPAY_CHECK_PROXY_PROFILES`/`ID`, and future detectors can add another
+    independent pool inside the same card.
 
 PayPal OAICS extraction core:
 

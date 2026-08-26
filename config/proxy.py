@@ -100,6 +100,10 @@ GC_CHECK_PROXY_PROFILES = []
 # 后续新增资格类型时继续在这个池中按目标国家取代理。
 QUALIFICATION_CHECK_PROXY_PROFILES = []
 QUALIFICATION_CHECK_PROXY_ACTIVE = ""
+GCASH_CHECK_PROXY_PROFILES = []
+GOPAY_CHECK_PROXY_PROFILES = []
+GCASH_CHECK_PROXY_ACTIVE = "PH"
+GOPAY_CHECK_PROXY_ACTIVE = "ID"
 
 # PayPal OAICS 提链专用代理池；格式支持 `名称|代理` 或直接代理，每行一条。
 PAYPAL_OAICS_PROXY_PROFILES = []
@@ -710,6 +714,10 @@ apply_env_overrides(globals(), {
     'GC_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'QUALIFICATION_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'QUALIFICATION_CHECK_PROXY_ACTIVE': 'str',
+    'GCASH_CHECK_PROXY_PROFILES': 'list_str_multiline',
+    'GOPAY_CHECK_PROXY_PROFILES': 'list_str_multiline',
+    'GCASH_CHECK_PROXY_ACTIVE': 'str',
+    'GOPAY_CHECK_PROXY_ACTIVE': 'str',
     'PAYPAL_OAICS_PROXY_PROFILES': 'list_str_multiline',
     'PAYPAL_OAICS_PROXY_ACTIVE': 'str',
     'PAYPAL_OAICS_WORKERS': 'int',
@@ -727,6 +735,8 @@ for _runtime_key in (
     "AT_VALIDITY_PROXY_PROFILES",
     "CHECKOUT_CHECK_PROXY_PROFILES",
     "QUALIFICATION_CHECK_PROXY_PROFILES",
+    "GCASH_CHECK_PROXY_PROFILES",
+    "GOPAY_CHECK_PROXY_PROFILES",
 ):
     _runtime_values = read_runtime_list_file(_runtime_key)
     if _runtime_values is not None:

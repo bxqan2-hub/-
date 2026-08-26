@@ -19,6 +19,7 @@ _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES", "AT_VALIDITY_PROXY_PROFILES",
     "CHECKOUT_CHECK_PROXY_PROFILES", "GC_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_PROFILES",
+    "GCASH_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_PROFILES",
     "PAYPAL_OAICS_PROXY_PROFILES",
 }
 
@@ -784,6 +785,24 @@ EDITABLE_FIELDS = [
     {
         "key": "QUALIFICATION_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
         "label": "资格代理管理国家", "help": "只用于设置页选择和删除国家池；实际检测由资格类型固定选择 PH 或 ID",
+    },
+    {
+        "key": "GCASH_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "GCash 资格代理池（PH）", "help": "GCash 独立菲律宾静态代理池；账号查询 GCash 只使用这里的代理",
+        "storage": "runtime_file", "secret": True,
+    },
+    {
+        "key": "GCASH_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "GCash 当前国家", "help": "固定为 PH（菲律宾）资格检测出口",
+    },
+    {
+        "key": "GOPAY_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "GoPay 资格代理池（ID）", "help": "GoPay 独立印度尼西亚静态代理池；账号查询 GoPay 只使用这里的代理",
+        "storage": "runtime_file", "secret": True,
+    },
+    {
+        "key": "GOPAY_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "GoPay 当前国家", "help": "固定为 ID（印度尼西亚）资格检测出口",
     },
     {
         "key": "PAYPAL_OAICS_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",

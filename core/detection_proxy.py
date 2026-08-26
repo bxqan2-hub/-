@@ -156,12 +156,18 @@ def configured_detection_proxy_spec(purpose: str) -> str | None:
     )
 
 
-def qualification_proxy_specs(country: str) -> list[str]:
+def qualification_proxy_specs(country: str, qualification: str | None = None) -> list[str]:
     """Return every static qualification proxy for one exact country."""
     requested = str(country or "").strip().upper()
     if not _COUNTRY_CODE_RE.fullmatch(requested):
         raise ValueError("资格检测国家必须是两位国家代码")
-    entries = getattr(proxy_cfg, "QUALIFICATION_CHECK_PROXY_PROFILES", []) or []
+    qualification_key = str(qualification or "").strip().lower()
+    if qualification_key == "gcash":
+        entries = getattr(proxy_cfg, "GCASH_CHECK_PROXY_PROFILES", []) or []
+    elif qualification_key == "gopay":
+        entries = getattr(proxy_cfg, "GOPAY_CHECK_PROXY_PROFILES", []) or []
+    else:
+        entries = getattr(proxy_cfg, "QUALIFICATION_CHECK_PROXY_PROFILES", []) or []
     for group in detection_proxy_country_groups(entries):
         if str(group["country"]) == requested:
             return list(group["specs"])

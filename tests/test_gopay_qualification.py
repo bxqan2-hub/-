@@ -106,7 +106,7 @@ class GoPayBulkApiTests(unittest.TestCase):
              patch("webui.app.gopay_service.enqueue", return_value={"accepted": True, "busy": False}) as enqueue:
             response = self.client.post("/api/accounts/check-gopay-bulk", json={"account_ids": [1]})
         self.assertEqual(response.status_code, 202)
-        specs.assert_called_once_with("ID")
+        specs.assert_called_once_with("ID", "gopay")
         self.assertEqual(enqueue.call_args.kwargs["proxies"], ["http://id.proxy:8080"])
         self.assertFalse(response.get_json()["confirm_sent"])
 
