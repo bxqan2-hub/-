@@ -698,7 +698,23 @@
     .accounts-table-v2 .col-plan { width: 120px; }
     .accounts-table-v2 .col-checkout { width: 125px; }
     .accounts-table-v2 .col-gcash { width: 140px; }
-    .qualification-badges-v2 { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+    .qualification-badges-v2 {
+      display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: center;
+      width: 100%; min-height: 26px; box-sizing: border-box;
+    }
+    #accountsPanelV2 .accounts-table-v2 th.col-gcash,
+    #accountsPanelV2 .accounts-table-v2 td.col-gcash {
+      text-align: center; vertical-align: middle;
+    }
+    .accounts-table-v2 .qualification-badge-muted {
+      color: #a7adb8; background: #f5f6f8; border-color: #e1e4e9;
+    }
+    .accounts-table-v2 .qualification-badge-gcash {
+      color: #087f5b; background: #e8faf2; border-color: #9adbc2;
+    }
+    .accounts-table-v2 .qualification-badge-gopay {
+      color: #175cd3; background: #eef4ff; border-color: #b2ccff;
+    }
     .qualification-proxy-card-v2 { grid-column: 1 / -1; }
     .qualification-proxy-entry-v2 { padding: 10px 0; border-top: 1px solid #ebeef5; }
     .qualification-proxy-entry-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -4945,19 +4961,17 @@ function _trialOfferView(r) {
   return {kind, label, percentage, duration, meta, tone};
 }
 function _qualificationBadges(r) {
-  const badges = [];
-  if (r.gcash_eligible === true) {
-    const title = [r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '', 'PH/PHP Checkout 已发布 GCash'].filter(Boolean).join('；');
-    badges.push(`<span class="pill status-available" title="${esc(title)}">GCash</span>`);
-  }
-  if (r.gopay_eligible === true) {
-    const title = [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；');
-    badges.push(`<span class="pill status-success" title="${esc(title)}">GoPay</span>`);
-  }
-  const checking = ['queued','running'].includes(String(r.gcash_status || '').toLowerCase())
-    || ['queued','running'].includes(String(r.gopay_status || '').toLowerCase());
-  if (checking) badges.push('<span class="pill status-running" title="正在查询所选资格">查询中</span>');
-  return badges.length ? `<div class="qualification-badges-v2">${badges.join(' ')}</div>` : '<span class="acc-v2-muted">-</span>';
+  const gcashChecking = ['queued','running'].includes(String(r.gcash_status || '').toLowerCase());
+  const gopayChecking = ['queued','running'].includes(String(r.gopay_status || '').toLowerCase());
+  const gcashTitle = r.gcash_eligible === true
+    ? [r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '', 'PH/PHP Checkout 已发布 GCash'].filter(Boolean).join('；')
+    : gcashChecking ? 'GCash 资格检测中' : '尚未确认 GCash 资格';
+  const gopayTitle = r.gopay_eligible === true
+    ? [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；')
+    : gopayChecking ? 'GoPay 资格检测中' : '尚未确认 GoPay 资格';
+  const gcashClass = r.gcash_eligible === true ? 'qualification-badge-gcash' : 'qualification-badge-muted';
+  const gopayClass = r.gopay_eligible === true ? 'qualification-badge-gopay' : 'qualification-badge-muted';
+  return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">GCash</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">GoPay</span></div>`;
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();

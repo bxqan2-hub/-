@@ -412,8 +412,11 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('data-query-qualification="all"', html)
         self.assertIn('>资格</th>', html)
         self.assertIn("function _qualificationBadges(r)", html)
-        self.assertIn("if (r.gcash_eligible === true)", html)
-        self.assertIn("if (r.gopay_eligible === true)", html)
+        self.assertIn("r.gcash_eligible === true ?", html)
+        self.assertIn("r.gopay_eligible === true ?", html)
+        self.assertIn('class="pill ${gcashClass}"', html)
+        self.assertIn('class="pill ${gopayClass}"', html)
+        self.assertIn('justify-content: center', html)
         self.assertNotIn("合并查询：创建 Checkout 同时判定类型与 GCash 资格", html)
 
     def test_settings_ui_filters_irrelevant_drivers_and_has_real_status_cards(self):
