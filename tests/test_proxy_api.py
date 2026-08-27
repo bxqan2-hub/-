@@ -387,17 +387,28 @@ class ProxyApiTests(unittest.TestCase):
         ):
             self.assertEqual(proxy_cfg.pick_proxy(strict=True), selected)
 
-    def test_strict_pick_proxy_rejects_unselected_static_pool(self):
+    def test_strict_pick_proxy_randomly_uses_unselected_static_pool(self):
+        selected = "http://proxy-two.example:8080"
         with (
             patch.object(proxy_cfg, "PROXY_API_ENABLED", False),
             patch.object(proxy_cfg, "PROXY_POOL", [
                 "http://proxy-one.example:8080",
-                "http://proxy-two.example:8080",
+                selected,
             ]),
             patch.object(proxy_cfg, "PROXY_POOL_ACTIVE", ""),
+            patch.object(proxy_cfg.random, "choice", return_value=selected) as choice,
         ):
-            with self.assertRaisesRegex(RuntimeError, "PROXY_POOL_ACTIVE"):
-                proxy_cfg.pick_proxy(strict=True)
+            self.assertEqual(proxy_cfg.pick_proxy(strict=True), selected)
+        choice.assert_called_once_with(["http://proxy-one.example:8080", selected])
+
+    def test_strict_pick_proxy_ignores_stale_active_and_uses_pool(self):
+        selected = "http://proxy-one.example:8080"
+        with (
+            patch.object(proxy_cfg, "PROXY_API_ENABLED", False),
+            patch.object(proxy_cfg, "PROXY_POOL", [selected]),
+            patch.object(proxy_cfg, "PROXY_POOL_ACTIVE", "http://removed.example:8080"),
+        ):
+            self.assertEqual(proxy_cfg.pick_proxy(strict=True), selected)
 
     def test_strict_pick_proxy_never_falls_back_from_selected_api(self):
         with (

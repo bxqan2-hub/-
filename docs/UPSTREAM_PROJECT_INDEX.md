@@ -97,3 +97,10 @@
 - 上游流程特征：邮箱 OTP 状态机、注册密码提交、同一注册会话内 TOTP enroll/activate、持久 Sentinel VM、统一环境画像和 Cloudflare 后代理轮换。
 - 本地适配只负责已有账号存储/邮箱回收/Flow 触发及结果字段映射；不再调用旧 `core.chatgpt_auth` / `core.openai_auth` 注册链路。
 - 验证：`.\\venv\\Scripts\\python.exe -m pytest -q tests/test_protocol_strict_alignment.py tests/test_twofa_registration.py tests/test_registration_local_proxy_mode.py`，`65 passed`。
+
+## 本次纯协议静态粘性代理选择放宽（2026-08-28）
+
+- 纯协议仍要求解析到有效代理，并继续由严格会话固定代理、TLS、UA 与 OS 画像。
+- 移除“静态池有多条时必须填写 `PROXY_POOL_ACTIVE`”的入口限制；留空时从 `PROXY_POOL` 随机选择一条，并在单次注册会话内固定。
+- `PROXY_POOL_ACTIVE` 保留为可选优先线路；配置指向已移除的旧线路时回退到当前静态池，不再阻止注册。
+- Cloudflare 后轮换仍通过 `excluded` 排除失败线路，从剩余粘性代理中选择。

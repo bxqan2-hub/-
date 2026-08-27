@@ -45,7 +45,7 @@ PROXY_POOL = [
     "http://127.0.0.1:10808",
 ]
 # 静态池当前选中项。填写与 PROXY_POOL 中解析后的代理 URL 相同的值；
-# 为空时普通非协议任务仍可轮询，严格纯协议注册会在多条静态代理时拒绝未选择状态。
+# 纯协议注册未选择时会从粘性静态池随机取一条，并在单次会话内固定使用。
 PROXY_POOL_ACTIVE = ""
 
 # ---- API 代理（Cliproxy 白名单模式）----
@@ -641,17 +641,13 @@ def _pick_static_or_system_proxy(*, strict: bool = False, excluded: set[str] | N
     if resolved:
         active_raw = str(PROXY_POOL_ACTIVE or "").strip()
         active = _expand_pool_entry(active_raw) if active_raw else ""
-        # PROXY_POOL_ACTIVE 只服务于需要固定出口的 strict/纯协议流程。
-        # 浏览器注册是非 strict 流程：每个新窗口从完整粘性池随机抽一条，
-        # 窗口创建后再由对应的浏览器客户端实例固定该代理。
-        if strict and active:
-            if active not in resolved:
-                raise RuntimeError("PROXY_POOL_ACTIVE 不在当前 PROXY_POOL 中，已停止避免错用代理")
-            return active
-        if strict and len(resolved) > 1:
-            raise RuntimeError("纯协议注册要求先选择 PROXY_POOL_ACTIVE，禁止在多条静态代理之间随机选择")
         excluded = {str(value or "").strip() for value in (excluded or set()) if str(value or "").strip()}
         available = [proxy for proxy in resolved if proxy not in excluded]
+        # 显式选中的静态线路仍优先；未选择、选择项已移除或轮换时，
+        # 纯协议与浏览器流程都可以从剩余粘性池随机抽取。调用方拿到代理后
+        # 会把它固定到本次会话，因此不会在请求过程中切换出口。
+        if strict and active and active in available:
+            return active
         return random.choice(available) if available else ""
     if strict:
         raise RuntimeError("严格代理出口未解析到静态代理或系统代理")

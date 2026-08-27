@@ -672,7 +672,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PROXY_POOL_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "静态池当前代理", "help": "填写 PROXY_POOL 中要使用的完整代理 URL；纯协议多条静态代理时必须选择",
+        "label": "静态池优先代理", "help": "可选；填写 PROXY_POOL 中的完整代理 URL会优先使用，留空时纯协议注册从粘性静态池随机选择并在单次会话内固定",
     },
     {
         "key": "PROXY_API_ENABLED", "file": "proxy.py", "type": "bool", "group": "代理池",

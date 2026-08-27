@@ -407,7 +407,7 @@ pip install playwright
 PROXY_POOL = [
     "http://user:pass@host:port",
 ]
-PROXY_POOL_ACTIVE = "http://user:pass@host:port"  # 多条静态代理时指定当前线路
+PROXY_POOL_ACTIVE = "http://user:pass@host:port"  # 可选；指定优先线路
 ```
 
 Roxy 一号一环境开启 `ROXY_CREATE_USE_PROXY_POOL=True` 时，会从这里随机取代理写入 Roxy Profile。
@@ -437,7 +437,7 @@ PROXY_API_FAIL_CLOSED="True"
 - `PROXY_API_CACHE_SECONDS=0` 表示每个新会话重新获取；需要多个并发任务共用同一条时再设置短缓存。
 - `PROXY_API_FAIL_CLOSED=True` 表示 API 失败就停止任务，不会静默直连。
 - `PROXY_API_ACTIVE` 指定 API 代理列表中的当前线路；纯协议注册会严格使用该线路，API 获取失败不会回退到其他静态代理。
-- `PROXY_POOL_ACTIVE` 指定静态 `PROXY_POOL` 中的当前完整代理 URL；纯协议多条静态代理未选择时直接停止，不会轮询错用其他线路。
+- `PROXY_POOL_ACTIVE` 可指定静态 `PROXY_POOL` 中的优先完整代理 URL；留空时纯协议注册会从粘性静态池随机选择一条，并在该次注册会话内固定使用。
 - `protocol` 注册始终要求显式代理出口；静态池/系统代理/API 代理均未解析到可用 URL 时任务直接停止。`http://`、`https://`、`socks5h://` 可用，`socks5://` 会因本地 DNS 风险被拒绝。
 - WebUI「代理池」配置区提供“获取并测试”按钮，可查看实际出口 IP 和地区。
 - Roxy API 代理模式会自动把代理写入新建 Profile，无需另外开启 `ROXY_CREATE_USE_PROXY_POOL`；Cloak 需要保持 `CLOAK_USE_PROXY=True`。
