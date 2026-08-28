@@ -5016,7 +5016,7 @@ function _qualificationBadges(r) {
     ? [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；')
     : gopayChecking ? 'GoPay 资格检测中' : '尚未确认 GoPay 资格';
   const momoTitle = r.momo_eligible === true
-    ? [r.momo_checked_at ? `检测: ${r.momo_checked_at}` : '', 'VN/VND Stripe Checkout 已发布 MoMo 且 trial 已生效'].filter(Boolean).join('；')
+    ? [r.momo_checked_at ? `检测: ${r.momo_checked_at}` : '', 'VN/VND Checkout 创建响应已发布 MoMo'].filter(Boolean).join('；')
     : momoChecking ? 'MoMo 资格检测中' : (r.momo_error || '尚未确认 MoMo 资格');
   const gcashClass = r.gcash_eligible === true ? 'qualification-badge-gcash' : (gcashChecking ? 'status-running' : 'qualification-badge-muted');
   const gopayClass = r.gopay_eligible === true ? 'qualification-badge-gopay' : (gopayChecking ? 'status-running' : 'qualification-badge-muted');
