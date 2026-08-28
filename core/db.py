@@ -1740,6 +1740,96 @@ def recover_interrupted_gopay_checks() -> int:
         return recovered
 
 
+def claim_account_momo(acc_id: int, trigger: str = "manual") -> bool:
+    """Atomically reserve a non-confirming MoMo qualification task."""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("momo_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "momo_queued_at" if current_status == "queued" else "momo_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row.update({
+            "momo_status": "queued", "momo_ok": False, "momo_eligible": False,
+            "momo_trigger": str(trigger or "manual"), "momo_error": None,
+            "momo_queued_at": now, "momo_started_at": None, "momo_completed_at": None,
+            "updated_at": now,
+        })
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_momo_running(acc_id: int) -> bool:
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("momo_status") not in {"queued", "running"}:
+            return False
+        row["momo_status"] = "running"
+        row["momo_started_at"] = _now()
+        row["momo_error"] = None
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def update_account_momo(acc_id: int, result: dict | None = None) -> bool:
+    """Persist MoMo qualification metadata without tokens or Checkout URLs."""
+    result = result or {}
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        eligible = bool(result.get("momo"))
+        ok = bool(result.get("ok")) or eligible
+        row["momo_status"] = "success" if ok else "failed"
+        row["momo_ok"] = ok
+        row["momo_eligible"] = eligible
+        row["momo_checkout_country"] = str(result.get("checkout_country") or "VN")[:8]
+        row["momo_checkout_currency"] = str(result.get("checkout_currency") or "VND")[:8]
+        row["momo_stripe_mode"] = str(result.get("stripe_mode") or "")[:32]
+        row["momo_actual_trial"] = bool(result.get("actual_trial"))
+        row["momo_payment_method_types"] = result.get("payment_method_types") or []
+        row["momo_checked_at"] = result.get("checked_at") or _now()
+        row["momo_completed_at"] = _now()
+        row["momo_error"] = None if ok else str(result.get("error") or "MoMo 检测失败")[:500]
+        row["momo_attempt_count"] = int(result.get("attempt_count") or 1)
+        row["momo_retried_proxies"] = result.get("retried_proxies")
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_momo_checks() -> int:
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("momo_status") not in {"queued", "running"}:
+                continue
+            row["momo_status"] = "failed"
+            row["momo_ok"] = False
+            row["momo_eligible"] = False
+            row["momo_error"] = "WebUI 重启导致 MoMo 检测中断，请重新检测"
+            row["momo_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
 def stop_account_page_operations(reason: str = "账号页操作已停止") -> dict:
     """把账号页后台队列中尚未完成的项目标记为停止。
 
@@ -1752,6 +1842,7 @@ def stop_account_page_operations(reason: str = "账号页操作已停止") -> di
         ("checkout_kind_status", "checkout_kind_error", "checkout_kind_completed_at", "failed"),
         ("gcash_status", "gcash_error", "gcash_completed_at", "failed"),
         ("gopay_status", "gopay_error", "gopay_completed_at", "failed"),
+        ("momo_status", "momo_error", "momo_completed_at", "failed"),
         ("oaics_extract_status", "oaics_extract_error", "oaics_extract_completed_at", "failed"),
         ("live_check_status", "live_check_error", "live_checked_at", "failed"),
         ("codex_agent_status", "codex_agent_error", "codex_agent_completed_at", "failed"),

@@ -55,6 +55,16 @@ GoPay qualification reference:
     `GOPAY_CHECK_PROXY_PROFILES`/`ID`, and future detectors can add another
     independent pool inside the same card.
 
+MoMo qualification reference:
+
+- Local reference: `C:/Users/Administrator/Downloads/check_momo_eligibility..py`
+- The account-page detector creates one VN/VND custom Checkout with the
+  requested trial period, requires an actually applied trial, initializes
+  Stripe once, and reports eligible only when currency is VND and `momo` is
+  published. It stops before Elements, PaymentMethod, confirm, approval,
+  polling, or redirect extraction. MoMo uses its own `MOMO_CHECK_PROXY_PROFILES`
+  pool and fixed VN exit.
+
 PayPal OAICS extraction core:
 
 - [link-pp](https://github.com/eatWhitePorridge/link-pp)

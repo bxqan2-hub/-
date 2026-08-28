@@ -166,6 +166,8 @@ def qualification_proxy_specs(country: str, qualification: str | None = None) ->
         entries = getattr(proxy_cfg, "GCASH_CHECK_PROXY_PROFILES", []) or []
     elif qualification_key == "gopay":
         entries = getattr(proxy_cfg, "GOPAY_CHECK_PROXY_PROFILES", []) or []
+    elif qualification_key == "momo":
+        entries = getattr(proxy_cfg, "MOMO_CHECK_PROXY_PROFILES", []) or []
     else:
         entries = getattr(proxy_cfg, "QUALIFICATION_CHECK_PROXY_PROFILES", []) or []
     for group in detection_proxy_country_groups(entries):

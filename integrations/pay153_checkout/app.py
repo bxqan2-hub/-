@@ -664,6 +664,9 @@ def checkout_payload(options: dict, meta: dict) -> dict[str, Any]:
         "checkout_ui_mode": "custom" if options["link_type"] != "hosted" else "redirect",
         "check_card_proxy": True,
     }
+    subscription_data = options.get("subscription_data")
+    if isinstance(subscription_data, dict) and subscription_data:
+        common["subscription_data"] = dict(subscription_data)
     promo = options.get("promo_campaign", "").strip()
     if plan == "team":
         common["entry_point"] = "team_workspace_purchase_modal"
@@ -3341,7 +3344,7 @@ def health():
     return jsonify({
         "ok": True,
         "service": "pay153",
-        "capabilities": ["checkout_kind_v1", "gopay_qualification_v1"],
+        "capabilities": ["checkout_kind_v1", "gopay_qualification_v1", "momo_qualification_v1"],
         "time": int(time.time()),
     })
 
@@ -3450,6 +3453,110 @@ def _gopay_payment_method_available(methods: Any) -> bool:
             if "gopay" in raw.replace("_", ""):
                 return True
     return False
+
+
+def _momo_payment_method_available(methods: Any) -> bool:
+    """Return whether Stripe published MoMo for the VN/VND Checkout."""
+    if not isinstance(methods, list):
+        return False
+    for method in methods:
+        if isinstance(method, str):
+            value = method.strip().lower().replace("_", "")
+            if value == "momo" or "momo" in value:
+                return True
+        elif isinstance(method, dict):
+            raw = " ".join(
+                str(method.get(key) or "")
+                for key in ("type", "name", "display_name", "payment_method_type", "provider", "id")
+            ).lower().replace("_", "")
+            if "momo" in raw:
+                return True
+    return False
+
+
+def _momo_trial_marker(payload: dict[str, Any], nested_key: str | None = None) -> tuple[bool, Any, bool]:
+    candidates = [payload]
+    if nested_key and isinstance(payload.get(nested_key), dict):
+        candidates.append(payload[nested_key])
+    trial_days = None
+    trial_end = None
+    for candidate in candidates:
+        subscription_data = candidate.get("subscription_data")
+        if isinstance(subscription_data, dict):
+            trial_days = subscription_data.get("trial_period_days")
+            trial_end = subscription_data.get("trial_end")
+        if trial_days in (None, "", 0, "0", False):
+            trial_days = candidate.get("trial_period_days")
+        if trial_end in (None, "", 0, "0", False):
+            trial_end = candidate.get("trial_end")
+        if trial_days not in (None, "", 0, "0", False) or trial_end not in (None, "", 0, "0", False):
+            break
+    try:
+        has_days = int(trial_days or 0) > 0
+    except (TypeError, ValueError):
+        has_days = False
+    return has_days or trial_end not in (None, "", 0, "0", False), trial_days, trial_end not in (None, "", 0, "0", False)
+
+
+def detect_momo(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
+    """Create one VN/VND trial Checkout and inspect Stripe's MoMo method list.
+
+    The detector stops after Stripe init. It never creates a PaymentMethod,
+    confirms, approves, polls, or extracts a payment link.
+    """
+    data = data if isinstance(data, dict) else {}
+    token_raw = str(data.get("token") or "").strip()
+    if not token_raw:
+        return {"ok": False, "momo": False, "error": "缺少 AT/access_token"}, 400
+    try:
+        token, meta = extract_access_token(token_raw)
+    except Exception as exc:
+        return {"ok": False, "momo": False, "error": f"AT 解析失败：{exc}"}, 400
+    proxy = str(data.get("proxy") or "").strip()
+    proxy_source = "request" if proxy else "direct"
+    if proxy:
+        try:
+            proxy = normalize_proxy(proxy)
+        except ValueError as exc:
+            return {"ok": False, "momo": False, "error": f"代理格式错误：{exc}"}, 400
+    device_id = str(uuid.uuid4())
+    did = str(uuid.uuid4())
+    trial_days = max(1, min(int(data.get("trial_days") or 30), 90))
+    options = {
+        "plan": "plus", "link_type": "detection", "country": "VN", "currency": "VND",
+        "checkout_country": "VN", "checkout_currency": "VND", "use_promo": False,
+        "subscription_data": {"trial_period_days": trial_days},
+    }
+    try:
+        created = create_checkout(token, checkout_payload(options, meta), proxy, device_id, did, lambda _message: None, use_sen=True, use_so=True)
+        checkout = dict(created.get("data") or {})
+        session_id = str(checkout.get("checkout_session_id") or "")
+        if not re.fullmatch(r"cs_(?:live|test)_[A-Za-z0-9]+", session_id):
+            return {"ok": True, "momo": False, "detection_outcome": "unsupported_custom_checkout", "checkout_created": bool(session_id or checkout.get("checkout_url") or checkout.get("url")), "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": "VND", "checked_at": int(time.time()), "error": "VN/VND Checkout 未返回可用于 MoMo 资格判断的 Stripe cs_* 会话"}, 200
+        trial_in_checkout, _, _ = _momo_trial_marker(checkout, "checkout_session")
+        one_click_eligible = checkout.get("one_click_trial_eligible")
+        if one_click_eligible is False and not trial_in_checkout:
+            return {"ok": True, "momo": False, "detection_outcome": "account_trial_ineligible", "checkout_created": True, "one_click_trial_eligible": False, "actual_trial": False, "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": "VND", "checked_at": int(time.time()), "error": "账号没有真正试用资格"}, 200
+        stripe_pk = str(checkout.get("stripe_publishable_key") or checkout.get("publishable_key") or checkout.get("publishableKey") or checkout.get("key") or "").strip()
+        http = sc.build_http(proxy or None)
+        profile = dict(getattr(sc, "LOCALE_PROFILES", {}).get("VN") or {})
+        profile.setdefault("browser_locale", "vi-VN")
+        profile.setdefault("browser_timezone", "Asia/Ho_Chi_Minh")
+        profile.setdefault("browser_language", "vi-VN")
+        if not stripe_pk:
+            stripe_pk = sc.verify_pk(http, session_id, lambda _message: None)
+        init_data, _version, ctx = sc.init_checkout(http, session_id, stripe_pk, profile, lambda _message: None)
+        methods = list(ctx.get("payment_method_types") or sc._extract_payment_method_types(init_data))
+        init_trial, init_days, init_end = _momo_trial_marker(init_data, "elements_options")
+        actual_trial = bool(trial_in_checkout or init_trial)
+        currency = str(ctx.get("currency") or init_data.get("currency") or "").lower()
+        momo = actual_trial and currency == "vnd" and _momo_payment_method_available(methods)
+        mode = init_data.get("mode") or (init_data.get("elements_options") or {}).get("mode")
+        return {"ok": True, "momo": momo, "detection_outcome": "qualified" if momo else "no_momo_in_stripe_init", "one_click_trial_eligible": one_click_eligible, "actual_trial": actual_trial, "stripe_mode": mode, "payment_method_types": methods, "trial_period_days_in_init": init_days, "trial_end_present_in_init": init_end, "checkout_created": True, "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": currency.upper() or "VND", "checked_at": int(time.time()), "error": None if momo else f"VN/VND Stripe Checkout 未发布 MoMo 或 trial 未生效（currency={currency or 'missing'}）"}, 200
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}: {str(exc)[:500]}"
+        upstream_status = re.search(r"OpenAI Checkout HTTP\s+(\d{3})", error_text)
+        return {"ok": False, "momo": False, "confirm_sent": False, "promo_update_sent": False, "upstream_http_status": int(upstream_status.group(1)) if upstream_status else None, "error": error_text}, 502
 
 
 def detect_gopay(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
@@ -3652,6 +3759,13 @@ def gcash():
 def gopay():
     """HTTP compatibility wrapper for the GoPay qualification detector."""
     payload, status = detect_gopay(request.get_json(silent=True) or {})
+    return jsonify(payload), status
+
+
+@app.post("/api/momo")
+def momo():
+    """HTTP compatibility wrapper for the MoMo qualification detector."""
+    payload, status = detect_momo(request.get_json(silent=True) or {})
     return jsonify(payload), status
 
 

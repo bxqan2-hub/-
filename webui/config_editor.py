@@ -19,7 +19,7 @@ _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL", "PROXY_API_PROFILES", "PLAN_CHECK_PROXY_PROFILES", "AT_VALIDITY_PROXY_PROFILES",
     "CHECKOUT_CHECK_PROXY_PROFILES", "GC_CHECK_PROXY_PROFILES", "QUALIFICATION_CHECK_PROXY_PROFILES",
-    "GCASH_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_PROFILES",
+    "GCASH_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_PROFILES", "MOMO_CHECK_PROXY_PROFILES",
     "PAYPAL_OAICS_PROXY_PROFILES",
 }
 
@@ -803,6 +803,15 @@ EDITABLE_FIELDS = [
     {
         "key": "GOPAY_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
         "label": "GoPay 当前国家", "help": "固定为 ID（印度尼西亚）资格检测出口",
+    },
+    {
+        "key": "MOMO_CHECK_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "MoMo 资格代理池（VN）", "help": "MoMo 独立越南静态代理池；账号查询 MoMo 只使用这里的代理",
+        "storage": "runtime_file", "secret": True,
+    },
+    {
+        "key": "MOMO_CHECK_PROXY_ACTIVE", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "MoMo 当前国家", "help": "固定为 VN（越南）资格检测出口",
     },
     {
         "key": "PAYPAL_OAICS_PROXY_PROFILES", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",

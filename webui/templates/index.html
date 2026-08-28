@@ -737,6 +737,9 @@
     .accounts-table-v2 .qualification-badge-gopay {
       color: #175cd3; background: #eef4ff; border-color: #b2ccff;
     }
+    .accounts-table-v2 .qualification-badge-momo {
+      color: #9a3412; background: #fff4e8; border-color: #f5b97a;
+    }
     .qualification-proxy-card-v2 { grid-column: 1 / -1; }
     .qualification-proxy-entry-v2 { padding: 10px 0; border-top: 1px solid #ebeef5; }
     .qualification-proxy-entry-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -2571,6 +2574,7 @@
               <button type="button" data-account-qualification-filter="">全部账号</button>
               <button type="button" data-account-qualification-filter="gcash">有 GCash 资格</button>
               <button type="button" data-account-qualification-filter="gopay">有 GoPay 资格</button>
+              <button type="button" data-account-qualification-filter="momo">有 MoMo 资格</button>
               <button type="button" data-account-qualification-filter="any">有任一资格</button>
             </span>
           </span>
@@ -2640,10 +2644,11 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="一次查询当前套餐、是否已开通 Plus，以及 Free 账号是否可试用 Plus">检测套餐/Plus/试用</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedCheckoutKindV2" disabled title="使用下方检测代理创建一次最小 Plus Checkout，只判断返回 oaics 或 cs_live，不执行支付确认">检测 OAICS/CSLIVE</button>
           <span class="qualification-query-wrap-v2">
-            <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedQualificationsV2" disabled aria-expanded="false" title="展开后直接选择 GCash、GoPay，或全部查询">查询资格</button>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCheckSelectedQualificationsV2" disabled aria-expanded="false" title="展开后直接选择 GCash、GoPay、MoMo，或全部查询">查询资格</button>
             <span class="qualification-query-menu-v2 hidden" id="qualificationQueryMenuV2" role="menu" aria-label="查询资格">
               <button type="button" data-query-qualification="gcash">查询 GCash</button>
               <button type="button" data-query-qualification="gopay">查询 GoPay</button>
+              <button type="button" data-query-qualification="momo">查询 MoMo</button>
               <button type="button" data-query-qualification="all">查询全部资格</button>
             </span>
           </span>
@@ -3231,9 +3236,10 @@
       <div class="acc-v2-btn-group" style="justify-content:flex-start;gap:10px;flex-wrap:wrap;">
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" data-query-qualification="gcash">单独查询 GCash</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" data-query-qualification="gopay">单独查询 GoPay</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" data-query-qualification="momo">单独查询 MoMo</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" data-query-qualification="all">查询全部已有资格</button>
       </div>
-      <span class="outlook-import-hint">GCash 创建 PH/PHP Checkout 后读取创建响应；GoPay 创建带活动的 ID/IDR Checkout 并完成一次 Stripe init。两者得到资格结论后都立即停止，不执行 confirm、approve 或后续提链。</span>
+      <span class="outlook-import-hint">GCash 创建 PH/PHP Checkout；GoPay 创建带活动的 ID/IDR Checkout；MoMo 创建 VN/VND trial Checkout 并完成一次 Stripe init。三者得到资格结论后都立即停止，不执行 confirm、approve 或后续提链。</span>
     </div>
   </div>
 </div>
@@ -5002,17 +5008,23 @@ function _trialOfferView(r) {
 function _qualificationBadges(r) {
   const gcashChecking = ['queued','running'].includes(String(r.gcash_status || '').toLowerCase());
   const gopayChecking = ['queued','running'].includes(String(r.gopay_status || '').toLowerCase());
+  const momoChecking = ['queued','running'].includes(String(r.momo_status || '').toLowerCase());
   const gcashTitle = r.gcash_eligible === true
     ? [r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '', 'PH/PHP Checkout 已发布 GCash'].filter(Boolean).join('；')
     : gcashChecking ? 'GCash 资格检测中' : '尚未确认 GCash 资格';
   const gopayTitle = r.gopay_eligible === true
     ? [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；')
     : gopayChecking ? 'GoPay 资格检测中' : '尚未确认 GoPay 资格';
+  const momoTitle = r.momo_eligible === true
+    ? [r.momo_checked_at ? `检测: ${r.momo_checked_at}` : '', 'VN/VND Stripe Checkout 已发布 MoMo 且 trial 已生效'].filter(Boolean).join('；')
+    : momoChecking ? 'MoMo 资格检测中' : '尚未确认 MoMo 资格';
   const gcashClass = r.gcash_eligible === true ? 'qualification-badge-gcash' : (gcashChecking ? 'status-running' : 'qualification-badge-muted');
   const gopayClass = r.gopay_eligible === true ? 'qualification-badge-gopay' : (gopayChecking ? 'status-running' : 'qualification-badge-muted');
+  const momoClass = r.momo_eligible === true ? 'qualification-badge-momo' : (momoChecking ? 'status-running' : 'qualification-badge-muted');
   const gcashLabel = gcashChecking && r.gcash_eligible !== true ? 'GCash 检测中' : 'GCash';
   const gopayLabel = gopayChecking && r.gopay_eligible !== true ? 'GoPay 检测中' : 'GoPay';
-  return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">${gcashLabel}</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">${gopayLabel}</span></div>`;
+  const momoLabel = momoChecking && r.momo_eligible !== true ? 'MoMo 检测中' : 'MoMo';
+  return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">${gcashLabel}</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">${gopayLabel}</span><span class="pill ${momoClass}" title="${esc(momoTitle)}">${momoLabel}</span></div>`;
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();
@@ -6742,7 +6754,7 @@ function qualificationQueueSummary(label, payload) {
 function updateQualificationFilterButton() {
   const button = $('#btnQualificationFilterV2');
   if (!button) return;
-  const labels = {'':'资格筛选', gcash:'资格：GCash', gopay:'资格：GoPay', any:'资格：任一'};
+  const labels = {'':'资格筛选', gcash:'资格：GCash', gopay:'资格：GoPay', momo:'资格：MoMo', any:'资格：任一'};
   const active = Boolean(ACCOUNT_QUALIFICATION_FILTER);
   button.textContent = labels[ACCOUNT_QUALIFICATION_FILTER] || '资格筛选';
   button.classList.toggle('is-active', active);
@@ -6775,6 +6787,10 @@ function markQualificationChecksQueued(payloads) {
       account.gopay_status = 'queued';
       account.gopay_eligible = false;
     }
+    if (queuedByType.get('momo')?.has(id)) {
+      account.momo_status = 'queued';
+      account.momo_eligible = false;
+    }
   });
   if (queuedByType.size) renderAccounts();
 }
@@ -6782,10 +6798,11 @@ async function checkSelectedQualification(kind) {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (!ids.length) { closeQualificationQueryMenu(); showToast('请先选择账号'); return; }
   const workers = Math.min(ids.length, 8);
-  const requested = kind === 'all' ? ['gcash', 'gopay'] : [kind];
+  const requested = kind === 'all' ? ['gcash', 'gopay', 'momo'] : [kind];
   const endpoints = {
     gcash: ['/api/accounts/check-gcash-bulk', 'GCash'],
     gopay: ['/api/accounts/check-gopay-bulk', 'GoPay'],
+    momo: ['/api/accounts/check-momo-bulk', 'MoMo'],
   };
   const buttons = Array.from(document.querySelectorAll('#qualificationQueryMenuV2 [data-query-qualification]'));
   buttons.forEach(button => { button.disabled = true; });
@@ -8659,7 +8676,7 @@ function bindProxyApiImportModalV2() {
 
 let DETECTION_PROXY_IMPORT_PURPOSE_V2 = 'plan';
 function openDetectionProxyImportModalV2(purpose) {
-  DETECTION_PROXY_IMPORT_PURPOSE_V2 = ['gcash','gopay'].includes(purpose) ? purpose : (purpose === 'qualification' ? 'qualification' : (purpose === 'checkout' ? 'checkout' : (purpose === 'at' ? 'at' : 'plan')));
+  DETECTION_PROXY_IMPORT_PURPOSE_V2 = ['gcash','gopay','momo'].includes(purpose) ? purpose : (purpose === 'qualification' ? 'qualification' : (purpose === 'checkout' ? 'checkout' : (purpose === 'at' ? 'at' : 'plan')));
   const modal = $('#detectionProxyImportModal');
   const textarea = $('#detectionProxyImportTextV2');
   const result = $('#detectionProxyImportResultV2');
@@ -8668,17 +8685,17 @@ function openDetectionProxyImportModalV2(purpose) {
   if (!modal || !textarea) return;
   const isCheckout = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'checkout';
   const isAt = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'at';
-  const isQualification = ['gcash','gopay','qualification'].includes(DETECTION_PROXY_IMPORT_PURPOSE_V2);
-  if (title) title.textContent = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gcash' ? '加入 GCash 资格代理池' : (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gopay' ? '加入 GoPay 资格代理池' : (isQualification ? '加入支付资格检测代理池' : (isCheckout ? '加入 Checkout 检测代理池' : (isAt ? '加入 AT 有效性检测专属代理池' : '加入套餐检测代理池'))));
-  if (help) help.textContent = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gcash'
-    ? '只加入 GCash 的 PH（菲律宾）出口代理。'
-    : (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gopay'
-      ? '只加入 GoPay 的 ID（印度尼西亚）出口代理。'
-      : isQualification
-        ? '读取 region-XX 或检测真实出口并按国家归类。'
-        : isCheckout
-          ? '读取每条代理用户名中的 region-XX，并归入 Checkout 独立池。'
-          : (isAt ? '读取每条代理用户名中的 region-XX，并归入 AT 有效性检测专属池。' : '读取每条代理用户名中的 region-XX，并归入套餐独立池。'));
+  const isQualification = ['gcash','gopay','momo','qualification'].includes(DETECTION_PROXY_IMPORT_PURPOSE_V2);
+  if (title) title.textContent = DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gcash' ? '加入 GCash 资格代理池' : (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gopay' ? '加入 GoPay 资格代理池' : (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'momo' ? '加入 MoMo 资格代理池' : (isQualification ? '加入支付资格检测代理池' : (isCheckout ? '加入 Checkout 检测代理池' : (isAt ? '加入 AT 有效性检测专属代理池' : '加入套餐检测代理池')))));
+  if (help) {
+    if (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gcash') help.textContent = '只加入 GCash 的 PH（菲律宾）出口代理。';
+    else if (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'gopay') help.textContent = '只加入 GoPay 的 ID（印度尼西亚）出口代理。';
+    else if (DETECTION_PROXY_IMPORT_PURPOSE_V2 === 'momo') help.textContent = '只加入 MoMo 的 VN（越南）出口代理。';
+    else if (isQualification) help.textContent = '读取 region-XX 或检测真实出口并按国家归类。';
+    else if (isCheckout) help.textContent = '读取每条代理用户名中的 region-XX，并归入 Checkout 独立池。';
+    else if (isAt) help.textContent = '读取每条代理用户名中的 region-XX，并归入 AT 有效性检测专属池。';
+    else help.textContent = '读取每条代理用户名中的 region-XX，并归入套餐独立池。';
+  }
   textarea.value = '';
   if (result) result.textContent = '';
   modal.classList.remove('hidden');
@@ -8722,8 +8739,8 @@ async function submitDetectionProxyImportV2() {
 
 async function saveDetectionProxyCountryV2(select) {
   const requestedPurpose = select.dataset.detectionCountrySelect;
-  const purpose = ['gcash','gopay'].includes(requestedPurpose) ? requestedPurpose : (requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan')));
-  const activeKey = ({gcash:'GCASH_CHECK_PROXY_ACTIVE', gopay:'GOPAY_CHECK_PROXY_ACTIVE', qualification:'QUALIFICATION_CHECK_PROXY_ACTIVE', checkout:'CHECKOUT_CHECK_PROXY_ACTIVE', at:'AT_VALIDITY_PROXY_ACTIVE', plan:'PLAN_CHECK_PROXY_ACTIVE'})[purpose];
+  const purpose = ['gcash','gopay','momo'].includes(requestedPurpose) ? requestedPurpose : (requestedPurpose === 'qualification' ? 'qualification' : (requestedPurpose === 'checkout' ? 'checkout' : (requestedPurpose === 'at' ? 'at' : 'plan')));
+  const activeKey = ({gcash:'GCASH_CHECK_PROXY_ACTIVE', gopay:'GOPAY_CHECK_PROXY_ACTIVE', momo:'MOMO_CHECK_PROXY_ACTIVE', qualification:'QUALIFICATION_CHECK_PROXY_ACTIVE', checkout:'CHECKOUT_CHECK_PROXY_ACTIVE', at:'AT_VALIDITY_PROXY_ACTIVE', plan:'PLAN_CHECK_PROXY_ACTIVE'})[purpose];
   const status = document.querySelector(`[data-detection-proxy-status="${purpose}"]`);
   const country = String(select.value || '').toUpperCase();
   if (!country) return;
@@ -8994,6 +9011,7 @@ function renderConfigPlainFieldV2(f) {
     QUALIFICATION_CHECK_PROXY_ACTIVE: 'QUALIFICATION_CHECK_PROXY_PROFILES',
     GCASH_CHECK_PROXY_ACTIVE: 'GCASH_CHECK_PROXY_PROFILES',
     GOPAY_CHECK_PROXY_ACTIVE: 'GOPAY_CHECK_PROXY_PROFILES',
+    MOMO_CHECK_PROXY_ACTIVE: 'MOMO_CHECK_PROXY_PROFILES',
   };
   if (detectionProfileMap[f.key]) {
     const profiles = detectionProxyProfileOptionsV2(detectionProfileMap[f.key]);
@@ -9081,9 +9099,10 @@ function detectionProxyProfileOptionsV2(profileKey) {
 function refreshDetectionProxySelectV2(profileKey) {
   const activeKey = profileKey === 'GCASH_CHECK_PROXY_PROFILES' ? 'GCASH_CHECK_PROXY_ACTIVE'
     : (profileKey === 'GOPAY_CHECK_PROXY_PROFILES' ? 'GOPAY_CHECK_PROXY_ACTIVE'
+      : (profileKey === 'MOMO_CHECK_PROXY_PROFILES' ? 'MOMO_CHECK_PROXY_ACTIVE'
       : (profileKey === 'PLAN_CHECK_PROXY_PROFILES' ? 'PLAN_CHECK_PROXY_ACTIVE'
         : (profileKey === 'AT_VALIDITY_PROXY_PROFILES' ? 'AT_VALIDITY_PROXY_ACTIVE'
-          : (profileKey === 'QUALIFICATION_CHECK_PROXY_PROFILES' ? 'QUALIFICATION_CHECK_PROXY_ACTIVE' : 'CHECKOUT_CHECK_PROXY_ACTIVE'))));
+          : (profileKey === 'QUALIFICATION_CHECK_PROXY_PROFILES' ? 'QUALIFICATION_CHECK_PROXY_ACTIVE' : 'CHECKOUT_CHECK_PROXY_ACTIVE')))));
   const select = document.querySelector(`#configSectionsV2 [data-key="${activeKey}"]`);
   if (!select) return;
   const profiles = detectionProxyProfileOptionsV2(profileKey);
@@ -9136,6 +9155,8 @@ function renderDetectionProxyPanelV2(fields) {
   const gcashActive = byKey.GCASH_CHECK_PROXY_ACTIVE;
   const gopayProfiles = byKey.GOPAY_CHECK_PROXY_PROFILES;
   const gopayActive = byKey.GOPAY_CHECK_PROXY_ACTIVE;
+  const momoProfiles = byKey.MOMO_CHECK_PROXY_PROFILES;
+  const momoActive = byKey.MOMO_CHECK_PROXY_ACTIVE;
   const qualificationPoolCount = field => detectionProxyProfileOptionsV2(field.key).reduce((sum, item) => sum + item.count, 0);
   const checkoutCard = (checkoutProfiles && checkoutActive) ? `
     <section class="detection-proxy-card-v2" aria-label="Checkout 检测代理">
@@ -9161,7 +9182,7 @@ function renderDetectionProxyPanelV2(fields) {
   return `
     <div class="detection-proxy-panel-v2">
       <div class="detection-proxy-panel-v2-head">
-        <div><b>检测代理（套餐、AT、Checkout 与支付资格四套独立池）</b></div>
+        <div><b>检测代理（套餐、AT、Checkout 与支付资格独立池）</b></div>
         <span>加入静态代理后自动识别国家；选择国家即可使用该国家代理池</span>
       </div>
       <div class="detection-proxy-grid-v2">
@@ -9170,7 +9191,7 @@ function renderDetectionProxyPanelV2(fields) {
         ${checkoutCard}
         <section class="detection-proxy-card-v2 qualification-proxy-card-v2" aria-label="支付资格代理池">
           <h4>支付资格代理池</h4>
-          <p>每种资格使用独立代理池；当前支持 GCash（PH）和 GoPay（ID）。后续资格继续添加在本卡片内。</p>
+          <p>每种资格使用独立代理池；当前支持 GCash（PH）、GoPay（ID）和 MoMo（VN）。</p>
           <div class="qualification-proxy-entry-v2">
             <div class="qualification-proxy-entry-head"><strong>GCash 资格</strong><span class="pill status-muted">固定国家：PH（菲律宾）</span></div>
             <div class="detection-proxy-summary-v2">当前已加入 <strong>${qualificationPoolCount(gcashProfiles)}</strong> 条 GCash 专属代理</div>
@@ -9180,6 +9201,11 @@ function renderDetectionProxyPanelV2(fields) {
             <div class="qualification-proxy-entry-head"><strong>GoPay 资格</strong><span class="pill status-muted">固定国家：ID（印度尼西亚）</span></div>
             <div class="detection-proxy-summary-v2">当前已加入 <strong>${qualificationPoolCount(gopayProfiles)}</strong> 条 GoPay 专属代理</div>
             <button type="button" class="btn primary" data-add-detection-proxy="gopay">加入 GoPay 代理</button>
+          </div>
+          <div class="qualification-proxy-entry-v2">
+            <div class="qualification-proxy-entry-head"><strong>MoMo 资格</strong><span class="pill status-muted">固定国家：VN（越南）</span></div>
+            <div class="detection-proxy-summary-v2">当前已加入 <strong>${qualificationPoolCount(momoProfiles)}</strong> 条 MoMo 专属代理</div>
+            <button type="button" class="btn primary" data-add-detection-proxy="momo">加入 MoMo 代理</button>
           </div>
         </section>
       </div>
@@ -9197,6 +9223,7 @@ function renderMixedConfigSectionV2(name, fields, intro) {
     'QUALIFICATION_CHECK_PROXY_PROFILES', 'QUALIFICATION_CHECK_PROXY_ACTIVE', 'GC_CHECK_PROXY_PROFILES',
     'GCASH_CHECK_PROXY_PROFILES', 'GCASH_CHECK_PROXY_ACTIVE',
     'GOPAY_CHECK_PROXY_PROFILES', 'GOPAY_CHECK_PROXY_ACTIVE',
+    'MOMO_CHECK_PROXY_PROFILES', 'MOMO_CHECK_PROXY_ACTIVE',
   ]);
   const inputs = fields.filter(f => f.type !== 'bool' && !(name === '代理池' && proxyInternalFields.has(f.key)));
   const extra = name === 'RoxyBrowser' ? renderRoxyWorkspaceToolsV2() : (name === '代理池' ? renderProxyApiToolsV2() : '');
