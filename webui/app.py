@@ -2251,7 +2251,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "busy": busy, "busy_count": len(busy), "failed": failed, "failed_count": len(failed),
             "skipped": skipped, "skipped_count": len(skipped), "workers": workers,
             "confirm_sent": False,
-            "message": "每个账号创建一次 VN/VND trial Checkout 并初始化 Stripe 判断 MoMo，随后立即停止",
+            "message": "每个账号只创建一次 VN/VND Checkout，并从创建响应直接判断 MoMo；随后立即停止",
         }), 202
 
     @app.post("/api/accounts/at-qualification-check")
