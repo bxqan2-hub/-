@@ -3474,35 +3474,49 @@ def _momo_payment_method_available(methods: Any) -> bool:
     return False
 
 
-def _momo_trial_marker(payload: dict[str, Any], nested_key: str | None = None) -> tuple[bool, Any, bool]:
-    candidates = [payload]
-    if nested_key and isinstance(payload.get(nested_key), dict):
-        candidates.append(payload[nested_key])
-    trial_days = None
-    trial_end = None
-    for candidate in candidates:
-        subscription_data = candidate.get("subscription_data")
-        if isinstance(subscription_data, dict):
-            trial_days = subscription_data.get("trial_period_days")
-            trial_end = subscription_data.get("trial_end")
-        if trial_days in (None, "", 0, "0", False):
-            trial_days = candidate.get("trial_period_days")
-        if trial_end in (None, "", 0, "0", False):
-            trial_end = candidate.get("trial_end")
-        if trial_days not in (None, "", 0, "0", False) or trial_end not in (None, "", 0, "0", False):
-            break
-    try:
-        has_days = int(trial_days or 0) > 0
-    except (TypeError, ValueError):
-        has_days = False
-    return has_days or trial_end not in (None, "", 0, "0", False), trial_days, trial_end not in (None, "", 0, "0", False)
+def momo_checkout_method(checkout: Any) -> tuple[str, str]:
+    """Read MoMo evidence from the Checkout creation response.
+
+    This intentionally mirrors ``gcash_checkout_method``: it supports both
+    custom OAICS responses and Stripe Checkout responses without advancing the
+    payment state or requiring a trial marker.
+    """
+    if not isinstance(checkout, dict):
+        return "", ""
+    containers: list[tuple[str, dict[str, Any]]] = [("checkout", checkout)]
+    for container_key in ("checkout_session", "session", "payment_method_configuration"):
+        nested = checkout.get(container_key)
+        if isinstance(nested, dict):
+            containers.append((container_key, nested))
+    for container_name, container in containers:
+        for field in ("payment_method_types", "custom_payment_methods", "available_payment_methods", "payment_methods"):
+            methods = container.get(field)
+            if not isinstance(methods, list):
+                continue
+            for item in methods:
+                if isinstance(item, str):
+                    value = item.strip().lower().replace("_", "")
+                    if "momo" in value:
+                        return item.strip(), f"{container_name}.{field}"
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                labels = (
+                    item.get("id"), item.get("type"), item.get("name"),
+                    item.get("display_name"), item.get("label"),
+                    item.get("payment_method_type"), item.get("provider"),
+                )
+                if "momo" in " ".join(str(label or "") for label in labels).lower().replace("_", ""):
+                    return str(item.get("id") or item.get("type") or "momo"), f"{container_name}.{field}"
+    return "", ""
 
 
 def detect_momo(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
-    """Create one VN/VND trial Checkout and inspect Stripe's MoMo method list.
+    """Create one VN/VND Checkout and read MoMo evidence from its response.
 
-    The detector stops after Stripe init. It never creates a PaymentMethod,
-    confirms, approves, polls, or extracts a payment link.
+    This is the same early-stop boundary as the existing GCash detector. It
+    does not require a trial marker, classify OAICS before reading methods, or
+    initialize Stripe; it only inspects the successful creation response.
     """
     data = data if isinstance(data, dict) else {}
     token_raw = str(data.get("token") or "").strip()
@@ -3521,38 +3535,20 @@ def detect_momo(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
             return {"ok": False, "momo": False, "error": f"代理格式错误：{exc}"}, 400
     device_id = str(uuid.uuid4())
     did = str(uuid.uuid4())
-    trial_days = max(1, min(int(data.get("trial_days") or 30), 90))
     options = {
         "plan": "plus", "link_type": "detection", "country": "VN", "currency": "VND",
         "checkout_country": "VN", "checkout_currency": "VND", "use_promo": False,
-        "subscription_data": {"trial_period_days": trial_days},
     }
     try:
         created = create_checkout(token, checkout_payload(options, meta), proxy, device_id, did, lambda _message: None, use_sen=True, use_so=True)
         checkout = dict(created.get("data") or {})
         session_id = str(checkout.get("checkout_session_id") or "")
-        if not re.fullmatch(r"cs_(?:live|test)_[A-Za-z0-9]+", session_id):
-            return {"ok": True, "momo": False, "detection_outcome": "unsupported_custom_checkout", "checkout_created": bool(session_id or checkout.get("checkout_url") or checkout.get("url")), "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": "VND", "checked_at": int(time.time()), "error": "VN/VND Checkout 未返回可用于 MoMo 资格判断的 Stripe cs_* 会话"}, 200
-        trial_in_checkout, _, _ = _momo_trial_marker(checkout, "checkout_session")
-        one_click_eligible = checkout.get("one_click_trial_eligible")
-        if one_click_eligible is False and not trial_in_checkout:
-            return {"ok": True, "momo": False, "detection_outcome": "account_trial_ineligible", "checkout_created": True, "one_click_trial_eligible": False, "actual_trial": False, "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": "VND", "checked_at": int(time.time()), "error": "账号没有真正试用资格"}, 200
-        stripe_pk = str(checkout.get("stripe_publishable_key") or checkout.get("publishable_key") or checkout.get("publishableKey") or checkout.get("key") or "").strip()
-        http = sc.build_http(proxy or None)
-        profile = dict(getattr(sc, "LOCALE_PROFILES", {}).get("VN") or {})
-        profile.setdefault("browser_locale", "vi-VN")
-        profile.setdefault("browser_timezone", "Asia/Ho_Chi_Minh")
-        profile.setdefault("browser_language", "vi-VN")
-        if not stripe_pk:
-            stripe_pk = sc.verify_pk(http, session_id, lambda _message: None)
-        init_data, _version, ctx = sc.init_checkout(http, session_id, stripe_pk, profile, lambda _message: None)
-        methods = list(ctx.get("payment_method_types") or sc._extract_payment_method_types(init_data))
-        init_trial, init_days, init_end = _momo_trial_marker(init_data, "elements_options")
-        actual_trial = bool(trial_in_checkout or init_trial)
-        currency = str(ctx.get("currency") or init_data.get("currency") or "").lower()
-        momo = actual_trial and currency == "vnd" and _momo_payment_method_available(methods)
-        mode = init_data.get("mode") or (init_data.get("elements_options") or {}).get("mode")
-        return {"ok": True, "momo": momo, "detection_outcome": "qualified" if momo else "no_momo_in_stripe_init", "one_click_trial_eligible": one_click_eligible, "actual_trial": actual_trial, "stripe_mode": mode, "payment_method_types": methods, "trial_period_days_in_init": init_days, "trial_end_present_in_init": init_end, "checkout_created": True, "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": currency.upper() or "VND", "checked_at": int(time.time()), "error": None if momo else f"VN/VND Stripe Checkout 未发布 MoMo 或 trial 未生效（currency={currency or 'missing'}）"}, 200
+        if not session_id and not str(checkout.get("url") or checkout.get("checkout_url") or "").strip():
+            return {"ok": False, "momo": False, "checkout_created": False, "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": "VND", "checked_at": int(time.time()), "error": "创建 VN/VND Checkout 失败：未返回 Session"}, 502
+        method_evidence, evidence_source = momo_checkout_method(checkout)
+        momo = bool(method_evidence)
+        checkout_kind = "oaics" if session_id.lower().startswith("oaics_") else ("cs_live" if session_id.lower().startswith("cs_live_") else "unknown")
+        return {"ok": True, "momo": momo, "detection_outcome": "qualified" if momo else "no_momo_in_create_response", "momo_method": "momo" if momo else "", "momo_evidence": method_evidence, "momo_evidence_source": evidence_source, "checkout_kind": checkout_kind, "checkout_created": True, "confirm_sent": False, "promo_update_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": str(checkout.get("checkout_currency") or checkout.get("currency") or "VND").upper(), "checked_at": int(time.time()), "error": None if momo else "当前 VN/VND Checkout 创建响应未包含 MoMo 支付方式"}, 200
     except Exception as exc:
         error_text = f"{type(exc).__name__}: {str(exc)[:500]}"
         upstream_status = re.search(r"OpenAI Checkout HTTP\s+(\d{3})", error_text)

@@ -12,18 +12,17 @@ if str(INTEGRATION_DIR) not in sys.path:
 import app as pay153_app  # noqa: E402
 
 
-def test_momo_protocol_requires_actual_trial_and_stops_after_stripe_init():
-    with patch.object(pay153_app, "create_checkout", return_value={"data": {"checkout_session_id": "cs_live_momo", "publishable_key": "pk_live"}, "http": Mock()}) as create_checkout, \
-         patch.object(pay153_app.sc, "init_checkout", return_value=({"currency": "vnd", "mode": "subscription", "subscription_data": {"trial_period_days": 30}, "payment_method_types": ["card", "momo"]}, "version", {"currency": "vnd", "payment_method_types": ["card", "momo"]})) as init_checkout:
+def test_momo_protocol_reads_method_from_checkout_without_stripe_init():
+    with patch.object(pay153_app, "create_checkout", return_value={"data": {"checkout_session_id": "oaics_momo", "custom_payment_methods": [{"id": "cpmt_momo", "type": "momo"}]}, "http": Mock()}) as create_checkout, \
+         patch.object(pay153_app.sc, "init_checkout") as init_checkout:
         result, status = pay153_app.detect_momo({"token": "aaa.bbb.ccc", "proxy": "http://vn.proxy:8080"})
     assert status == 200
     assert result["momo"] is True
-    assert result["actual_trial"] is True
+    assert result["checkout_kind"] == "oaics"
     assert result["confirm_sent"] is False
     payload = create_checkout.call_args.args[1]
     assert payload["billing_details"] == {"country": "VN", "currency": "VND"}
-    assert payload["subscription_data"]["trial_period_days"] == 30
-    init_checkout.assert_called_once()
+    init_checkout.assert_not_called()
 
 
 def test_momo_detector_reports_trial_and_method_without_confirm():
@@ -74,3 +73,18 @@ def test_momo_persistence_keeps_qualification_metadata():
     assert row["momo_eligible"] is True
     assert row["momo_actual_trial"] is True
     assert row["momo_payment_method_types"] == ["card", "momo"]
+
+
+def test_momo_persistence_keeps_reason_for_completed_negative_result():
+    row = {"id": 9}
+    with patch.object(db, "_load_accounts", return_value=[row]), patch.object(db, "_save_accounts"):
+        assert db.update_account_momo(9, {
+            "ok": True, "momo": False, "actual_trial": False,
+            "one_click_trial_eligible": True,
+            "detection_outcome": "trial_not_applied",
+            "error": "trial 未被后端采用",
+        })
+    assert row["momo_status"] == "success"
+    assert row["momo_eligible"] is False
+    assert row["momo_detection_outcome"] == "trial_not_applied"
+    assert row["momo_error"] == "trial 未被后端采用"

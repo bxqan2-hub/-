@@ -1797,12 +1797,19 @@ def update_account_momo(acc_id: int, result: dict | None = None) -> bool:
         row["momo_eligible"] = eligible
         row["momo_checkout_country"] = str(result.get("checkout_country") or "VN")[:8]
         row["momo_checkout_currency"] = str(result.get("checkout_currency") or "VND")[:8]
+        row["momo_checkout_kind"] = str(result.get("checkout_kind") or "")[:16]
         row["momo_stripe_mode"] = str(result.get("stripe_mode") or "")[:32]
         row["momo_actual_trial"] = bool(result.get("actual_trial"))
+        row["momo_one_click_trial_eligible"] = result.get("one_click_trial_eligible")
+        row["momo_detection_outcome"] = str(result.get("detection_outcome") or "")[:64]
+        row["momo_method"] = str(result.get("momo_method") or "")[:32]
+        row["momo_evidence_source"] = str(result.get("momo_evidence_source") or "")[:80]
         row["momo_payment_method_types"] = result.get("payment_method_types") or []
         row["momo_checked_at"] = result.get("checked_at") or _now()
         row["momo_completed_at"] = _now()
-        row["momo_error"] = None if ok else str(result.get("error") or "MoMo 检测失败")[:500]
+        row["momo_error"] = None if eligible else str(
+            result.get("error") or result.get("detection_outcome") or "未确认 MoMo 资格"
+        )[:500]
         row["momo_attempt_count"] = int(result.get("attempt_count") or 1)
         row["momo_retried_proxies"] = result.get("retried_proxies")
         row["updated_at"] = _now()

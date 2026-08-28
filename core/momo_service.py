@@ -67,7 +67,7 @@ def check_momo(access_token: str, *, proxy: str | None = None, trial_days: int =
     attempts = 0
     for candidate in _transport_candidates(proxy):
         attempts += 1
-        body = {"token": str(access_token or "").strip(), "trial_days": int(trial_days or 30)}
+        body = {"token": str(access_token or "").strip()}
         if candidate:
             body["proxy"] = candidate
             used_transport = urlsplit(candidate).scheme.lower()
