@@ -104,3 +104,10 @@
 - 移除“静态池有多条时必须填写 `PROXY_POOL_ACTIVE`”的入口限制；留空时从 `PROXY_POOL` 随机选择一条，并在单次注册会话内固定。
 - `PROXY_POOL_ACTIVE` 保留为可选优先线路；配置指向已移除的旧线路时回退到当前静态池，不再阻止注册。
 - Cloudflare 后轮换仍通过 `excluded` 排除失败线路，从剩余粘性代理中选择。
+
+## 本次 WebUI 2FA 取码地址与后端取码（2026-08-29）
+
+- 账号页“复制密码2FA”现在输出 `账号----密码----https://2fa.fb.tools/<TOTP Secret>`，不再把 MFA Secret 作为第三段直接复制；批量复制与单账号复制保持同一格式。
+- 账号页“验证码”按钮改为由后端请求 `https://api.fb.tools/api/otp/<TOTP Secret>`，解析上游 `data.otp` 与 `data.timeRemaining` 后返回当前验证码和剩余秒数；前端不接触 Secret，也不再本地生成 TOTP。
+- 本地修改：`webui/app.py` 的 `_account_2fa_url`、`_account_password_2fa_line` 与 `/api/accounts/<id>/totp-code`；`webui/templates/index.html` 的复制提示和取码按钮说明；回归覆盖 `tests/test_webui_helper_regressions.py`。
+- 验证：`PYTHONPATH=. .\\venv\\Scripts\\python.exe -m pytest -q tests/test_webui_helper_regressions.py`（26 passed）；全量 `PYTHONPATH=. .\\venv\\Scripts\\python.exe -m pytest -q`（691 passed，16 subtests passed）。

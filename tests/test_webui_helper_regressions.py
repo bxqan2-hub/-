@@ -138,7 +138,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(credentials.status_code, 200)
         self.assertEqual(
             credentials.get_json()["value"],
-            "user7@test.com----OpenAI-pass-7!----totp-7",
+            "user7@test.com----OpenAI-pass-7!----https://2fa.fb.tools/TOTP7",
         )
 
         credentials_bulk = self.client.post(
@@ -149,8 +149,8 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(
             [item["value"] for item in credentials_bulk.get_json()["values"]],
             [
-                "user7@test.com----OpenAI-pass-7!----totp-7",
-                "user8@test.com----OpenAI-pass-8!----totp-8",
+                "user7@test.com----OpenAI-pass-7!----https://2fa.fb.tools/TOTP7",
+                "user8@test.com----OpenAI-pass-8!----https://2fa.fb.tools/TOTP8",
             ],
         )
 
@@ -182,9 +182,32 @@ class WebUiHelperRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(payload["values"][0]["value"], "ready@test.com----Password-1!----MFA-READY")
+        self.assertEqual(payload["values"][0]["value"], "ready@test.com----Password-1!----https://2fa.fb.tools/MFAREADY")
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["skipped"][0]["id"], 2)
+
+    @patch("webui.app.db.get_account")
+    @patch("requests.get")
+    def test_totp_code_fetches_from_2fa_fb_tools_api(self, requests_get, get_account):
+        get_account.return_value = {
+            "id": 7,
+            "email": "user7@test.com",
+            "totp_secret": "jbsw y3dp ehpk 3pxp",
+        }
+        response = requests_get.return_value
+        response.json.return_value = {"ok": True, "data": {"otp": "123456", "timeRemaining": 17}}
+
+        result = self.client.get("/api/accounts/7/totp-code")
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.get_json()
+        self.assertEqual(payload["totp_code"], "123456")
+        self.assertEqual(payload["remaining_seconds"], 17)
+        self.assertEqual(payload["source"], "2fa.fb.tools")
+        requests_get.assert_called_once_with(
+            "https://api.fb.tools/api/otp/JBSWY3DPEHPK3PXP",
+            timeout=10,
+        )
 
     @patch("webui.app.svc.get_retry_info", return_value={})
     @patch("webui.app.db.list_jobs")
@@ -248,13 +271,13 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn('data-account-copy-secret="registration_password"', html)
         self.assertIn('data-account-copy-secret="account_password_2fa"', html)
         self.assertIn('id="btnCopySelectedCredentialsV2"', html)
-        self.assertIn('id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----MFA Secret">复制所选密码2FA</button>', html)
+        self.assertIn('id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----2FA取码地址">复制所选密码2FA</button>', html)
         self.assertNotIn('id="btnCopyAllCredentialsV2"', html)
         self.assertNotIn("copyAllAccountPasswordTwoFa", html)
         self.assertIn("const copyButton = `<button", html)
         self.assertIn(">复制</button>`;", html)
         self.assertIn("field:'account_password_2fa'", html)
-        self.assertIn("复制为：账号----密码----MFA Secret", html)
+        self.assertIn("复制为：账号----密码----2FA取码地址", html)
         self.assertIn("const ACTIVE_TOTP_CODES = new Map()", html)
         self.assertIn("const PENDING_TOTP_CODES = new Set()", html)
         self.assertIn("function drawAccountTotpCode(id)", html)

@@ -720,13 +720,34 @@ def _account_registration_password(row: dict) -> str:
 
 
 def _account_password_2fa_line(row: dict) -> str:
-    """返回 ``账号----密码----MFA Secret``；任一字段缺失时不生成半成品。"""
+    """返回 ``账号----密码----2FA 取码 URL``；任一字段缺失时不生成半成品。
+
+    2FA Secret 不直接导出给用户，而是转换为 2FA.fb.tools 的固定取码
+    地址。这样复制出来的第三段可以直接粘贴到需要“邮箱+密码+2FA URL”
+    的下游工具中，同时账号页的“验证码”按钮仍通过后端按需取码。
+    """
     email = str(row.get("email") or "").strip()
     password = _account_registration_password(row)
-    totp_secret = str(row.get("totp_secret") or "").strip()
-    if not (email and password and totp_secret):
+    totp_url = _account_2fa_url(row)
+    if not (email and password and totp_url):
         return ""
-    return f"{email}----{password}----{totp_secret}"
+    return f"{email}----{password}----{totp_url}"
+
+
+def _account_2fa_url(row: dict) -> str:
+    """把账号保存的 TOTP Secret 映射为可直接获取验证码的 URL."""
+    secret = str(row.get("totp_secret") or "").strip()
+    if not secret:
+        return ""
+    try:
+        from core.account_export import normalize_totp_secret
+
+        secret = normalize_totp_secret(secret)
+    except Exception:
+        # 历史数据可能包含尚未规范化的 Secret；去掉显示分隔符仍可生成
+        # 与 2FA.fb.tools 页面一致的路径，避免复制功能因为旧数据中断。
+        secret = re.sub(r"[\s-]+", "", secret).upper()
+    return f"https://2fa.fb.tools/{secret}"
 
 
 def _account_secret_value(row: dict, field: str) -> str:
@@ -1548,10 +1569,10 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/accounts/<int:acc_id>/totp-code")
     def api_account_totp_code(acc_id: int):
-        """按需生成账号当前 6 位 TOTP 动态验证码（基于已保存的 totp_secret）。
+        """通过 2FA.fb.tools 后端 API 按需取得当前 6 位动态验证码。
 
-        等价于在 2FA 认证器/2FA.cn 里填入该 Secret 后显示的动态码；
-        不返回 Secret 本身，避免在响应里重复暴露凭据。
+        页面只保存/展示取码 URL；Secret 仅在服务端请求上游时使用，响应
+        不回显 Secret 或完整 URL。
         """
         acc = db.get_account(acc_id)
         if not acc:
@@ -1561,19 +1582,28 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "该账号未启用 2FA（缺少 TOTP Secret）"}), 400
         try:
             from core.account_export import normalize_totp_secret
-            import pyotp
-            import time as _time
-
             normalized = normalize_totp_secret(secret)
         except Exception as exc:
             return jsonify({"ok": False, "error": f"TOTP Secret 解析失败：{type(exc).__name__}"}), 400
         try:
-            otp = pyotp.TOTP(normalized)
-            now = int(_time.time())
-            code = otp.at(now)
-            remaining = 30 - (now % 30)
+            import requests as _requests
+
+            response = _requests.get(
+                f"https://api.fb.tools/api/otp/{normalized}",
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            code = str((data or {}).get("otp") or "").strip()
+            if not code:
+                raise ValueError("上游未返回验证码")
+            remaining = int((data or {}).get("timeRemaining") or 30)
+            remaining = max(1, min(30, remaining))
+            now = int(time.time())
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"验证码生成失败：{type(exc).__name__}"}), 400
+            logger.warning("2FA.fb.tools 取码失败 account_id=%s error=%s", acc_id, type(exc).__name__)
+            return jsonify({"ok": False, "error": f"验证码获取失败：{type(exc).__name__}"}), 502
         return jsonify({
             "ok": True,
             "id": acc_id,
@@ -1582,6 +1612,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "period": 30,
             "remaining_seconds": int(remaining),
             "valid_until": int(now) + int(remaining),
+            "source": "2fa.fb.tools",
         })
 
     @app.post("/api/accounts/secret-bulk")
