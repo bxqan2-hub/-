@@ -187,27 +187,21 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(payload["skipped"][0]["id"], 2)
 
     @patch("webui.app.db.get_account")
-    @patch("requests.get")
-    def test_totp_code_fetches_from_2fa_fb_tools_api(self, requests_get, get_account):
+    @patch("time.time", return_value=1700000000)
+    def test_totp_code_keeps_local_generation(self, _time, get_account):
         get_account.return_value = {
             "id": 7,
             "email": "user7@test.com",
             "totp_secret": "jbsw y3dp ehpk 3pxp",
         }
-        response = requests_get.return_value
-        response.json.return_value = {"ok": True, "data": {"otp": "123456", "timeRemaining": 17}}
 
         result = self.client.get("/api/accounts/7/totp-code")
 
         self.assertEqual(result.status_code, 200)
         payload = result.get_json()
-        self.assertEqual(payload["totp_code"], "123456")
-        self.assertEqual(payload["remaining_seconds"], 17)
-        self.assertEqual(payload["source"], "2fa.fb.tools")
-        requests_get.assert_called_once_with(
-            "https://api.fb.tools/api/otp/JBSWY3DPEHPK3PXP",
-            timeout=10,
-        )
+        self.assertEqual(payload["totp_code"], "324550")
+        self.assertEqual(payload["remaining_seconds"], 10)
+        self.assertNotIn("source", payload)
 
     @patch("webui.app.svc.get_retry_info", return_value={})
     @patch("webui.app.db.list_jobs")

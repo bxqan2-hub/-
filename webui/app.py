@@ -1569,10 +1569,10 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/accounts/<int:acc_id>/totp-code")
     def api_account_totp_code(acc_id: int):
-        """通过 2FA.fb.tools 后端 API 按需取得当前 6 位动态验证码。
+        """按需生成账号当前 6 位 TOTP 动态验证码（基于已保存的 totp_secret）。
 
-        页面只保存/展示取码 URL；Secret 仅在服务端请求上游时使用，响应
-        不回显 Secret 或完整 URL。
+        等价于在 2FA 认证器/2FA.cn 里填入该 Secret 后显示的动态码；
+        不返回 Secret 本身，避免在响应里重复暴露凭据。
         """
         acc = db.get_account(acc_id)
         if not acc:
@@ -1582,28 +1582,19 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "该账号未启用 2FA（缺少 TOTP Secret）"}), 400
         try:
             from core.account_export import normalize_totp_secret
+            import pyotp
+            import time as _time
+
             normalized = normalize_totp_secret(secret)
         except Exception as exc:
             return jsonify({"ok": False, "error": f"TOTP Secret 解析失败：{type(exc).__name__}"}), 400
         try:
-            import requests as _requests
-
-            response = _requests.get(
-                f"https://api.fb.tools/api/otp/{normalized}",
-                timeout=10,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            data = payload.get("data") if isinstance(payload, dict) else None
-            code = str((data or {}).get("otp") or "").strip()
-            if not code:
-                raise ValueError("上游未返回验证码")
-            remaining = int((data or {}).get("timeRemaining") or 30)
-            remaining = max(1, min(30, remaining))
-            now = int(time.time())
+            otp = pyotp.TOTP(normalized)
+            now = int(_time.time())
+            code = otp.at(now)
+            remaining = 30 - (now % 30)
         except Exception as exc:
-            logger.warning("2FA.fb.tools 取码失败 account_id=%s error=%s", acc_id, type(exc).__name__)
-            return jsonify({"ok": False, "error": f"验证码获取失败：{type(exc).__name__}"}), 502
+            return jsonify({"ok": False, "error": f"验证码生成失败：{type(exc).__name__}"}), 400
         return jsonify({
             "ok": True,
             "id": acc_id,
@@ -1612,7 +1603,6 @@ def create_app(auth_code: str | None = None) -> Flask:
             "period": 30,
             "remaining_seconds": int(remaining),
             "valid_until": int(now) + int(remaining),
-            "source": "2fa.fb.tools",
         })
 
     @app.post("/api/accounts/secret-bulk")
