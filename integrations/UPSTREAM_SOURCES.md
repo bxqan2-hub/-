@@ -58,12 +58,13 @@ GoPay qualification reference:
 MoMo qualification reference:
 
 - Local reference: `C:/Users/Administrator/Downloads/check_momo_eligibility..py`
-- The account-page detector mirrors the local GCash early-stop boundary: it
-  creates one VN/VND custom Checkout and reports eligible when the creation
-  response publishes `momo` in its payment-method fields. It supports both
-  OAICS and Stripe-shaped responses, and stops before Stripe init, Elements,
-  PaymentMethod, confirm, approval, polling, or redirect extraction. MoMo uses
-  its own `MOMO_CHECK_PROXY_PROFILES` pool and fixed VN exit.
+- The account-page detector mirrors the local GCash early-stop boundary first,
+  then follows the document's session split only when creation omits methods:
+  OAICS reads its custom Checkout state, while `cs_live_*`/`cs_test_*` performs
+  one Stripe init. It reports eligible when any inspected response publishes
+  `momo`, and stops before taxes, pre_confirm, PaymentMethod, confirm, approval,
+  polling, or redirect extraction. MoMo uses its own
+  `MOMO_CHECK_PROXY_PROFILES` pool and fixed VN exit.
 
 PayPal OAICS extraction core:
 

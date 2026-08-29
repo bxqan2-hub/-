@@ -649,7 +649,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "gopay_attempt_count", "gopay_retried_proxies",
         # MoMo 资格检测。
         "momo_ok", "momo_checkout_country", "momo_checkout_currency", "momo_checkout_kind", "momo_stripe_mode",
-        "momo_actual_trial", "momo_one_click_trial_eligible", "momo_detection_outcome", "momo_method", "momo_evidence_source", "momo_payment_method_types", "momo_checked_at", "momo_completed_at", "momo_error",
+        "momo_actual_trial", "momo_one_click_trial_eligible", "momo_detection_outcome", "momo_method", "momo_evidence", "momo_evidence_source", "momo_inspection_steps", "momo_payment_method_types", "momo_checked_at", "momo_completed_at", "momo_error",
         "momo_attempt_count", "momo_retried_proxies",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_queued_at", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",

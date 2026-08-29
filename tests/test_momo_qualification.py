@@ -25,7 +25,7 @@ def test_momo_protocol_reads_method_from_checkout_without_stripe_init():
     init_checkout.assert_not_called()
 
 
-def test_momo_detector_reports_trial_and_method_without_confirm():
+def test_momo_detector_reports_method_without_confirm():
     runtime = MagicMock()
     runtime.detect_momo.return_value = ({"ok": True, "momo": True, "actual_trial": True}, 200)
     with patch.object(momo_service, "get_pay153_module", return_value=runtime):
@@ -33,6 +33,29 @@ def test_momo_detector_reports_trial_and_method_without_confirm():
     assert result["momo"] is True
     assert result["confirm_sent"] is False
     assert runtime.detect_momo.call_args.args[0]["proxy"] == "http://vn.proxy:8080"
+
+
+def test_momo_protocol_reads_oaics_state_when_creation_omits_methods():
+    created_http = Mock()
+    with patch.object(pay153_app, "create_checkout", return_value={"data": {"checkout_session_id": "oaics_delayed", "processor_entity": "openai_ie"}, "http": created_http}), \
+         patch.object(pay153_app, "fetch_custom_checkout_session", return_value={"custom_payment_methods": [{"id": "cpmt_momo", "type": "momo"}]}) as fetch_custom:
+        result, status = pay153_app.detect_momo({"token": "aaa.bbb.ccc"})
+    assert status == 200
+    assert result["momo"] is True
+    assert result["checkout_kind"] == "oaics"
+    assert result["inspection_steps"] == ["checkout_create", "oaics_custom_checkout"]
+    fetch_custom.assert_called_once()
+
+
+def test_momo_protocol_uses_one_stripe_init_for_cs_live_when_needed():
+    with patch.object(pay153_app, "create_checkout", return_value={"data": {"checkout_session_id": "cs_live_momo", "publishable_key": "pk_live"}, "http": Mock()}), \
+         patch.object(pay153_app.sc, "init_checkout", return_value=({"currency": "vnd", "payment_method_types": ["card", "momo"]}, "version", {"currency": "vnd", "payment_method_types": ["card", "momo"]})) as init_checkout:
+        result, status = pay153_app.detect_momo({"token": "aaa.bbb.ccc"})
+    assert status == 200
+    assert result["momo"] is True
+    assert result["checkout_kind"] == "cs_live"
+    assert result["inspection_steps"] == ["checkout_create", "stripe_init"]
+    init_checkout.assert_called_once()
 
 
 def test_momo_retry_stops_on_definitive_no_method():
