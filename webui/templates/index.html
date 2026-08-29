@@ -1504,6 +1504,15 @@
     .outlook-filter-v2 .outlook-v2-select {
       position: relative; flex: 0 0 auto; display: inline-flex; vertical-align: middle;
     }
+    .outlook-filter-v2 .outlook-v2-native-select {
+      min-width: 132px; height: 40px; padding: 0 30px 0 12px;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      box-sizing: border-box;
+    }
+    .outlook-filter-v2 .outlook-v2-native-select:focus {
+      outline: none; border-color: #377DFF;
+    }
     .outlook-filter-v2 .jobs-tb-btn {
       min-height: 40px; border: 1px solid #dcdfe6; border-radius: 6px;
       background: #fff; color: #606266; padding: 8px 18px;
@@ -2935,6 +2944,15 @@
           </div>
           <input type="hidden" id="poolSourceV2" value="all">
         </div>
+        <select id="poolStatusV2" class="outlook-v2-native-select" aria-label="邮箱状态筛选">
+          <option value="">全部状态</option>
+          <option value="available">可用邮箱</option>
+          <option value="used">已用邮箱</option>
+        </select>
+        <select id="poolGroupV2" class="outlook-v2-native-select" aria-label="邮箱分组筛选">
+          <option value="">全部分组</option>
+          <option value="default">默认组</option>
+        </select>
         <div class="acc-v2-btn-group acc-v2-search-wrap">
           <input id="qOutlookV2" type="search" placeholder="搜索邮箱、状态…" autocomplete="off">
         </div>
@@ -3321,6 +3339,8 @@ let MAIL_STATUS_EXACT_FILTER_ACTIVE = false;
 let LAST_MAIL_STATUS_PLUS_EMAILS = [];
 let POOL_ACCOUNT_EMAIL_FILTER = [];
 let POOL_PLAN_FILTER = '';
+let POOL_STATUS_FILTER = '';
+let POOL_GROUP_FILTER = '';
 let JOBS = [];
 let JOBS_TOTAL = 0;
 let JOB_STATUS_COUNTS = {};
@@ -4403,6 +4423,7 @@ async function loadAccountGroups() {
     ACCOUNT_GROUPS = result.items || [];
     ARCHIVED_ACCOUNTS_TOTAL = Number(result.archived_count || 0);
     renderAccountGroups();
+    renderPoolGroupFilter();
   } catch (error) {
     showToast('加载账号分组失败: ' + error.message);
   }
@@ -7438,6 +7459,19 @@ function getPoolSource() {
   const v2 = document.getElementById('poolSourceV2');
   return (v2 && v2.value) || 'all';
 }
+function renderPoolGroupFilter() {
+  const select = $('#poolGroupV2');
+  if (!select) return;
+  const options = ACCOUNT_GROUPS.map(group =>
+    `<option value="${esc(group.id)}">${esc(group.name)} (${Number(group.count || 0)})</option>`
+  ).join('');
+  select.innerHTML = `<option value="">全部分组</option><option value="default">默认组</option>${options}`;
+  select.value = POOL_GROUP_FILTER;
+  if (select.value !== POOL_GROUP_FILTER) {
+    POOL_GROUP_FILTER = '';
+    select.value = '';
+  }
+}
 const POOL_SOURCE_LABELS = {
   all: '全部邮箱池',
   outlook: 'Outlook 邮箱池',
@@ -7512,13 +7546,15 @@ async function loadOutlook() {
           body:JSON.stringify({
             emails:POOL_ACCOUNT_EMAIL_FILTER,
             source,
+            status:POOL_STATUS_FILTER,
+            group:POOL_GROUP_FILTER,
             q,
             plan:POOL_PLAN_FILTER,
             page:p.page,
             page_size:p.size,
           }),
         })
-      : await api(`/api/outlook?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&source=${encodeURIComponent(source)}&q=${encodeURIComponent(q)}&plan=${encodeURIComponent(POOL_PLAN_FILTER)}`);
+      : await api(`/api/outlook?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&source=${encodeURIComponent(source)}&status=${encodeURIComponent(POOL_STATUS_FILTER)}&group=${encodeURIComponent(POOL_GROUP_FILTER)}&q=${encodeURIComponent(q)}&plan=${encodeURIComponent(POOL_PLAN_FILTER)}`);
     OUTLOOK = res.items || [];
     OUTLOOK_TOTAL = Number(res.total || OUTLOOK.length || 0);
     const totalPages = Math.max(1, Math.ceil(OUTLOOK_TOTAL / p.size));
@@ -7738,6 +7774,20 @@ async function onOutlookBodyClick(e) {
   if (qV2) qV2.addEventListener('input', debounce(() => {
     PAGERS.outlook.page = 1; loadOutlook();
   }, 250));
+  const statusV2 = $('#poolStatusV2');
+  if (statusV2) statusV2.addEventListener('change', () => {
+    POOL_STATUS_FILTER = statusV2.value || '';
+    PAGERS.outlook.page = 1;
+    OUTLOOK_SELECTED.clear();
+    loadOutlook();
+  });
+  const groupV2 = $('#poolGroupV2');
+  if (groupV2) groupV2.addEventListener('change', () => {
+    POOL_GROUP_FILTER = groupV2.value || '';
+    PAGERS.outlook.page = 1;
+    OUTLOOK_SELECTED.clear();
+    loadOutlook();
+  });
   const srcWrap = $('#poolSourceV2Wrap');
   const srcHidden = $('#poolSourceV2');
   if (srcWrap && srcHidden) {

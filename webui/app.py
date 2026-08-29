@@ -2963,13 +2963,16 @@ def create_app(auth_code: str | None = None) -> Flask:
         status = request.args.get("status") or None
         limit = request.args.get("limit", default=500, type=int)
         source = _pool_source_arg()
+        group_id = str(request.args.get("group", default="") or "").strip()
         q = str(request.args.get("q", default="") or "").strip()
         plan_filter = str(request.args.get("plan", default="") or "").strip().lower()
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
-        fetch_limit = 1_000_000 if (paged or q or plan_filter) else limit
+        fetch_limit = 1_000_000 if (paged or q or plan_filter or group_id) else limit
         rows = _list_pool_rows(source=source, status=status, fetch_limit=fetch_limit)
+        if group_id:
+            rows = _filter_account_rows_by_group(rows, group_id)
         if plan_filter:
             rows = [r for r in rows if _matches_pool_plan_filter(r, plan_filter)]
         if q:
@@ -3028,11 +3031,14 @@ def create_app(auth_code: str | None = None) -> Flask:
         if source not in {"all", "outlook", "generic_api", "domain_api", "inbox_mate", "cloudflare_domain"}:
             source = "all"
         status = str(data.get("status") or "").strip() or None
+        group_id = str(data.get("group") or "").strip()
         q = str(data.get("q") or "").strip()
         plan_filter = str(data.get("plan") or "").strip().lower()
         page = max(1, int(data.get("page") or 1))
         page_size = max(1, min(500, int(data.get("page_size") or 50)))
         rows = _list_pool_rows(source=source, status=status, fetch_limit=1_000_000)
+        if group_id:
+            rows = _filter_account_rows_by_group(rows, group_id)
         rows = [r for r in rows if str(r.get("email") or "").strip().lower() in email_set]
         if plan_filter:
             rows = [r for r in rows if _matches_pool_plan_filter(r, plan_filter)]

@@ -86,6 +86,24 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(compact["plus_trial_duration_num_periods"], 1)
         self.assertEqual(compact["plus_trial_duration_period"], "month")
 
+    @patch("webui.app.db.list_account_groups")
+    @patch("webui.app._list_pool_rows")
+    def test_outlook_pool_supports_status_and_group_filters(self, list_pool_rows, list_groups):
+        list_pool_rows.return_value = [
+            {"email": "available@test.com", "status": "available"},
+            {"email": "used@test.com", "status": "used"},
+            {"email": "other@test.com", "status": "available"},
+        ]
+        list_groups.return_value = [{"id": "g1", "name": "分组1", "emails": ["available@test.com"]}]
+
+        response = self.client.get("/api/outlook?paged=1&page=1&page_size=50&status=available&group=g1")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["items"][0]["email"], "available@test.com")
+        list_pool_rows.assert_called_once_with(source="outlook", status="available", fetch_limit=1_000_000)
+
     @patch("webui.app.db.get_account")
     def test_account_secret_single_and_bulk_routes_return_allowlisted_values(self, get_account):
         get_account.side_effect = lambda account_id: {
@@ -266,6 +284,13 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('data-account-copy-secret="account_password_2fa"', html)
         self.assertIn('id="btnCopySelectedCredentialsV2"', html)
         self.assertIn('id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----2FA取码地址">复制所选密码2FA</button>', html)
+        self.assertIn('id="poolStatusV2"', html)
+        self.assertIn('<option value="available">可用邮箱</option>', html)
+        self.assertIn('<option value="used">已用邮箱</option>', html)
+        self.assertIn('id="poolGroupV2"', html)
+        self.assertIn('function renderPoolGroupFilter()', html)
+        self.assertIn('status:POOL_STATUS_FILTER', html)
+        self.assertIn('group:POOL_GROUP_FILTER', html)
         self.assertNotIn('id="btnCopyAllCredentialsV2"', html)
         self.assertNotIn("copyAllAccountPasswordTwoFa", html)
         self.assertIn("const copyButton = `<button", html)
