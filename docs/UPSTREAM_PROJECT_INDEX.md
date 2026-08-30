@@ -118,3 +118,10 @@
 - `core/at_validity.py` 原本单次检测已执行最多 5 次指数退避重试；本次在队列层增加 2 轮、每轮间隔 5 秒的自动重新入队，期间不把临时错误覆盖为最终状态。仍失败后才保留 `AT检测: 网络错误`。
 - 调度器会把已保存的 `request_error`、408/425/429/5xx 结果视为立即到期；WebUI 启动时发现这类历史错误会优先触发重新查询，不再等待完整复查周期。
 - 验证：AT 定向测试 23 项；全量测试结果记录在本次提交的 `VERIFICATION.txt`。
+
+## 本次套餐查询语言跟随代理地区（2026-08-30）
+
+- 重新核对上游 `main`，当前仍为锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`。上游 `vendor/turb_gpt_free_register/core/session.py` 会先探测代理出口，再把 `Accept-Language`、`navigator.language` 和时区画像切到出口地区；上游独立 `paypal_global_rotation_source/gpt_account_plan.py` 的老式套餐探针则固定 `en-US`。
+- 本地套餐探针为了避免每个短请求额外访问 IP 地理接口而保留 `detect_exit_geo=False`，但现在把套餐静态代理条目已经确认的两位国家标签作为 `profile_geo` 传给 `BrowserSession`，达到与上游“出口决定画像”相同的效果，同时不增加地理探测请求。
+- 补齐当前套餐池实际使用的 `ID → id-ID / Asia/Jakarta`、`PH → en-PH / Asia/Manila`、`VN → vi-VN / Asia/Ho_Chi_Minh`，并覆盖 KR/IN/BR/IT/ES；JP/US/SG 等继续使用原映射。代理重试换国时，下一轮会话语言也随新代理国家更新。
+- 查询结果新增 `plan_check_locale_country` 与 `plan_check_request_language`，账号页套餐提示会直接显示例如 `请求语言: id-ID（跟随印度尼西亚 ID 代理）`，便于确认文案语言与代理地区一致。

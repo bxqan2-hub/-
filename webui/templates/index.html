@@ -5082,6 +5082,11 @@ function _planCell(r) {
   const proxyCountry = (r.plan_check_proxy_country || '').toString().trim().toUpperCase();
   const proxyCountryName = proxyCountry ? proxyRegionLabelV2(proxyCountry) : '';
   const proxyCountryDetail = proxyCountry ? `代理地区: ${proxyCountryName}（${proxyCountry}）` : '';
+  const requestLanguage = String(r.plan_check_request_language || '').trim();
+  const localeCountry = String(r.plan_check_locale_country || '').trim().toUpperCase();
+  const requestLanguageDetail = requestLanguage
+    ? `请求语言: ${requestLanguage}${localeCountry ? `（跟随 ${proxyRegionLabelV2(localeCountry)} ${localeCountry} 代理）` : ''}`
+    : '';
   const proxyCountryBadge = proxyCountry
     ? `<span class="plan-proxy-country-v2" title="套餐查询代理地区：${esc(proxyCountryName)}（${esc(proxyCountry)}）">${esc(proxyCountry)}</span>`
     : '';
@@ -5092,7 +5097,7 @@ function _planCell(r) {
   const routeLabel = route === 'proxy' ? `网络: 代理${r.plan_check_proxy_used ? ` (${r.plan_check_proxy_used})` : ''}` :
     route === 'direct_fallback' ? `网络: 直连回退${r.plan_check_proxy_fallback_reason ? ` (${r.plan_check_proxy_fallback_reason})` : ''}` :
     route === 'direct' ? '网络: 直连' : '';
-  const title = [err ? esc(err) : checked, routeLabel, proxyCountryDetail].filter(Boolean).join('；');
+  const title = [err ? esc(err) : checked, routeLabel, proxyCountryDetail, requestLanguageDetail].filter(Boolean).join('；');
   if (['queued','running'].includes(r.plan_check_status)) {
     const automatic = r.plan_check_trigger === 'registration_auto';
     const queued = r.plan_check_status === 'queued';

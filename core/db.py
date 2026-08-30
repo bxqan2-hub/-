@@ -2059,6 +2059,8 @@ def claim_account_plan_check(
         row["plan_check_completed_at"] = None
         row["plan_check_error"] = None
         row["plan_check_proxy_country"] = None
+        row["plan_check_locale_country"] = None
+        row["plan_check_request_language"] = None
         row["updated_at"] = now
         _save_accounts(accounts)
         return True
@@ -2221,6 +2223,15 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
                 if len(normalized_country) == 2 and normalized_country.isalpha()
                 else None
             )
+        if "plan_check_locale_country" in result:
+            normalized_locale_country = str(result.get("plan_check_locale_country") or "").strip().upper()
+            row["plan_check_locale_country"] = (
+                normalized_locale_country
+                if len(normalized_locale_country) == 2 and normalized_locale_country.isalpha()
+                else None
+            )
+        if "plan_check_request_language" in result:
+            row["plan_check_request_language"] = str(result.get("plan_check_request_language") or "")[:40] or None
         row["token_expired"] = result.get("token_expired")
         row["token_expires_at"] = result.get("token_expires_at")
         row["plan_check_result_json"] = json.dumps(result, ensure_ascii=False)

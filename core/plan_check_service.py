@@ -151,12 +151,14 @@ def _run_plan_check(
             access_token,
             proxy=resolved_proxy,
             timezone_offset_min=resolved_timezone,
+            locale_country=proxy_country["value"],
             max_attempts=0,
             fast_mode=True,
             continue_check=lambda: bool(
                 (db.get_account(account_id) or {}).get("plan_check_status") == "running"
             ) and not account_operation_control.is_cancelled(operation_generation),
             retry_proxy_provider=_retry_proxy,
+            locale_country_provider=lambda: proxy_country["value"],
         )
         account_operation_control.raise_if_cancelled(operation_generation)
         result["plan_check_proxy_country"] = proxy_country["value"] or None

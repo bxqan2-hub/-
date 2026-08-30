@@ -4,7 +4,9 @@ import base64
 import json
 from unittest.mock import MagicMock, patch, sentinel
 
+from config import browser as browser_config
 from core import chatgpt_plan, db, plan_check_service
+from core.session import BrowserSession
 from webui.app import create_app
 
 
@@ -15,6 +17,63 @@ class AccountPlanFilterTests(unittest.TestCase):
             "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
         }).encode()).decode().rstrip("=")
         return f"header.{payload}.signature"
+
+    def test_indonesia_proxy_country_builds_indonesian_locale_profile(self):
+        profile = browser_config.pick_browser_profile({"country": "ID"})
+
+        self.assertEqual(profile["locale_profile"], "id")
+        self.assertEqual(profile["navigator_language"], "id-ID")
+        self.assertTrue(profile["accept_language"].startswith("id-ID,id"))
+        self.assertEqual(profile["timezone_iana"], "Asia/Jakarta")
+
+    def test_short_browser_session_accepts_trusted_proxy_country_profile(self):
+        session = BrowserSession(
+            proxy="",
+            detect_exit_geo=False,
+            profile_geo={"country": "VN"},
+        )
+        self.addCleanup(session.close)
+
+        self.assertEqual(session.navigator_language(), "vi-VN")
+        self.assertTrue(session._get_common_headers()["accept-language"].startswith("vi-VN,vi"))
+
+    @patch.object(chatgpt_plan, "BrowserSession")
+    @patch.object(chatgpt_plan, "resolve_plan_check_route", return_value={
+        "proxy": "socks5h://proxy.example:1080",
+        "proxy_mode": "request",
+        "proxy_source": "request",
+        "network_route": "proxy",
+        "proxy_used": "socks5h://***:***@proxy.example:1080",
+        "proxy_fallback_reason": None,
+    })
+    def test_plan_probe_language_follows_proxy_country(self, _route, session_cls):
+        env = session_cls.return_value
+        env.navigator_language.return_value = "id-ID"
+        env._get_common_headers.return_value = {"accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"}
+        env.device_id = "device-id"
+        response = MagicMock(status_code=200, text='{"accounts": {}}')
+        response.json.return_value = {"accounts": {}}
+        env.session.get.return_value = response
+        with patch.object(chatgpt_plan, "parse_accounts_check", return_value={
+            "ok": True,
+            "checked_at": "now",
+            "current_plan_type": "free",
+        }):
+            result = chatgpt_plan.check_account_plan(
+                self._token("acct-id"),
+                proxy="socks5h://proxy.example:1080",
+                locale_country="ID",
+                max_attempts=1,
+                fast_mode=True,
+            )
+
+        session_cls.assert_called_once_with(
+            proxy="socks5h://proxy.example:1080",
+            detect_exit_geo=False,
+            profile_geo={"country": "ID"},
+        )
+        self.assertEqual(result["plan_check_locale_country"], "ID")
+        self.assertEqual(result["plan_check_request_language"], "id-ID")
 
     def test_trial_filters_use_successful_eligibility_result(self):
         trial = {
@@ -211,9 +270,13 @@ class AccountPlanFilterTests(unittest.TestCase):
             self.assertTrue(db.update_account_plan_check(acc_id=7, result={
                 "ok": True,
                 "plan_check_proxy_country": "jp",
+                "plan_check_locale_country": "jp",
+                "plan_check_request_language": "ja-JP",
             }))
 
         self.assertEqual(rows[0]["plan_check_proxy_country"], "JP")
+        self.assertEqual(rows[0]["plan_check_locale_country"], "JP")
+        self.assertEqual(rows[0]["plan_check_request_language"], "ja-JP")
 
     def test_accounts_check_never_borrows_default_workspace(self):
         with self.assertRaisesRegex(ValueError, "JWT 当前 workspace"):
@@ -361,8 +424,10 @@ class PlanCheckWorkerTests(unittest.TestCase):
         resolve.assert_called_once_with("JP|socks5h://proxy.example:1080")
         self.assertTrue(check.call_args.kwargs["fast_mode"])
         self.assertEqual(check.call_args.kwargs["max_attempts"], 0)
+        self.assertEqual(check.call_args.kwargs["locale_country"], "JP")
         self.assertTrue(callable(check.call_args.kwargs["continue_check"]))
         self.assertTrue(callable(check.call_args.kwargs["retry_proxy_provider"]))
+        self.assertTrue(callable(check.call_args.kwargs["locale_country_provider"]))
         _mark.assert_called_once_with(1, proxy_country="JP")
         self.assertEqual(
             _update.call_args.kwargs["result"]["plan_check_proxy_country"],
@@ -372,6 +437,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
     def test_plan_probe_persists_country_of_retry_proxy(self):
         def check_with_retry(*_args, **kwargs):
             self.assertEqual(kwargs["retry_proxy_provider"](), "proxy-ph")
+            self.assertEqual(kwargs["locale_country_provider"](), "PH")
             return {"ok": True, "current_plan_type": "free"}
 
         with patch.object(

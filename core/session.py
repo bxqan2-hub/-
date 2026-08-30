@@ -51,6 +51,7 @@ class BrowserSession:
         proxy: str = None,
         *,
         detect_exit_geo: bool = True,
+        profile_geo: dict | None = None,
         require_proxy: bool = False,
         strict_fingerprint: bool = False,
     ):
@@ -63,6 +64,8 @@ class BrowserSession:
                    显式传 "" 表示禁用代理。
             detect_exit_geo: 是否探测出口 IP 并自动选择语言/时区画像。
                              套餐查询等短请求可关闭，避免额外网络等待。
+            profile_geo: 已由调用方从静态代理标签确认的地理信息；关闭出口
+                         探测时可用它构建与代理国家一致的语言/时区画像。
             require_proxy: 代理出口 fail-closed；禁止直连、socks5 本地 DNS 和请求级改路由。
             strict_fingerprint: TLS impersonate、UA、Client Hints、JS OS 任一不一致即中止。
         """
@@ -138,7 +141,7 @@ class BrowserSession:
 
         # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
         # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
-        self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
+        self.exit_geo = self._detect_exit_geo() if detect_exit_geo else dict(profile_geo or {})
         if self.require_proxy and not str(self.exit_geo.get("ip") or "").strip():
             raise RuntimeError("严格代理出口验证失败：无法通过固定代理确认出口 IP")
         self._enforce_proxy_quality()

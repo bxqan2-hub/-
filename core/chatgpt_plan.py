@@ -1006,12 +1006,14 @@ def check_account_plan(
     *,
     proxy: Optional[str] = None,
     timezone_offset_min: str = "-",
+    locale_country: str = "",
     timeout: float | None = None,
     max_attempts: int | None = None,
     retry_delay: float | None = None,
     fast_mode: bool = False,
     continue_check=None,
     retry_proxy_provider=None,
+    locale_country_provider=None,
 ) -> dict:
     token = normalize_token(token)
     if not token:
@@ -1038,6 +1040,20 @@ def check_account_plan(
             **{k: v for k, v in claims.items() if k != "payload"},
         }
     route_meta = {k: v for k, v in route.items() if k != "proxy"}
+    normalized_locale_country = str(locale_country or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", normalized_locale_country):
+        normalized_locale_country = ""
+    request_locale_country = normalized_locale_country
+    request_language = ""
+
+    def current_locale_country() -> str:
+        value = normalized_locale_country
+        if callable(locale_country_provider):
+            try:
+                value = str(locale_country_provider() or value).strip().upper()
+            except Exception:
+                value = normalized_locale_country
+        return value if re.fullmatch(r"[A-Z]{2}", value or "") else ""
     logger.info(
         "[Plan] 套餐查询网络路径：source=%s mode=%s route=%s proxy=%s",
         route.get("proxy_source") or "none",
@@ -1086,7 +1102,19 @@ def check_account_plan(
                 route = resolve_plan_check_route(None)
                 route_meta = {k: v for k, v in route.items() if k != "proxy"}
             # 套餐查询只需要稳定的请求头，不需要额外访问 IP 地理信息接口。
-            env = BrowserSession(proxy=route["proxy"], detect_exit_geo=False)
+            request_locale_country = current_locale_country()
+            env = BrowserSession(
+                proxy=route["proxy"],
+                detect_exit_geo=False,
+                profile_geo={"country": request_locale_country} if request_locale_country else {},
+            )
+            request_language = env.navigator_language()
+            logger.info(
+                "[Plan] 套餐查询语言画像：proxy_country=%s language=%s timezone=%s",
+                request_locale_country or "default",
+                request_language or "default",
+                str((env.browser_profile or {}).get("timezone_iana") or "default"),
+            )
             request_headers = _common_headers(env, token)
             if claims.get("account_id"):
                 request_headers["chatgpt-account-id"] = str(claims["account_id"])
@@ -1139,6 +1167,8 @@ def check_account_plan(
                     parsed["retry_until_result"] = attempts == 0
                     parsed["request_timeout"] = timeout_seconds
                     parsed["retryable"] = False
+                    parsed["plan_check_locale_country"] = request_locale_country or None
+                    parsed["plan_check_request_language"] = request_language or None
                     parsed.update(route_meta)
                     if fast_mode:
                         parsed["plan_detection_capability"] = "accounts_check_fast"
@@ -1196,6 +1226,8 @@ def check_account_plan(
                     detected["max_attempts"] = attempts or None
                     detected["retry_until_result"] = attempts == 0
                     detected["request_timeout"] = timeout_seconds
+                    detected["plan_check_locale_country"] = request_locale_country or None
+                    detected["plan_check_request_language"] = request_language or None
                     detected.update(route_meta)
                     return detected
         except Exception as exc:
@@ -1220,6 +1252,8 @@ def check_account_plan(
             "max_attempts": attempts or None,
             "retry_until_result": attempts == 0,
             "request_timeout": timeout_seconds,
+            "plan_check_locale_country": request_locale_country or None,
+            "plan_check_request_language": request_language or None,
             **route_meta,
             **{k: v for k, v in claims.items() if k != "payload"},
         })
@@ -1240,7 +1274,13 @@ def check_account_plan(
     if not fast_mode and not (last_result or {}).get("plan_terminal_code"):
         env = None
         try:
-            env = BrowserSession(proxy=route["proxy"], detect_exit_geo=False)
+            request_locale_country = current_locale_country()
+            env = BrowserSession(
+                proxy=route["proxy"],
+                detect_exit_geo=False,
+                profile_geo={"country": request_locale_country} if request_locale_country else {},
+            )
+            request_language = env.navigator_language()
             fallback_result = _check_plan_fallbacks(
                 env,
                 token,
@@ -1254,6 +1294,8 @@ def check_account_plan(
                 "max_attempts": attempts or None,
                 "retry_until_result": attempts == 0,
                 "request_timeout": timeout_seconds,
+                "plan_check_locale_country": request_locale_country or None,
+                "plan_check_request_language": request_language or None,
                 **route_meta,
             })
             return fallback_result

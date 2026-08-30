@@ -627,6 +627,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "plan_check_queued_at", "plan_check_started_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
         "plan_check_proxy_country",
+        "plan_check_locale_country", "plan_check_request_language",
         "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
