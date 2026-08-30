@@ -43,6 +43,15 @@ def _recheck_interval_minutes() -> int:
 
 def _account_due_for_recheck(account: dict, *, now: datetime | None = None) -> bool:
     """判断账号是否尚未检测，或已经达到复查周期。"""
+    # A previous transport failure is not a meaningful validity result. Treat
+    # it as due on the next scheduler pass instead of waiting a full recheck
+    # interval (通常 24 小时) while displaying “AT检测: 网络错误”.
+    if str(account.get("at_validity_status") or "").strip().lower() == "check_error":
+        error_code = str(account.get("at_validity_error_code") or "").strip().lower()
+        if error_code == "request_error" or error_code in {
+            "http_408", "http_425", "http_429", "http_500", "http_502", "http_503", "http_504",
+        }:
+            return True
     raw_checked_at = str(account.get("at_validity_checked_at") or "").strip()
     if not raw_checked_at:
         return True
@@ -60,6 +69,25 @@ def _account_due_for_recheck(account: dict, *, now: datetime | None = None) -> b
 
 def _enabled() -> bool:
     return bool(getattr(validity_cfg, "AT_VALIDITY_AUTO_CHECK_ENABLED", True))
+
+
+def _has_retryable_error_accounts() -> bool:
+    """Detect persisted transport errors so startup does not defer them for hours."""
+    try:
+        accounts = db.list_accounts(limit=1_000_000, archived="0")
+    except Exception:
+        logger.exception("[AT定时检测] 启动扫描历史网络错误失败")
+        return False
+    return any(
+        str(account.get("at_validity_status") or "").strip().lower() == "check_error"
+        and (
+            str(account.get("at_validity_error_code") or "").strip().lower() == "request_error"
+            or str(account.get("at_validity_error_code") or "").strip().lower()
+            in {"http_408", "http_425", "http_429", "http_500", "http_502", "http_503", "http_504"}
+        )
+        and bool(str(account.get("access_token") or "").strip())
+        for account in accounts
+    )
 
 
 def _iso_from_timestamp(value: float | None) -> str | None:
@@ -163,7 +191,10 @@ def ensure_started() -> None:
             return
         _LAST_INTERVAL_MINUTES = _interval_minutes()
         _LAST_ENABLED = _enabled()
-        _NEXT_RUN_TS = time.time() + _LAST_INTERVAL_MINUTES * 60 if _LAST_ENABLED else None
+        if _LAST_ENABLED and _has_retryable_error_accounts():
+            _NEXT_RUN_TS = time.time()
+        else:
+            _NEXT_RUN_TS = time.time() + _LAST_INTERVAL_MINUTES * 60 if _LAST_ENABLED else None
         _STARTED = True
         _THREAD = threading.Thread(target=_loop, name="at-validity-scheduler", daemon=True)
         _THREAD.start()

@@ -250,6 +250,70 @@ class AtValidityPersistenceAndFilterTests(unittest.TestCase):
 
 
 class AtValidityServiceAndSchedulerTests(unittest.TestCase):
+    def test_scheduler_rechecks_persisted_transient_errors_immediately(self):
+        recent = {
+            "at_validity_status": "check_error",
+            "at_validity_error_code": "request_error",
+            "at_validity_checked_at": datetime.now().isoformat(),
+        }
+        self.assertTrue(at_validity_scheduler._account_due_for_recheck(recent))
+
+    @patch.object(at_validity_scheduler.db, "list_accounts")
+    def test_startup_detects_persisted_network_error_accounts(self, list_accounts):
+        list_accounts.return_value = [{
+            "access_token": "at-retry",
+            "at_validity_status": "check_error",
+            "at_validity_error_code": "request_error",
+        }]
+        self.assertTrue(at_validity_scheduler._has_retryable_error_accounts())
+
+    def test_worker_requeues_transient_network_error_before_persisting_error(self):
+        callbacks = []
+
+        class FakeTimer:
+            def __init__(self, _delay, callback):
+                callbacks.append(callback)
+                self.daemon = False
+
+            def start(self):
+                return None
+
+        transient = {
+            "outcome": "check_error",
+            "valid": None,
+            "error_code": "request_error",
+            "error": "Timeout: failed to connect",
+        }
+        at_validity_service._AUTO_RETRY_COUNTS.clear()
+        at_validity_service._QUEUE_SLOTS.acquire()
+        with at_validity_service._RUNNING_LOCK:
+            at_validity_service._RUNNING.add(11)
+        with patch.object(at_validity_service, "_wait_for_rate_slot"), \
+             patch.object(at_validity_service, "check_access_token_validity", return_value=transient), \
+             patch.object(at_validity_service, "_AUTO_RETRY_DELAY_SECONDS", 0.01), \
+             patch.object(at_validity_service.threading, "Timer", FakeTimer), \
+             patch.object(at_validity_service, "enqueue_account_at_validity_check", return_value={"accepted": True}), \
+             patch.object(at_validity_service.db, "update_account_at_validity") as update_validity:
+            result = at_validity_service._run_at_validity_check(
+                account_id=11,
+                email="eleven@example.test",
+                access_token="at-eleven",
+                trigger="scheduled-at",
+                proxy=None,
+            )
+            self.assertTrue(result["auto_retry_scheduled"])
+            update_validity.assert_not_called()
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+            at_validity_service.enqueue_account_at_validity_check.assert_called_once_with(
+                account_id=11,
+                email="eleven@example.test",
+                access_token="at-eleven",
+                trigger="scheduled-at-retry1",
+                proxy=None,
+            )
+        at_validity_service._AUTO_RETRY_COUNTS.clear()
+
     @patch.object(at_validity_scheduler.at_validity_service, "enqueue_account_at_validity_check")
     @patch.object(at_validity_scheduler.db, "list_accounts")
     def test_scheduler_enqueues_only_accounts_with_tokens_in_at_queue(self, list_accounts, enqueue):

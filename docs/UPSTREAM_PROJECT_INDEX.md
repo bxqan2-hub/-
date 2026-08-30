@@ -111,3 +111,10 @@
 - 账号页“验证码”按钮继续使用原有后端本地 `pyotp` 生成方式；本次不改变点击验证码的行为。
 - 本地修改：仅保留 `webui/app.py` 的 `_account_2fa_url`、`_account_password_2fa_line`，以及 `webui/templates/index.html` 的复制提示；回归覆盖 `tests/test_webui_helper_regressions.py`。
 - 验证：`PYTHONPATH=. .\\venv\\Scripts\\python.exe -m pytest -q tests/test_webui_helper_regressions.py`（26 passed）；全量测试结果以本次提交记录为准。
+
+## 本次 AT 定时检测网络错误自动重试（2026-08-30）
+
+- 现象核对：`注册成功的邮箱.json` 中 6 个账号的 `request_error` 均为 curl 连接 `chatgpt.com:443` 超时，5 次请求全部失败，网络路径为 `local_vpn`；这属于网络/VPN 路径未连通，不能据此判定 AT 失效。
+- `core/at_validity.py` 原本单次检测已执行最多 5 次指数退避重试；本次在队列层增加 2 轮、每轮间隔 5 秒的自动重新入队，期间不把临时错误覆盖为最终状态。仍失败后才保留 `AT检测: 网络错误`。
+- 调度器会把已保存的 `request_error`、408/425/429/5xx 结果视为立即到期；WebUI 启动时发现这类历史错误会优先触发重新查询，不再等待完整复查周期。
+- 验证：AT 定向测试 23 项；全量测试结果记录在本次提交的 `VERIFICATION.txt`。
