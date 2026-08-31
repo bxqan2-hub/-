@@ -2557,7 +2557,8 @@
 
         <div class="acc-v2-btn-group">
           <span class="acc-v2-selected" id="accountsSelectedHintV2">已选 0</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----2FA取码地址">复制所选密码2FA</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----原始2FA Secret">复制所选密码2FA</button>
+          <button type="button" class="jobs-tb-btn" id="btnCopySelectedCredentialsUrlV2" disabled title="按账号一行复制所选账号：账号----密码----2FA取码地址">复制所选2FA URL</button>
           <label class="acc-v2-inline" title="批量补跑 Codex、查套餐和查活使用的并发线程数">线程
             <span class="el-input-number">
               <input id="codexBulkWorkersV2" type="number" min="1" value="10" inputmode="numeric">
@@ -5253,11 +5254,13 @@ function _twoFaCellV2(r) {
     : !mfaReady ? '开启2FA'
     : '';
   const securityDetail = r.security_setup_error || r.security_setup_message || '';
-  const copyButton = `<button type="button" class="acc-v2-twofa-btn acc-v2-credential-copy" data-account-copy-secret="account_password_2fa" data-account-id="${id}" ${credentialsReady ? '' : 'disabled'} title="${credentialsReady ? '复制为：账号----密码----2FA取码地址' : '密码或 2FA 凭据不完整'}">复制</button>`;
+  const copyButton = `<button type="button" class="acc-v2-twofa-btn acc-v2-credential-copy" data-account-copy-secret="account_password_2fa" data-account-id="${id}" ${credentialsReady ? '' : 'disabled'} title="${credentialsReady ? '复制为：账号----密码----原始2FA Secret' : '密码或 2FA 凭据不完整'}">复制</button>`;
+  const copyUrlButton = `<button type="button" class="acc-v2-twofa-btn acc-v2-credential-copy" data-account-copy-secret="account_password_2fa_url" data-account-id="${id}" ${credentialsReady ? '' : 'disabled'} title="${credentialsReady ? '复制为：账号----密码----2FA取码地址' : '密码或 2FA 凭据不完整'}">复制URL</button>`;
   return `<div class="acc-v2-twofa" data-account-twofa="${id}">
     <div class="acc-v2-sub acc-v2-twofa-status" data-account-twofa-value="${id}">${statusHtml}</div>
     <div class="acc-v2-twofa-actions">
       ${copyButton}
+      ${copyUrlButton}
       ${securityLabel ? `<button type="button" class="acc-v2-twofa-btn${securityFailed ? ' danger' : ''}" data-account-security-setup="${id}" ${securityRunning ? 'disabled aria-busy="true"' : ''} title="${esc(securityDetail || '在独立 Roxy 窗口自动邮箱 OTP 登录；登录成功后用页面脚本补密码并执行 MFA enroll/activate，不进入注册主流程')}">${esc(securityLabel)}</button>` : ''}
       ${mfaReady ? `<button type="button" class="acc-v2-twofa-btn acc-v2-totp-code-btn" data-account-totp-code="${id}" ${totpPending ? 'disabled aria-busy="true"' : ''} aria-pressed="${totpState ? 'true' : 'false'}" title="${totpPending ? '正在获取动态验证码' : totpState ? '停止显示动态验证码' : '按已保存 Secret 生成当前 6 位动态验证码'}">${totpPending ? '获取中…' : totpState ? '停止' : '验证码'}</button>` : ''}
     </div>
@@ -5516,7 +5519,7 @@ function updateAccountSelectionUi(pageRows = null) {
    'btnExtractSelectedOaicsV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2',
-    'btnCopySelectedCredentialsV2', 'btnCopySelectedAccountMailboxV2', 'btnCopySelectedTokensV2', 'btnDownloadSelectedTxtV2',
+    'btnCopySelectedCredentialsV2', 'btnCopySelectedCredentialsUrlV2', 'btnCopySelectedAccountMailboxV2', 'btnCopySelectedTokensV2', 'btnDownloadSelectedTxtV2',
     'btnArchiveSelectedAccountsV2', 'btnPurgeSelectedAccountsV2',
   ];
   v2Ids.forEach(id => {
@@ -5896,7 +5899,7 @@ async function onAccountsBodyClick(e) {
       const value = await fetchOneAccountSecret(id, field);
       if (!value) { showToast('可复制内容为空'); return; }
       copyText(value);
-      showToast(field === 'access_token' ? 'Token 已复制' : field === 'codex_agent_token' ? 'Agent Token 已复制' : field === 'account_password_2fa' ? '账号、密码和 2FA 取码地址已按三段格式复制' : field === 'totp_secret' ? '2FA Secret 已复制' : field === 'registration_password' ? 'OpenAI 密码已复制' : field === 'oaics_link' ? 'BA 链接已复制' : '账号整行已复制');
+      showToast(field === 'access_token' ? 'Token 已复制' : field === 'codex_agent_token' ? 'Agent Token 已复制' : field === 'account_password_2fa' ? '账号、密码和原始 2FA Secret 已按三段格式复制' : field === 'account_password_2fa_url' ? '账号、密码和 2FA 取码地址已按三段格式复制' : field === 'totp_secret' ? '2FA Secret 已复制' : field === 'registration_password' ? 'OpenAI 密码已复制' : field === 'oaics_link' ? 'BA 链接已复制' : '账号整行已复制');
     } catch(err) {
       showToast('复制失败: ' + err.message);
     } finally {
@@ -6418,10 +6421,10 @@ async function copySelectedAccountLines() {
   } catch(err) { showToast('复制失败: ' + err.message); }
 }
 
-async function copySelectedAccountPasswordTwoFa(event = null) {
+async function copySelectedAccountPasswordTwoFa(event = null, useUrl = false) {
   const ids = Array.from(ACCOUNT_SELECTED).map(Number);
   if (!ids.length) { showToast('请先选择账号'); return; }
-  const button = event?.currentTarget || $('#btnCopySelectedCredentialsV2');
+  const button = event?.currentTarget || $(useUrl ? '#btnCopySelectedCredentialsUrlV2' : '#btnCopySelectedCredentialsV2');
   const oldText = button?.textContent || '复制';
   if (button) {
     button.disabled = true;
@@ -6432,7 +6435,7 @@ async function copySelectedAccountPasswordTwoFa(event = null) {
     const result = await api('/api/accounts/secret-bulk', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({account_ids:ids, field:'account_password_2fa'}),
+      body:JSON.stringify({account_ids:ids, field:useUrl ? 'account_password_2fa_url' : 'account_password_2fa'}),
     });
     const lines = (result.values || []).map(item => item.value).filter(Boolean);
     if (!lines.length) { showToast('所选账号缺少完整的密码或 2FA 凭据'); return; }
@@ -6440,7 +6443,7 @@ async function copySelectedAccountPasswordTwoFa(event = null) {
     const skipped = (result.skipped || []).length;
     showToast(skipped
       ? `已复制 ${lines.length} 个账号；跳过 ${skipped} 个凭据不完整账号`
-      : `已复制 ${lines.length} 个账号的密码和 2FA 取码地址`);
+      : `已复制 ${lines.length} 个账号的密码和${useUrl ? ' 2FA 取码地址' : '原始 2FA Secret'}`);
   } catch(err) {
     showToast('复制账号密码2FA失败: ' + err.message);
   } finally {
@@ -7269,6 +7272,7 @@ async function findSelectedAccountsInEmailPool() {
   bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnCopySelectedCredentialsV2', copySelectedAccountPasswordTwoFa);
+  bind('btnCopySelectedCredentialsUrlV2', e => copySelectedAccountPasswordTwoFa(e, true));
   bind('btnCopySelectedAccountMailboxV2', e => copySelectionMailboxLines({account_ids:Array.from(ACCOUNT_SELECTED)}, e.currentTarget));
   bind('btnCopySelectedTokensV2', copySelectedAccountTokens);
   bind('btnDownloadSelectedTxtV2', downloadSelectedAccountTxt);

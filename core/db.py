@@ -9,11 +9,13 @@
     - 用于注册的邮箱.json     Outlook 账号池完整状态
     - 注册成功的邮箱.json     注册成功账号完整状态
 """
+import base64
 import copy
 import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -2570,6 +2572,29 @@ def _normalize_rebound_source_url(value: str) -> str:
     return normalized[:-1] if normalized.endswith("/") and parsed.path in {"", "/"} and not parsed.query else normalized
 
 
+def normalize_rebound_totp_secret(value: str) -> str:
+    """规范化换绑凭据中的原始 Secret，并兼容历史误导出的 2FA URL。"""
+    text = str(value or "").strip()
+    if text.lower().startswith(("http://", "https://")):
+        parsed = urlparse(text)
+        if parsed.scheme.lower() not in {"http", "https"} or parsed.netloc.lower() != "2fa.fb.tools":
+            raise ValueError("2FA URL 仅支持 2fa.fb.tools")
+        if parsed.query or parsed.fragment:
+            raise ValueError("2FA URL 不能包含查询参数或片段")
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) != 1:
+            raise ValueError("2FA URL 路径格式无效")
+        text = path_parts[0]
+    normalized = "".join(text.split()).upper().rstrip("=")
+    if not normalized or not re.fullmatch(r"[A-Z2-7]+", normalized):
+        raise ValueError("2FA Secret 不是有效的 Base32")
+    try:
+        base64.b32decode(normalized + "=" * (-len(normalized) % 8), casefold=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("2FA Secret 不是有效的 Base32") from exc
+    return normalized
+
+
 def import_rebound_accounts(records: list[dict], target_group_id: str = "default") -> tuple[list[dict], list[dict]]:
     """按第一段原邮箱删除旧账号，再用本行资料创建一个全新的账号。
 
@@ -2613,6 +2638,12 @@ def import_rebound_accounts(records: list[dict], target_group_id: str = "default
             plan_import_hint = str(raw.get("plan_import_hint") or "").strip().lower()
             plan_import_hint_source = str(raw.get("plan_import_hint_source") or "").strip()
             normalized_new = new_email.lower()
+            if password and totp_secret:
+                try:
+                    totp_secret = normalize_rebound_totp_secret(totp_secret)
+                except ValueError as exc:
+                    skipped.append({"line": index, "email": new_email, "reason": str(exc)})
+                    continue
             credential_mode = bool(password and totp_secret)
             direct_old_email_mode = bool(old_email_hint and "@" in old_email_hint)
             source_url_mode = bool(_normalize_rebound_source_url(source_api_url))

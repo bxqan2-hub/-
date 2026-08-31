@@ -72,6 +72,24 @@ class ReboundAccountImportTests(unittest.TestCase):
         self.assertEqual(len(invalid), 1)
         self.assertNotIn("secret-value", json.dumps(invalid, ensure_ascii=False))
 
+    def test_password_format_recovers_secret_from_legacy_2fa_url(self):
+        records, invalid = _parse_rebound_account_lines(
+            "old@example.com----new@example.com----Password!----"
+            "https://2fa.fb.tools/JBSWY3DPEHPK3PXP----at-password"
+        )
+
+        self.assertEqual(invalid, [])
+        self.assertEqual(records[0]["totp_secret"], "JBSWY3DPEHPK3PXP")
+
+    def test_password_format_rejects_untrusted_2fa_url(self):
+        records, invalid = _parse_rebound_account_lines(
+            "old@example.com----new@example.com----Password!----"
+            "https://example.com/JBSWY3DPEHPK3PXP----at-password"
+        )
+
+        self.assertEqual(records, [])
+        self.assertEqual(invalid[0]["reason"], "2FA URL 仅支持 2fa.fb.tools")
+
     def test_password_format_matches_only_old_email_and_replaces_result_data(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -100,6 +118,23 @@ class ReboundAccountImportTests(unittest.TestCase):
                 self.assertEqual(account["at_validity_status"], "unchecked")
                 self.assertIsNone(account.get("plan_type"))
                 self.assertNotIn("email_rebind_from", account)
+
+    def test_db_import_also_normalizes_legacy_2fa_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._seed(root)
+            with self._patch_storage(root):
+                updated, skipped = db.import_rebound_accounts([{
+                    "old_email": "old@example.com",
+                    "email": "new@example.com",
+                    "password": "ChangedPassword!",
+                    "totp_secret": "https://2fa.fb.tools/GEZDGNBVGY3TQOJQ",
+                    "access_token": "at-new",
+                }], target_group_id="group-2")
+
+                self.assertEqual(skipped, [])
+                self.assertEqual(len(updated), 1)
+                self.assertEqual(db.get_account_by_email("new@example.com")["totp_secret"], "GEZDGNBVGY3TQOJQ")
 
     def test_url_format_matches_old_email_not_url_and_keeps_new_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:

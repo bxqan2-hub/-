@@ -112,7 +112,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
             "access_token": f"token-{account_id}",
             "copy_line": f"line-{account_id}",
             "codex_agent_token": f"agent-{account_id}",
-            "totp_secret": f"totp-{account_id}",
+            "totp_secret": "JBSWY3DPEHPK3PXP",
             "extra_json": json.dumps({"registration_password": f"OpenAI-pass-{account_id}!"}),
         }
 
@@ -132,14 +132,14 @@ class WebUiHelperRegressionTests(unittest.TestCase):
 
         totp = self.client.get("/api/accounts/7/secret?field=totp_secret")
         self.assertEqual(totp.status_code, 200)
-        self.assertEqual(totp.get_json()["value"], "totp-7")
+        self.assertEqual(totp.get_json()["value"], "JBSWY3DPEHPK3PXP")
 
         totp_bulk = self.client.post(
             "/api/accounts/secret-bulk",
             json={"account_ids": [7], "field": "totp_secret"},
         )
         self.assertEqual(totp_bulk.status_code, 200)
-        self.assertEqual(totp_bulk.get_json()["values"][0]["value"], "totp-7")
+        self.assertEqual(totp_bulk.get_json()["values"][0]["value"], "JBSWY3DPEHPK3PXP")
 
         password = self.client.get("/api/accounts/7/secret?field=registration_password")
         self.assertEqual(password.status_code, 200)
@@ -156,7 +156,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(credentials.status_code, 200)
         self.assertEqual(
             credentials.get_json()["value"],
-            "user7@test.com----OpenAI-pass-7!----https://2fa.fb.tools/TOTP7",
+            "user7@test.com----OpenAI-pass-7!----JBSWY3DPEHPK3PXP",
         )
 
         credentials_bulk = self.client.post(
@@ -167,9 +167,16 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(
             [item["value"] for item in credentials_bulk.get_json()["values"]],
             [
-                "user7@test.com----OpenAI-pass-7!----https://2fa.fb.tools/TOTP7",
-                "user8@test.com----OpenAI-pass-8!----https://2fa.fb.tools/TOTP8",
+                "user7@test.com----OpenAI-pass-7!----JBSWY3DPEHPK3PXP",
+                "user8@test.com----OpenAI-pass-8!----JBSWY3DPEHPK3PXP",
             ],
+        )
+
+        credentials_url = self.client.get("/api/accounts/7/secret?field=account_password_2fa_url")
+        self.assertEqual(credentials_url.status_code, 200)
+        self.assertEqual(
+            credentials_url.get_json()["value"],
+            "user7@test.com----OpenAI-pass-7!----https://2fa.fb.tools/JBSWY3DPEHPK3PXP",
         )
 
         rejected = self.client.get("/api/accounts/7/secret?field=password")
@@ -181,7 +188,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
             1: {
                 "id": 1,
                 "email": "ready@test.com",
-                "totp_secret": "MFA-READY",
+                "totp_secret": "JBSWY3DPEHPK3PXP",
                 "extra_json": json.dumps({"registration_password": "Password-1!"}),
             },
             2: {
@@ -200,7 +207,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(payload["values"][0]["value"], "ready@test.com----Password-1!----https://2fa.fb.tools/MFAREADY")
+        self.assertEqual(payload["values"][0]["value"], "ready@test.com----Password-1!----JBSWY3DPEHPK3PXP")
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["skipped"][0]["id"], 2)
 
@@ -283,7 +290,9 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn('data-account-copy-secret="registration_password"', html)
         self.assertIn('data-account-copy-secret="account_password_2fa"', html)
         self.assertIn('id="btnCopySelectedCredentialsV2"', html)
-        self.assertIn('id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----2FA取码地址">复制所选密码2FA</button>', html)
+        self.assertIn('id="btnCopySelectedCredentialsV2" disabled title="按账号一行复制所选账号：账号----密码----原始2FA Secret">复制所选密码2FA</button>', html)
+        self.assertIn('id="btnCopySelectedCredentialsUrlV2" disabled title="按账号一行复制所选账号：账号----密码----2FA取码地址">复制所选2FA URL</button>', html)
+        self.assertIn('data-account-copy-secret="account_password_2fa_url"', html)
         self.assertIn('id="poolStatusV2"', html)
         self.assertIn('<option value="available">可用邮箱</option>', html)
         self.assertIn('<option value="used">已用邮箱</option>', html)
@@ -295,7 +304,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("copyAllAccountPasswordTwoFa", html)
         self.assertIn("const copyButton = `<button", html)
         self.assertIn(">复制</button>`;", html)
-        self.assertIn("field:'account_password_2fa'", html)
+        self.assertIn("field:useUrl ? 'account_password_2fa_url' : 'account_password_2fa'", html)
         self.assertIn("复制为：账号----密码----2FA取码地址", html)
         self.assertIn("const ACTIVE_TOTP_CODES = new Map()", html)
         self.assertIn("const PENDING_TOTP_CODES = new Set()", html)

@@ -176,6 +176,12 @@ def _parse_rebound_account_lines(text: str) -> tuple[list[dict], list[dict]]:
         ):
             invalid.append({"line": number, "email": new_email, "reason": "密码和 2FA 不能为空"})
             continue
+        if record["import_format"] == "old_new_password_2fa_at":
+            try:
+                record["totp_secret"] = db.normalize_rebound_totp_secret(record["totp_secret"])
+            except ValueError as exc:
+                invalid.append({"line": number, "email": new_email, "reason": str(exc)})
+                continue
         if not str(record.get("access_token") or "").strip():
             invalid.append({"line": number, "email": new_email, "reason": "AT 不能为空"})
             continue
@@ -721,12 +727,21 @@ def _account_registration_password(row: dict) -> str:
 
 
 def _account_password_2fa_line(row: dict) -> str:
-    """返回 ``账号----密码----2FA 取码 URL``；任一字段缺失时不生成半成品。
+    """返回 ``账号----密码----原始 2FA Secret``。"""
+    email = str(row.get("email") or "").strip()
+    password = _account_registration_password(row)
+    secret = str(row.get("totp_secret") or "").strip()
+    if not (email and password and secret):
+        return ""
+    try:
+        secret = db.normalize_rebound_totp_secret(secret)
+    except ValueError:
+        return ""
+    return f"{email}----{password}----{secret}"
 
-    2FA Secret 不直接导出给用户，而是转换为 2FA.fb.tools 的固定取码
-    地址。这样复制出来的第三段可以直接粘贴到需要“邮箱+密码+2FA URL”
-    的下游工具中，同时账号页的“验证码”按钮仍通过后端按需取码。
-    """
+
+def _account_password_2fa_url_line(row: dict) -> str:
+    """返回 ``账号----密码----2FA 取码 URL``。"""
     email = str(row.get("email") or "").strip()
     password = _account_registration_password(row)
     totp_url = _account_2fa_url(row)
@@ -741,13 +756,9 @@ def _account_2fa_url(row: dict) -> str:
     if not secret:
         return ""
     try:
-        from core.account_export import normalize_totp_secret
-
-        secret = normalize_totp_secret(secret)
-    except Exception:
-        # 历史数据可能包含尚未规范化的 Secret；去掉显示分隔符仍可生成
-        # 与 2FA.fb.tools 页面一致的路径，避免复制功能因为旧数据中断。
-        secret = re.sub(r"[\s-]+", "", secret).upper()
+        secret = db.normalize_rebound_totp_secret(secret)
+    except ValueError:
+        return ""
     return f"https://2fa.fb.tools/{secret}"
 
 
@@ -766,9 +777,11 @@ def _account_secret_value(row: dict, field: str) -> str:
         return _account_registration_password(row)
     if field == "account_password_2fa":
         return _account_password_2fa_line(row)
+    if field == "account_password_2fa_url":
+        return _account_password_2fa_url_line(row)
     if field == "oaics_link":
         return str(row.get("oaics_link") or "")
-    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/registration_password/account_password_2fa/oaics_link")
+    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/registration_password/account_password_2fa/account_password_2fa_url/oaics_link")
 
 
 def _compact_job_for_list(row: dict) -> dict:

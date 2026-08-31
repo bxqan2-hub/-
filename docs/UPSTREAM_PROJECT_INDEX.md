@@ -112,6 +112,13 @@
 - 本地修改：仅保留 `webui/app.py` 的 `_account_2fa_url`、`_account_password_2fa_line`，以及 `webui/templates/index.html` 的复制提示；回归覆盖 `tests/test_webui_helper_regressions.py`。
 - 验证：`PYTHONPATH=. .\\venv\\Scripts\\python.exe -m pytest -q tests/test_webui_helper_regressions.py`（26 passed）；全量测试结果以本次提交记录为准。
 
+## 本次换绑导出恢复原始 2FA（2026-09-01）
+
+- 默认“复制密码2FA”和批量复制恢复为 `账号----密码----原始 TOTP Secret`，确保换绑分站导回主站时不会把取码 URL 整串写入 `totp_secret`。
+- 新增独立“复制URL”与“复制所选2FA URL”按钮，只有显式使用新按钮时才输出 `账号----密码----https://2fa.fb.tools/<Secret>`。
+- 换绑导入兼容已经导出的 `2fa.fb.tools` URL：严格校验域名与单段路径后提取原始 Base32 Secret；其他域名、查询参数或无效 Base32 会拒绝保存。
+- 本地动态验证码生成、MFA enroll/activate 和账号资格检测核心逻辑均未改动。
+
 ## 本次 AT 定时检测网络错误自动重试（2026-08-30）
 
 - 现象核对：`注册成功的邮箱.json` 中 6 个账号的 `request_error` 均为 curl 连接 `chatgpt.com:443` 超时，5 次请求全部失败，网络路径为 `local_vpn`；这属于网络/VPN 路径未连通，不能据此判定 AT 失效。
