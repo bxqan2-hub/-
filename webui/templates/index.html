@@ -740,6 +740,13 @@
     .accounts-table-v2 .qualification-badge-momo {
       color: #9a3412; background: #fff4e8; border-color: #f5b97a;
     }
+    .accounts-table-v2 .qualification-badge-failed {
+      color: #b42318; background: #fff0ef; border-color: #fbc4c4;
+    }
+    .accounts-table-v2 .qualification-status-dot {
+      width: 6px; height: 6px; flex: 0 0 6px; margin-right: 5px;
+      border-radius: 50%; background: #e64545; box-shadow: 0 0 0 2px rgba(230,69,69,.14);
+    }
     .qualification-proxy-card-v2 { grid-column: 1 / -1; }
     .qualification-proxy-entry-v2 { padding: 10px 0; border-top: 1px solid #ebeef5; }
     .qualification-proxy-entry-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -5031,22 +5038,34 @@ function _qualificationBadges(r) {
   const gcashChecking = ['queued','running'].includes(String(r.gcash_status || '').toLowerCase());
   const gopayChecking = ['queued','running'].includes(String(r.gopay_status || '').toLowerCase());
   const momoChecking = ['queued','running'].includes(String(r.momo_status || '').toLowerCase());
-  const gcashTitle = r.gcash_eligible === true
+  const gcashFailed = String(r.gcash_status || '').toLowerCase() === 'failed';
+  const gopayFailed = String(r.gopay_status || '').toLowerCase() === 'failed';
+  const momoFailed = String(r.momo_status || '').toLowerCase() === 'failed';
+  const gcashTitle = gcashFailed
+    ? (r.gcash_error || 'GCash 资格检测失败')
+    : r.gcash_eligible === true
     ? [r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '', 'PH/PHP Checkout 已发布 GCash'].filter(Boolean).join('；')
     : gcashChecking ? 'GCash 资格检测中' : '尚未确认 GCash 资格';
-  const gopayTitle = r.gopay_eligible === true
+  const gopayTitle = gopayFailed
+    ? (r.gopay_error || 'GoPay 资格检测失败')
+    : r.gopay_eligible === true
     ? [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；')
     : gopayChecking ? 'GoPay 资格检测中' : '尚未确认 GoPay 资格';
-  const momoTitle = r.momo_eligible === true
+  const momoTitle = momoFailed
+    ? (r.momo_error || 'MoMo 资格检测失败')
+    : r.momo_eligible === true
     ? [r.momo_checked_at ? `检测: ${r.momo_checked_at}` : '', r.momo_checkout_kind ? `类型: ${r.momo_checkout_kind}` : '', r.momo_evidence_source ? `证据: ${r.momo_evidence_source}` : 'VN/VND Checkout 创建响应已发布 MoMo'].filter(Boolean).join('；')
     : momoChecking ? 'MoMo 资格检测中' : (r.momo_error || '尚未确认 MoMo 资格');
-  const gcashClass = r.gcash_eligible === true ? 'qualification-badge-gcash' : (gcashChecking ? 'status-running' : 'qualification-badge-muted');
-  const gopayClass = r.gopay_eligible === true ? 'qualification-badge-gopay' : (gopayChecking ? 'status-running' : 'qualification-badge-muted');
-  const momoClass = r.momo_eligible === true ? 'qualification-badge-momo' : (momoChecking ? 'status-running' : 'qualification-badge-muted');
+  const gcashClass = gcashFailed ? 'qualification-badge-failed' : (r.gcash_eligible === true ? 'qualification-badge-gcash' : (gcashChecking ? 'status-running' : 'qualification-badge-muted'));
+  const gopayClass = gopayFailed ? 'qualification-badge-failed' : (r.gopay_eligible === true ? 'qualification-badge-gopay' : (gopayChecking ? 'status-running' : 'qualification-badge-muted'));
+  const momoClass = momoFailed ? 'qualification-badge-failed' : (r.momo_eligible === true ? 'qualification-badge-momo' : (momoChecking ? 'status-running' : 'qualification-badge-muted'));
   const gcashLabel = gcashChecking && r.gcash_eligible !== true ? 'GCash 检测中' : 'GCash';
   const gopayLabel = gopayChecking && r.gopay_eligible !== true ? 'GoPay 检测中' : 'GoPay';
   const momoLabel = momoChecking && r.momo_eligible !== true ? 'MoMo 检测中' : 'MoMo';
-  return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">${gcashLabel}</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">${gopayLabel}</span><span class="pill ${momoClass}" title="${esc(momoTitle)}">${momoLabel}</span></div>`;
+  const gcashDot = gcashFailed ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
+  const gopayDot = gopayFailed ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
+  const momoDot = momoFailed ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
+  return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">${gcashDot}${gcashLabel}</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">${gopayDot}${gopayLabel}</span><span class="pill ${momoClass}" title="${esc(momoTitle)}">${momoDot}${momoLabel}</span></div>`;
 }
 function _checkoutKindBadge(r) {
   const status = String(r.checkout_kind_status || '').toLowerCase();
