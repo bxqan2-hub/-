@@ -223,10 +223,18 @@ class RoxyBrowserClient:
                     "[Roxy] %s %s params=%s body=%s attempt=%s/%s",
                     method, url, params, json_body, attempt, max_attempts,
                 )
+                api_timeout = int(
+                    getattr(
+                        _cfg,
+                        "ROXY_CREATE_API_TIMEOUT" if is_create else "ROXY_API_TIMEOUT",
+                        45 if is_create else 15,
+                    )
+                    or (45 if is_create else 15)
+                )
                 request_kwargs = {
                     "params": params or None,
                     "json": json_body if json_body is not None else None,
-                    "timeout": max(3, int(getattr(_cfg, "ROXY_API_TIMEOUT", 15) or 15)),
+                    "timeout": max(3, api_timeout),
                 }
                 if is_lifecycle:
                     with _ROXY_LIFECYCLE_LOCK:

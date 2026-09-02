@@ -57,10 +57,13 @@ ROXY_OPEN_EXTRA_PARAMS: dict = {}
 
 # Selenium 行为
 ROXY_SELENIUM_TIMEOUT: int = 90
-# 本地 Roxy OpenAPI 与 Selenium 页面等待使用不同预算。参考实现的本地 API
-# 默认 15 秒；旧逻辑误用 90 秒页面超时，再叠加 3 次重试，单个生命周期调用
-# 最坏可占用 276 秒。
+# 本地 Roxy OpenAPI 与 Selenium 页面等待使用不同预算。创建 Profile 会触发
+# 指纹/代理初始化，在并发批次中经常超过 15 秒；创建请求单独使用更长预算，
+# 避免把“服务端仍在创建”误报为失败后重复创建孤儿环境。
 ROXY_API_TIMEOUT: int = 15
+# 仅用于 /browser/create；关闭/删除等短生命周期接口继续使用
+# ROXY_API_TIMEOUT，避免它们失败时长时间占用队列。
+ROXY_CREATE_API_TIMEOUT: int = 45
 ROXY_KEEP_BROWSER_OPEN: bool = False
 
 # 注册快速等待预算。这些值只限制单个阶段，成功信号仍会立即结束等待。
@@ -172,6 +175,7 @@ apply_env_overrides(globals(), {
     'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool',
     'ROXY_CLOSE_PATH': 'str', 'ROXY_KEEP_BROWSER_OPEN': 'bool',
     'ROXY_SELENIUM_TIMEOUT': 'int', 'ROXY_API_TIMEOUT': 'int',
+    'ROXY_CREATE_API_TIMEOUT': 'int',
     'ROXY_EMAIL_SUBMIT_TIMEOUT': 'int',
     'ROXY_EMAIL_SUBMIT_ATTEMPTS': 'int', 'ROXY_OTP_MAX_WAIT': 'int',
     'ROXY_OTP_POLL_INTERVAL': 'int', 'ROXY_OTP_SETTLE_SECONDS': 'int',

@@ -48,6 +48,20 @@ class ChatGPTSessionExpiredError(RuntimeError):
     """The browser session is no longer authenticated and needs a fresh login."""
 
 
+def _is_proxy_transport_failure(value) -> bool:
+    """识别浏览器明确的代理链路失败，交给外层轮换代理节点。"""
+    text = f"{type(value).__name__}: {value}".lower()
+    markers = (
+        "err_proxy_connection_failed",
+        "err_tunnel_connection_failed",
+        "proxy connection failed",
+        "proxyerror",
+        "socksproxyerror",
+        "unable to connect to proxy",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _ensure_local_proxy_bypass() -> None:
     """Keep Selenium/Roxy local control traffic out of Clash/system proxies."""
     values: list[str] = []
@@ -3093,6 +3107,20 @@ def _resume_chatgpt_login_callback(driver, email: str | None = None) -> str:
         accept_hosts=("chatgpt.com", "auth.openai.com"),
     )
     time.sleep(4)
+    # Email verified 之后 callback cookie 可能还在异步落盘。先在当前浏览器
+    # 会话中读取一次 session，避免立即重填邮箱并再次消耗 OTP。
+    try:
+        settled = _fetch_chatgpt_session(
+            driver,
+            timeout=max(8, int(getattr(_cfg, "ROXY_SESSION_WAIT_TIMEOUT", 25) or 25)),
+            auto_jump_wait=3,
+            refresh_attempts=0,
+        )
+        if isinstance(settled, dict) and settled.get("accessToken"):
+            logger.info("%s callback session 已在当前 Cookie 中稳定，跳过重复 OTP", _log_prefix(driver))
+            return "logged_in"
+    except Exception as exc:
+        logger.info("%s callback session 尚未稳定，继续按页面状态恢复：%s", _log_prefix(driver), type(exc).__name__)
     if email and _is_email_login_page_still_present(driver):
         logger.warning("%s callback 恢复停在空邮箱登录页，重新提交同一邮箱", _log_prefix(driver))
         return _submit_email_and_wait_next(driver, email, attempts=2)
@@ -3995,7 +4023,14 @@ def run_roxy_registration(
             "error": result_error,
         }
     except Exception as exc:
-        logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
+        if _is_proxy_transport_failure(exc):
+            # 当前入口由 registration_service 统一调度；这里保留稳定 stage，
+            # 让任务重试按钮/邮箱状态处理能区分坏代理与页面业务拒绝。
+            logger.warning("[Roxy注册][代理] 当前代理连接失败，记录为可轮换节点：%s", str(exc)[:240])
+            error_text = f"stage=proxy_transport; {type(exc).__name__}: {str(exc)[:260]}"
+        else:
+            error_text = f"{type(exc).__name__}: {str(exc)[:300]}"
+        logger.error("[Roxy注册] 失败：%s", error_text)
         logger.debug("[Roxy注册] 失败详情", exc_info=True)
         # 在返回 service 前一次完成邮箱状态转换。旧逻辑先放回
         # available，导致 service 无法累加失败次数，同一个不出码邮箱被反复领取。
@@ -4015,7 +4050,7 @@ def run_roxy_registration(
             "success": False,
             "email": email,
             "traffic": traffic_summary,
-            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            "error": error_text,
         }
     finally:
         if traffic_optimizer is not None:

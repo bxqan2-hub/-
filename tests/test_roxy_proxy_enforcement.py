@@ -207,7 +207,7 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
 
         self.assertEqual(request.call_count, 1)
         sleep.assert_not_called()
-        self.assertEqual(request.call_args.kwargs["timeout"], 15)
+        self.assertEqual(request.call_args.kwargs["timeout"], 45)
 
     def test_create_attempts_are_bounded_separately_from_lifecycle_retries(self):
         client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
@@ -260,6 +260,14 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 client.request("POST", "/browser/create", json_body={})
         self.assertEqual(request.call_count, 1)
+
+    def test_create_uses_dedicated_long_timeout_but_other_lifecycle_keeps_short_budget(self):
+        client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
+        response = MagicMock(status_code=200, text='{"code":0}')
+        response.json.return_value = {"code": 0}
+        with patch.object(client.http, "request", return_value=response) as request:
+            client.request("POST", "/browser/open", json_body={})
+        self.assertEqual(request.call_args.kwargs["timeout"], 15)
 
     def test_profile_create_calls_are_serialized(self):
         guard = threading.Lock()

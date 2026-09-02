@@ -710,6 +710,7 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         driver = MagicMock()
         with patch("core.roxy_registration._safe_get") as safe_get, \
              patch("core.roxy_registration.time.sleep"), \
+             patch("core.roxy_registration._fetch_chatgpt_session", side_effect=RuntimeError("session pending")), \
              patch("core.roxy_registration._is_email_login_page_still_present", return_value=True), \
              patch("core.roxy_registration._submit_email_and_wait_next", return_value="otp") as submit_email:
             state = roxy_registration._resume_chatgpt_login_callback(driver, email="mail@example.test")

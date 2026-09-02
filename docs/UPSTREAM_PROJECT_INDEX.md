@@ -132,3 +132,10 @@
 - 本地套餐探针为了避免每个短请求额外访问 IP 地理接口而保留 `detect_exit_geo=False`，但现在把套餐静态代理条目已经确认的两位国家标签作为 `profile_geo` 传给 `BrowserSession`，达到与上游“出口决定画像”相同的效果，同时不增加地理探测请求。
 - 补齐当前套餐池实际使用的 `ID → id-ID / Asia/Jakarta`、`PH → en-PH / Asia/Manila`、`VN → vi-VN / Asia/Ho_Chi_Minh`，并覆盖 KR/IN/BR/IT/ES；JP/US/SG 等继续使用原映射。代理重试换国时，下一轮会话语言也随新代理国家更新。
 - 查询结果新增 `plan_check_locale_country` 与 `plan_check_request_language`，账号页套餐提示会直接显示例如 `请求语言: id-ID（跟随印度尼西亚 ID 代理）`，便于确认文案语言与代理地区一致。
+
+## 本次注册失败分级与生命周期/回调修复（2026-09-02）
+
+- 最新批次（任务 12、19、24、28、33）共 5 条失败：3 条为本地 Roxy `/browser/create` 在并发指纹初始化期间超过 15 秒，1 条为 `ERR_PROXY_CONNECTION_FAILED`，1 条为 Email verified 后 callback 尚未稳定便重复要求 OTP。
+- 与锁定上游 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 对照后，本地保留上游“同一浏览器 Cookie/代理 + 显式 access token + enroll/activate 成功确认”安全边界；本次只调整生命周期等待预算、代理错误 stage 和 callback 的 session settle 顺序。
+- 本地修改：`config/roxybrowser.py` / `.env.example` 新增 `ROXY_CREATE_API_TIMEOUT=45`；`core/roxybrowser_client.py` 仅对 `/browser/create` 使用该预算；`core/roxy_registration.py` 将明确代理链路错误标记为 `stage=proxy_transport`，并在 callback 恢复时先读取稳定 session，避免重复消耗 OTP。
+- 验证：`tests/test_roxy_proxy_enforcement.py` 覆盖创建与其他生命周期接口超时隔离；`tests/test_roxy_registration_session_recovery.py` 覆盖代理错误分类和 Email verified callback settle。

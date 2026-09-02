@@ -6,6 +6,25 @@ from core import roxy_registration
 
 
 class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
+    def test_proxy_transport_failure_is_classified(self):
+        self.assertTrue(
+            roxy_registration._is_proxy_transport_failure(
+                RuntimeError("unknown error: net::ERR_PROXY_CONNECTION_FAILED")
+            )
+        )
+        self.assertFalse(roxy_registration._is_proxy_transport_failure(RuntimeError("password rejected")))
+
+    @patch.object(roxy_registration, "_fetch_chatgpt_session", return_value={"accessToken": "settled-at"})
+    @patch.object(roxy_registration, "_safe_get")
+    @patch.object(roxy_registration.time, "sleep")
+    def test_callback_uses_settled_session_before_requesting_another_otp(self, _sleep, _safe_get, _fetch):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+        self.assertEqual(
+            roxy_registration._resume_chatgpt_login_callback(driver, email="user@example.test"),
+            "logged_in",
+        )
+        _fetch.assert_called_once()
     def test_session_reader_keeps_warning_response_and_http_status(self):
         driver = MagicMock()
         driver.execute_async_script.return_value = {
