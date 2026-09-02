@@ -4,7 +4,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core import checkout_kind_service, db, registration_service
+from core.integrated_runtime import get_pay153_module
 from webui.app import create_app
+
+
+pay153_app = get_pay153_module()
 
 
 class CheckoutKindDetectionTests(unittest.TestCase):
@@ -105,6 +109,56 @@ class CheckoutKindDetectionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("静态代理池", result["error"])
         get_pay153_module.assert_not_called()
+
+    def test_checkout_detection_follows_vn_proxy_currency(self):
+        with patch.object(pay153_app, "extract_access_token", return_value=("parsed-at", {})), \
+             patch.object(pay153_app, "normalize_proxy", return_value=(
+                 "socks5h://user-region-VN-sid@example.test:3010"
+             )), \
+             patch.object(
+                 pay153_app,
+                 "create_checkout",
+                 return_value={"data": {
+                     "checkout_session_id": "oaics_vn_session",
+                     "checkout_provider": "open_ai",
+                     "processor_entity": "openai_llc",
+                 }},
+             ) as create_checkout:
+            result, status = pay153_app.detect_checkout_kind({
+                "token": "raw-at",
+                "proxy": "VN|socks5h://user-region-VN-sid@example.test:3010",
+            })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["checkout_country"], "VN")
+        self.assertEqual(result["checkout_currency"], "VND")
+        payload = create_checkout.call_args.args[1]
+        self.assertEqual(payload["billing_details"], {"country": "VN", "currency": "VND"})
+
+    def test_checkout_detection_uses_geo_for_untagged_proxy(self):
+        with patch.object(pay153_app, "proxy_geo_cached", return_value={
+            "country": "ID", "currency": "IDR",
+        }), patch.object(pay153_app, "normalize_proxy", return_value="socks5h://example.test:3010"), \
+             patch.object(pay153_app, "extract_access_token", return_value=("parsed-at", {})), \
+             patch.object(
+                 pay153_app,
+                 "create_checkout",
+                 return_value={"data": {
+                     "checkout_session_id": "cs_live_id_session",
+                 }},
+             ) as create_checkout:
+            result, status = pay153_app.detect_checkout_kind({
+                "token": "raw-at", "proxy": "socks5h://example.test:3010",
+            })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(result["checkout_country"], "ID")
+        self.assertEqual(result["checkout_currency"], "IDR")
+        self.assertEqual(
+            create_checkout.call_args.args[1]["billing_details"],
+            {"country": "ID", "currency": "IDR"},
+        )
 
     @patch("core.checkout_kind_service.enqueue")
     @patch("main.run_registration")

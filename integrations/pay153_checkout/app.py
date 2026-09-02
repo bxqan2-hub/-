@@ -3732,8 +3732,34 @@ def detect_gopay(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         }, 502
 
 
+def checkout_detection_locale(proxy: str) -> tuple[str, str]:
+    """Select the Checkout billing pair that matches the request exit.
+
+    Checkout now rejects a billing country that differs from the country of the
+    request IP.  Detection pools carry a ``region-XX`` tag, so use that first;
+    for untagged proxies, fall back to the existing geo probe.  Direct checks
+    retain the historical DE/EUR pair.
+    """
+    fallback = ("DE", "EUR")
+    if not proxy:
+        return fallback
+    country = proxy_country_hint(proxy)
+    detected_currency = ""
+    if not country:
+        try:
+            geo = proxy_geo_cached(proxy)
+            country = str(geo.get("country") or "").strip().upper()
+            detected_currency = str(geo.get("currency") or "").strip().upper()
+        except Exception:
+            return fallback
+    if not re.fullmatch(r"[A-Z]{2}", country):
+        return fallback
+    currency, _source = normalize_checkout_currency(country, detected_currency)
+    return country, currency
+
+
 def detect_checkout_kind(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
-    """Create the smallest DE/EUR Plus Checkout and classify its backend."""
+    """Create a zero-promotion Plus Checkout matching the proxy country."""
     data = data if isinstance(data, dict) else {}
     token_raw = str(data.get("token") or "").strip()
     if not token_raw:
@@ -3749,6 +3775,7 @@ def detect_checkout_kind(data: dict[str, Any] | None) -> tuple[dict[str, Any], i
             proxy = normalize_proxy(proxy)
         except ValueError as exc:
             return {"ok": False, "error": f"代理格式错误：{exc}"}, 400
+    checkout_country, checkout_currency = checkout_detection_locale(proxy)
     device_id = str(uuid.uuid4())
     did = str(uuid.uuid4())
     options = {
@@ -3756,10 +3783,10 @@ def detect_checkout_kind(data: dict[str, Any] | None) -> tuple[dict[str, Any], i
         # "detection" selects the generic custom Checkout response. It is not
         # a payment method and does not run Kakao/Stripe/PayPal processing.
         "link_type": "detection",
-        "country": "DE",
-        "currency": "EUR",
-        "checkout_country": "DE",
-        "checkout_currency": "EUR",
+        "country": checkout_country,
+        "currency": checkout_currency,
+        "checkout_country": checkout_country,
+        "checkout_currency": checkout_currency,
         "use_promo": False,
     }
     try:
@@ -3785,8 +3812,8 @@ def detect_checkout_kind(data: dict[str, Any] | None) -> tuple[dict[str, Any], i
             "processor_entity": processor,
             "session_prefix": "oaics_" if kind == "oaics" else ("cs_live_" if kind == "cs_live" else session_id[:16]),
             "proxy_source": proxy_source,
-            "checkout_country": "DE",
-            "checkout_currency": "EUR",
+            "checkout_country": checkout_country,
+            "checkout_currency": checkout_currency,
             "confirm_sent": False,
             "promo_attached": False,
             "promo_update_sent": False,

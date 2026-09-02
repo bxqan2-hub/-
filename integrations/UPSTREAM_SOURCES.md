@@ -16,10 +16,11 @@ Kakao OAICS protocol reference:
     confirm, Stripe Intent continuation, redirect allow-listing, and a strict
     no-retry boundary after confirm is sent.
   - Account-page OAICS/CSLIVE detection reuses only the source project's
-    early-stop classification boundary. It creates one DE/EUR custom Plus
-    Checkout without a promotion, classifies `oaics_*` / `cs_live_*`, and stops
-    before taxes, PaymentMethod, ctoken, or confirm. KR is needed for the Kakao
-    payment method, not for Checkout classification.
+    early-stop classification boundary. It creates one custom Plus Checkout
+    without a promotion, matching the selected proxy country and currency
+    (direct requests retain the DE/EUR fallback), classifies `oaics_*` /
+    `cs_live_*`, and stops before taxes, PaymentMethod, ctoken, or confirm. KR
+    is needed for the Kakao payment method, not for Checkout classification.
 
 GCash qualification reference:
 
