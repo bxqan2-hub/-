@@ -5041,30 +5041,37 @@ function _qualificationBadges(r) {
   const gcashFailed = String(r.gcash_status || '').toLowerCase() === 'failed';
   const gopayFailed = String(r.gopay_status || '').toLowerCase() === 'failed';
   const momoFailed = String(r.momo_status || '').toLowerCase() === 'failed';
-  const gcashTitle = gcashFailed
-    ? (r.gcash_error || 'GCash 资格检测失败')
+  // A completed negative check is also a visible negative result: the
+  // detector succeeded, but this account did not expose the payment method.
+  // Keep queued/running neutral so only finished failures/no-qualification
+  // results receive the red dot requested by the account list.
+  const gcashNegative = gcashFailed || (String(r.gcash_status || '').toLowerCase() === 'success' && r.gcash_eligible !== true);
+  const gopayNegative = gopayFailed || (String(r.gopay_status || '').toLowerCase() === 'success' && r.gopay_eligible !== true);
+  const momoNegative = momoFailed || (String(r.momo_status || '').toLowerCase() === 'success' && r.momo_eligible !== true);
+  const gcashTitle = gcashNegative
+    ? (r.gcash_error || (gcashFailed ? 'GCash 资格检测失败' : '未检测到 GCash 资格'))
     : r.gcash_eligible === true
     ? [r.gcash_checked_at ? `检测: ${r.gcash_checked_at}` : '', 'PH/PHP Checkout 已发布 GCash'].filter(Boolean).join('；')
     : gcashChecking ? 'GCash 资格检测中' : '尚未确认 GCash 资格';
-  const gopayTitle = gopayFailed
-    ? (r.gopay_error || 'GoPay 资格检测失败')
+  const gopayTitle = gopayNegative
+    ? (r.gopay_error || (gopayFailed ? 'GoPay 资格检测失败' : '未检测到 GoPay 资格'))
     : r.gopay_eligible === true
     ? [r.gopay_checked_at ? `检测: ${r.gopay_checked_at}` : '', 'ID/IDR Stripe Checkout 已发布 GoPay'].filter(Boolean).join('；')
     : gopayChecking ? 'GoPay 资格检测中' : '尚未确认 GoPay 资格';
-  const momoTitle = momoFailed
-    ? (r.momo_error || 'MoMo 资格检测失败')
+  const momoTitle = momoNegative
+    ? (r.momo_error || (momoFailed ? 'MoMo 资格检测失败' : '未检测到 MoMo 资格'))
     : r.momo_eligible === true
     ? [r.momo_checked_at ? `检测: ${r.momo_checked_at}` : '', r.momo_checkout_kind ? `类型: ${r.momo_checkout_kind}` : '', r.momo_evidence_source ? `证据: ${r.momo_evidence_source}` : 'VN/VND Checkout 创建响应已发布 MoMo'].filter(Boolean).join('；')
     : momoChecking ? 'MoMo 资格检测中' : (r.momo_error || '尚未确认 MoMo 资格');
-  const gcashClass = gcashFailed ? 'qualification-badge-failed' : (r.gcash_eligible === true ? 'qualification-badge-gcash' : (gcashChecking ? 'status-running' : 'qualification-badge-muted'));
-  const gopayClass = gopayFailed ? 'qualification-badge-failed' : (r.gopay_eligible === true ? 'qualification-badge-gopay' : (gopayChecking ? 'status-running' : 'qualification-badge-muted'));
-  const momoClass = momoFailed ? 'qualification-badge-failed' : (r.momo_eligible === true ? 'qualification-badge-momo' : (momoChecking ? 'status-running' : 'qualification-badge-muted'));
+  const gcashClass = gcashNegative ? 'qualification-badge-failed' : (r.gcash_eligible === true ? 'qualification-badge-gcash' : (gcashChecking ? 'status-running' : 'qualification-badge-muted'));
+  const gopayClass = gopayNegative ? 'qualification-badge-failed' : (r.gopay_eligible === true ? 'qualification-badge-gopay' : (gopayChecking ? 'status-running' : 'qualification-badge-muted'));
+  const momoClass = momoNegative ? 'qualification-badge-failed' : (r.momo_eligible === true ? 'qualification-badge-momo' : (momoChecking ? 'status-running' : 'qualification-badge-muted'));
   const gcashLabel = gcashChecking && r.gcash_eligible !== true ? 'GCash 检测中' : 'GCash';
   const gopayLabel = gopayChecking && r.gopay_eligible !== true ? 'GoPay 检测中' : 'GoPay';
   const momoLabel = momoChecking && r.momo_eligible !== true ? 'MoMo 检测中' : 'MoMo';
-  const gcashDot = gcashFailed ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
-  const gopayDot = gopayFailed ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
-  const momoDot = momoFailed ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
+  const gcashDot = gcashNegative ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
+  const gopayDot = gopayNegative ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
+  const momoDot = momoNegative ? '<span class="qualification-status-dot" aria-hidden="true"></span>' : '';
   return `<div class="qualification-badges-v2"><span class="pill ${gcashClass}" title="${esc(gcashTitle)}">${gcashDot}${gcashLabel}</span><span class="pill ${gopayClass}" title="${esc(gopayTitle)}">${gopayDot}${gopayLabel}</span><span class="pill ${momoClass}" title="${esc(momoTitle)}">${momoDot}${momoLabel}</span></div>`;
 }
 function _checkoutKindBadge(r) {
