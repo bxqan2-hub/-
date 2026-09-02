@@ -139,3 +139,12 @@
 - 与锁定上游 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 对照后，本地保留上游“同一浏览器 Cookie/代理 + 显式 access token + enroll/activate 成功确认”安全边界；本次只调整生命周期等待预算、代理错误 stage 和 callback 的 session settle 顺序。
 - 本地修改：`config/roxybrowser.py` / `.env.example` 新增 `ROXY_CREATE_API_TIMEOUT=45`；`core/roxybrowser_client.py` 仅对 `/browser/create` 使用该预算；`core/roxy_registration.py` 将明确代理链路错误标记为 `stage=proxy_transport`，并在 callback 恢复时先读取稳定 session，避免重复消耗 OTP。
 - 验证：`tests/test_roxy_proxy_enforcement.py` 覆盖创建与其他生命周期接口超时隔离；`tests/test_roxy_registration_session_recovery.py` 覆盖代理错误分类和 Email verified callback settle。
+
+## 本次 smiles_forlorn.9c 2FA activate 失败核对（2026-09-02）
+
+- 日志：`注册日志/d19de9d0-2deb-44e6-9f21-d023913ab73d.log`，任务 110。
+- 高概率原因：注册、密码、session/access token 和 TOTP enroll 均已完成；仅在 `totp_activate` 阶段失败，`http_status=null`，说明 Selenium/浏览器 fetch 在 activate 边界发生异常或 status=0。旧实现的 execute_async_script 异常被压缩成通用消息，无法继续区分 renderer/代理传输与服务端拒绝。
+- 中概率原因：enroll 到 activate 的时间窗口或浏览器网络瞬态导致本次 6 位码提交失败；低概率原因：服务端对该 enrollment 返回一次性业务拒绝。日志没有返回体/状态码，不能把它们混为确定根因。
+- 对照上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`：本地顺序仍保持同一浏览器上下文、显式 access token、enroll → TOTP → activate、仅 `success=true` 才保存 Secret；本次新增一轮同 enrollment activate 重试，不重复 enroll、不切代理、不提前落盘。
+- 本地修改：`core/account_export.py::_browser_authenticated_json_post` 保留脱敏 `stage=exception detail=...`；`_setup_totp_with_driver` 对 status 为空、408/425/429、5xx 或 `success=false` 做一次新窗口码重试。账号仍按“密码已完成、2FA 未完成”保留，可从账号页安全设置重新执行。
+- 验证：新增 renderer detail 与同 enrollment 重试测试；基线相关测试 `19 passed`，修改后 2FA/注册回归 `123 passed`，全量 `712 passed, 16 subtests passed`。

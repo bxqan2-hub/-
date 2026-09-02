@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -28,6 +29,56 @@ def test_normalize_totp_secret_validates_base32() -> None:
     with pytest.raises(account_export.TwoFASetupError) as exc_info:
         account_export.normalize_totp_secret("not-a-secret")
     assert exc_info.value.code == "totp_enroll_response_invalid"
+
+
+def test_browser_post_preserves_renderer_transport_detail() -> None:
+    driver = SimpleNamespace(execute_async_script=Mock(side_effect=RuntimeError("renderer disconnected")))
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._browser_authenticated_json_post(
+            driver,
+            "/backend-api/accounts/mfa/user/activate_enrollment",
+            {},
+            access_token="token",
+            stage="totp_activate",
+            code="totp_browser_activate_failed",
+            message="浏览器 MFA activate 请求失败",
+        )
+    assert exc_info.value.http_status is None
+    assert "stage=exception" in str(exc_info.value)
+    assert "renderer disconnected" in str(exc_info.value)
+
+
+def test_browser_totp_activate_retries_same_enrollment_after_transport_failure(monkeypatch) -> None:
+    driver = SimpleNamespace(current_url="https://chatgpt.com/")
+    calls = []
+    responses = [
+        {"body": {"secret": "JBSWY3DPEHPK3PXP", "session_id": "sid"}, "access_token": "token", "expires": None},
+        account_export.TwoFASetupError("totp_activate", "totp_browser_activate_failed", "transport", http_status=None),
+        {"body": {"success": True}, "access_token": "token", "expires": None},
+    ]
+
+    def fake_post(_driver, path, payload, **kwargs):
+        calls.append((path, payload, kwargs))
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    waits = []
+    monkeypatch.setattr(account_export, "_browser_authenticated_json_post", fake_post)
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda min_remaining=4.0: waits.append(min_remaining))
+
+    secret, token, _expires = account_export._setup_totp_with_driver(
+        driver,
+        "user@example.test",
+        authenticated_email="user@example.test",
+        access_token="token",
+    )
+    assert secret == "JBSWY3DPEHPK3PXP"
+    assert token == "token"
+    assert len(calls) == 3  # one enroll + two activate attempts
+    assert waits == [4.0, 8.0]
+    assert all(call[0].endswith("activate_enrollment") for call in calls[1:])
 
 
 def test_twofa_rejects_authenticated_account_mismatch_before_writes(monkeypatch) -> None:

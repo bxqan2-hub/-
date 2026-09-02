@@ -874,7 +874,13 @@ def _browser_authenticated_json_post(
                 access_token,
             )
     except Exception as exc:
-        raise TwoFASetupError(stage, code, message) from exc
+        # Preserve a short, redacted transport diagnostic.  Previously a
+        # Selenium execute_async_script timeout/renderer disconnect was
+        # collapsed to the generic message, making activate failures
+        # indistinguishable from HTTP rejection.
+        detail = redact_otp_text(f"{type(exc).__name__}: {str(exc)[:160]}")
+        suffix = f" stage=exception detail={detail}" if detail else " stage=exception"
+        raise TwoFASetupError(stage, code, f"{message}{suffix}") from exc
 
     if not isinstance(result, dict):
         raise TwoFASetupError(stage, code, message)
@@ -972,20 +978,59 @@ def _setup_totp_with_driver(
             http_status=200,
         )
 
-    _wait_for_totp_window()
-    activation = _browser_authenticated_json_post(
-        driver,
-        "/backend-api/accounts/mfa/user/activate_enrollment",
-        {
-            "code": pyotp.TOTP(secret).now(),
-            "factor_type": "totp",
-            "session_id": session_id,
-        },
-        access_token=access_token,
-        stage="totp_activate",
-        code="totp_browser_activate_failed",
-        message="浏览器 MFA activate 请求失败",
-    )["body"]
+    activation = None
+    activation_error: TwoFASetupError | None = None
+    # A browser renderer/network interruption or a boundary-time TOTP code
+    # can fail the activate POST even though enroll succeeded. Retry once in
+    # the same browser session with a fresh 30-second code; never re-enroll,
+    # switch proxy, or persist the Secret before success=true.
+    for activate_attempt in (1, 2):
+        if activate_attempt == 1:
+            _wait_for_totp_window()
+        else:
+            try:
+                _wait_for_totp_window(min_remaining=8.0)
+            except TypeError as exc:
+                # Keep compatibility with test/integration adapters that
+                # expose the historical zero-argument wait hook.
+                if "min_remaining" not in str(exc):
+                    raise
+                _wait_for_totp_window()
+        try:
+            logger.info("[2FA] 浏览器 MFA activate attempt=%s/2", activate_attempt)
+            activation = _browser_authenticated_json_post(
+                driver,
+                "/backend-api/accounts/mfa/user/activate_enrollment",
+                {
+                    "code": pyotp.TOTP(secret).now(),
+                    "factor_type": "totp",
+                    "session_id": session_id,
+                },
+                access_token=access_token,
+                stage="totp_activate",
+                code="totp_browser_activate_failed",
+                message="浏览器 MFA activate 请求失败",
+            )["body"]
+            activation_error = None
+            break
+        except TwoFASetupError as exc:
+            activation_error = exc
+            retryable = (
+                exc.http_status is None
+                or exc.http_status in {408, 425, 429}
+                or exc.http_status >= 500
+                or (exc.http_status == 200 and exc.code == "totp_activate_failed")
+            )
+            if activate_attempt == 1 and retryable:
+                logger.warning(
+                    "[2FA] 浏览器 MFA activate 可重试失败，等待下一 TOTP 窗口：status=%s code=%s",
+                    exc.http_status or "-",
+                    exc.code,
+                )
+                continue
+            raise
+    if activation is None and activation_error is not None:
+        raise activation_error
     if activation.get("success") is not True:
         raise TwoFASetupError(
             "totp_activate",
