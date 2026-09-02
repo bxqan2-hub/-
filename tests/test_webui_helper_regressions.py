@@ -104,6 +104,14 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["email"], "available@test.com")
         list_pool_rows.assert_called_once_with(source="outlook", status="available", fetch_limit=1_000_000)
 
+    def test_outlook_pool_offers_email_only_copy_action(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="btnCopySelectedOutlookEmailsV2"', html)
+        self.assertIn('title="只复制选中的邮箱账号，每个邮箱一行"', html)
+        self.assertIn("bind('btnCopySelectedOutlookEmailsV2', () => copySelectionEmails({emails:selectedOutlookEmails()}))", html)
+        self.assertIn("'btnCopySelectedOutlookEmailsV2',", html)
+
     @patch("webui.app.db.get_account")
     def test_account_secret_single_and_bulk_routes_return_allowlisted_values(self, get_account):
         get_account.side_effect = lambda account_id: {

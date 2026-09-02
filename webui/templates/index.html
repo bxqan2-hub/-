@@ -2975,6 +2975,7 @@
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnLocateSelectedOutlookInAccountsV2" disabled>定位账号</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnPurgeSelectedOutlookEmailsV2" disabled title="按邮箱从全部本地界面和数据池彻底删除">全局删除邮箱</button>
         <button type="button" class="jobs-tb-btn outlook-full-copy-cta" id="copyAllEmailsV2" disabled title="先勾选邮箱，再复制：邮箱----邮箱URL----AT（每个邮箱一行）">复制所选完整信息（0）</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedOutlookEmailsV2" disabled title="只复制选中的邮箱账号，每个邮箱一行">复制所选邮箱</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedOutlookMailboxV2" disabled title="复制为：邮箱----邮箱URL，每个邮箱一行">复制所选邮箱+URL</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnPushSelectedOutlookToRegistration" disabled title="直接使用选中的邮箱创建注册任务，不会重新从邮箱池领取">推送到注册</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportOutlookV2" title="导入邮箱素材">导入</button>
@@ -7678,6 +7679,7 @@ function updateOutlookSelectionUi(pageRows = null) {
     'btnFailSelectedOutlookV2',
     'btnAddSelectedOutlookToMailStatusV2',
     'copyAllEmailsV2',
+    'btnCopySelectedOutlookEmailsV2',
     'btnCopySelectedOutlookMailboxV2',
     'btnLocateSelectedOutlookInAccountsV2',
     'btnLocateSelectedOutlookInMailStatusV2',
@@ -7879,6 +7881,7 @@ async function onOutlookBodyClick(e) {
   bind('showPlusOutlookOnlyV2', () => applyPoolPlanFilter('plus'));
   bind('btnImportOutlookV2', openOutlookImportModal);
   bind('copyAllEmailsV2', copySelectedOutlookFullInfo);
+  bind('btnCopySelectedOutlookEmailsV2', () => copySelectionEmails({emails:selectedOutlookEmails()}));
   bind('btnCopySelectedOutlookMailboxV2', e => copySelectionMailboxLines({emails:selectedOutlookEmails()}, e.currentTarget));
   bind('btnPushSelectedOutlookToRegistration', pushSelectedOutlookToRegistration);
   document.addEventListener('click', (e) => {
