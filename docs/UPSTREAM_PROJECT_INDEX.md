@@ -163,7 +163,7 @@
 ## 本次缓存 miss 时序与回放头隔离修复（2026-09-03）
 
 - 风险核对：本站旧的同 URL miss 合并会让并发 Profile 等待首个回源结果；上游锁定版本没有该等待层。该行为主要形成冷启动流量/时序关联，不传递账号 Cookie、Token 或浏览器存储。
-- 对照上游后，本地已直接删除 miss 协调类、loading 状态及回调调用，让每个 Profile 的 miss 独立回源；保留公共静态 URL 的完整性校验与 URL-only warm cache。
+- 对照上游后，本地对严格公共 JS/CSS 的冷 miss 使用 8 秒有界单飞等待；首个请求失败或等待超时仍回到各 Profile 实时网络，保留公共静态 URL 的完整性校验与 URL-only warm cache。
 - 本地共享缓存现在拒绝 Authorization/Proxy-Authorization 请求；公共静态路径带 Cookie 时只复用明确 `Cache-Control: public` 的 body，Cookie 不进入 key、metadata 或回放头，并在回放头中剥离 `cf-ray`、`report-to`、`date`、`age`、`etag`、`x-request-id` 等边缘/时间字段。
 - 本地还绕过请求侧重新验证指令，拒绝除 `Accept-Encoding` 外的 `Vary`、非 200 读回条目和含 dot-segment/反斜杠路径，并合并检查重复响应头；新增 `cache_candidates`/`cache_writes` 指标，供日志和账号列表区分 0 候选与真实 0 命中。
 - 本地 refresh salt 改为 `secrets.token_bytes(16)`；最新 5MB/0 命中批次的证据与修复结果见 `docs/2026-09-03_注册缓存与Roxy独立画像审计-report.md` 和 `VERIFICATION.txt`。
@@ -216,8 +216,8 @@
 
 - 上游锁定 commit 仍为 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`。已读取上游 `vendor/turb_gpt_free_register/core/roxybrowser_client.py`（`open_profile` 使用 `args` 列表）与 `core/browser_traffic.py`（`Network.enable({})`）；上游没有本地主机注册并发上限，本次新增的是本地资源护栏，不改变注册协议。
 - 失败批次证据：20:21:12–20:21:13 同时启动 `reg-worker-1_0`…`reg-worker-1_9` 共 10 个任务；清理后的共享缓存随后在 20:21:27–20:22:04 冷启动重建 38 个条目。20:24:27 触发 Kernel-Power Event 41，20:24:33 记录 EventLog 6008，20:32:27 WebUI 才在重启后恢复。
-- 本地修复：`config/roxybrowser.py` 新增 `ROXY_MAX_CONCURRENT_REGISTRATIONS=2` 并接入 `.env.example` 与配置编辑器；`webui/app.py::api_jobs_create` 在 Roxy 驱动下裁剪超过上限的 workers，`webui/templates/index.html` 默认并发改为 2 并显示服务端实际值。
-- 该修复不改 Roxy Profile、代理出口、Cookie、access token、密码或 2FA；高/中/低原因、事件证据、路径和验证见 `docs/2026-09-03_Roxy冷缓存并发卡死核对-report.md`。
+- 本地修复：`core/browser_traffic.py` 对严格公共 JS/CSS 的冷 miss 使用 8 秒有界单飞等待；首个请求失败或等待超时仍回到各 Profile 实时网络。
+- 该修复不改用户输入的 workers、Roxy Profile、代理出口、Cookie、access token、密码或 2FA；高/中/低原因、事件证据、路径和验证见 `docs/2026-09-03_Roxy冷缓存并发卡死核对-report.md`。
 
 ## 本次 Profile 目录与共享 JS/CSS 缓存分离清理（2026-09-03）
 

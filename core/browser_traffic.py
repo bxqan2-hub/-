@@ -92,6 +92,11 @@ CACHE_SCHEMA_VERSION = 2
 CACHE_PRIVATE_REQUEST_HEADERS = {"authorization", "cookie", "proxy-authorization"}
 CACHE_PRIVATE_RESPONSE_HEADERS = {"set-cookie", "www-authenticate"}
 SAFE_VARY_HEADERS = {"accept-encoding"}
+# A cold cache can make every concurrent Profile request the same large public
+# bundle.  Single-flight only the validated public asset load; registration
+# workers and Profile/browser concurrency remain unchanged.  A short timeout
+# lets a stalled Profile fall back to its own live request.
+CACHE_LOAD_WAIT_SECONDS = 8.0
 PUBLIC_STATIC_PATH_PREFIXES = (
     "/assets/",
     "/cdn/assets/",
@@ -265,11 +270,17 @@ def _sanitize_headers(headers) -> list[dict[str, str]]:
 class StaticResourceCache:
     """TTL cache with atomic metadata/body replacement and digest validation."""
 
+    _coordinators_lock = threading.RLock()
+    _coordinators: dict[str, "_CacheLoadCoordinator"] = {}
+
     def __init__(self, root: Path, *, max_age: int, max_item_bytes: int):
         self.root = Path(root)
         self.max_age = max(0, int(max_age))
         self.max_item_bytes = max(1, int(max_item_bytes))
         self._lock = threading.RLock()
+        with self._coordinators_lock:
+            cache_root = str(self.root.resolve())
+            self._coordinator = self._coordinators.setdefault(cache_root, _CacheLoadCoordinator())
 
     @staticmethod
     def cache_key(url: str) -> str:
@@ -344,6 +355,52 @@ class StaticResourceCache:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def claim_load(self, url: str) -> bool:
+        """Claim one public cache miss so parallel Profiles avoid duplicate fetches."""
+        return self._coordinator.claim(str(url))
+
+    def wait_for_load(self, url: str, *, timeout: float = CACHE_LOAD_WAIT_SECONDS) -> dict | None:
+        """Wait briefly for another Profile to populate a validated entry."""
+        return self._coordinator.wait_for_cache(self, str(url), timeout=timeout)
+
+    def release_load(self, url: str) -> None:
+        self._coordinator.release(str(url))
+
+
+class _CacheLoadCoordinator:
+    """Single-flight coordination for one shared public-cache directory."""
+
+    def __init__(self):
+        self._condition = threading.Condition(threading.RLock())
+        self._loading: dict[str, float] = {}
+
+    def claim(self, url: str) -> bool:
+        now = time.monotonic()
+        with self._condition:
+            expires_at = self._loading.get(url, 0.0)
+            if expires_at > now:
+                return False
+            self._loading[url] = now + CACHE_LOAD_WAIT_SECONDS
+            return True
+
+    def wait_for_cache(self, cache: StaticResourceCache, url: str, *, timeout: float) -> dict | None:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._condition:
+            while True:
+                cached = cache.read(url)
+                if cached:
+                    return cached
+                now = time.monotonic()
+                expires_at = self._loading.get(url, 0.0)
+                if expires_at <= now or now >= deadline:
+                    return None
+                self._condition.wait(min(deadline - now, expires_at - now))
+
+    def release(self, url: str) -> None:
+        with self._condition:
+            self._loading.pop(url, None)
+            self._condition.notify_all()
 
 def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int = 0, cache_hits: int = 0,
                                cache_misses: int = 0, cached_request_urls=(), cached_request_ids=(),
@@ -462,6 +519,7 @@ class RoxyTrafficOptimizer:
         }
         self._cached_urls: list[str] = []
         self._cached_request_ids: list[str] = []
+        self._loading_requests: dict[str, str] = {}
         self._install_errors: list[str] = []
         self._degraded_reason = ""
 
@@ -588,6 +646,7 @@ class RoxyTrafficOptimizer:
         if not devtools or not connection:
             return
         request_id = event.request_id
+        claimed_url = ""
         try:
             if event.response_status_code is not None:
                 self._handle_response(event)
@@ -606,10 +665,23 @@ class RoxyTrafficOptimizer:
                     request_id, url, cached, network_id=getattr(event, "network_id", None),
                 )
                 return
+            if not cached and not self.cache.claim_load(url):
+                cached = self.cache.wait_for_load(url)
+                if cached:
+                    self._fulfill_cached_request(
+                        request_id, url, cached, network_id=getattr(event, "network_id", None),
+                    )
+                    return
+            elif not cached:
+                claimed_url = url
+                with self._lock:
+                    self._loading_requests[str(request_id)] = url
             with self._lock:
                 self._stats["cache_misses"] += 1
             connection.execute(devtools.fetch.continue_request(request_id, intercept_response=True))
         except Exception:
+            if claimed_url:
+                self._release_loading_request(request_id, claimed_url)
             with self._lock:
                 self._stats["cache_errors"] += 1
             try:
@@ -672,8 +744,20 @@ class RoxyTrafficOptimizer:
                 connection.execute(devtools.fetch.continue_response(request_id))
             except Exception:
                 pass
+        finally:
+            self._release_loading_request(request_id)
+
+    def _release_loading_request(self, request_id, fallback_url: str = "") -> None:
+        with self._lock:
+            url = self._loading_requests.pop(str(request_id), fallback_url)
+        if url:
+            self.cache.release_load(url)
 
     def finalize(self) -> dict:
+        with self._lock:
+            loading_request_ids = list(self._loading_requests)
+        for request_id in loading_request_ids:
+            self._release_loading_request(request_id)
         if self._fetch_enabled and self._devtools and self._connection:
             try:
                 self._connection.execute(self._devtools.fetch.disable())

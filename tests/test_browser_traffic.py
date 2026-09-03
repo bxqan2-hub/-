@@ -299,7 +299,9 @@ class StaticCacheTests(unittest.TestCase):
             )
 
         optimizer._on_request_paused(event("profile-a"))
+        optimizer._release_loading_request("profile-a")
         optimizer._on_request_paused(event("profile-b"))
+        optimizer._release_loading_request("profile-b")
 
         self.assertEqual(optimizer._connection.execute.call_count, 2)
         self.assertEqual(optimizer._stats["cache_candidates"], 2)
@@ -319,9 +321,27 @@ class StaticCacheTests(unittest.TestCase):
                 headers=[{"name": "Cache-Control", "value": "public, max-age=3600"}], body=b"shared",
             ))
             self.assertEqual(second.read(url)["body"], b"shared")
-            # Cache bytes remain shareable only after validation; misses are
-            # fetched independently by each Profile, matching the upstream
-            # implementation and avoiding a synchronized waiter pattern.
+            # Cache bytes remain shareable only after validation; cold misses
+            # are single-flight coordinated, and waiters still fall back to
+            # their own live request when the loader stalls.
+
+    def test_cache_miss_waiter_receives_validated_public_asset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = StaticResourceCache(Path(tmp), max_age=3600, max_item_bytes=1024)
+            second = StaticResourceCache(Path(tmp), max_age=3600, max_item_bytes=1024)
+            url = "https://chatgpt.com/cdn/assets/shared.js"
+            self.assertTrue(first.claim_load(url))
+            self.assertFalse(second.claim_load(url))
+            self.assertTrue(first.write(
+                url,
+                status=200,
+                phrase="OK",
+                headers=[{"name": "Cache-Control", "value": "public, max-age=3600"}],
+                body=b"single-flight",
+            ))
+            cached = second.wait_for_load(url, timeout=0.1)
+            self.assertEqual(cached["body"], b"single-flight")
+            first.release_load(url)
 
     def test_write_read_and_header_sanitization(self):
         with tempfile.TemporaryDirectory() as tmp:

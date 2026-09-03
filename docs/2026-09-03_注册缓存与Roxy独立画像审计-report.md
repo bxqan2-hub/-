@@ -112,9 +112,9 @@
 ### 同 URL miss 合并
 
 - **Evidence**：上游锁定版本的 `browser_traffic.py` 未实现跨 Profile miss 等待；本站原先的 `StaticResourceCache` 有跨缓存根目录的 miss 协调状态。
-- **Finding**：miss 合并主要形成并发冷启动的流量/时序关联信号，不直接传递 Cookie、Token、TLS 或浏览器存储；公共静态 warm hit 仍属于 URL 共享。
+- **Finding**：冷缓存时每个 Profile 独立回源会重复下载同一公共资源，放大网络、磁盘和 renderer 峰值；单飞协调只作用于严格公共、已校验的 JS/CSS body，不直接传递 Cookie、Token、TLS 或浏览器存储；公共静态 warm hit 仍属于 URL 共享。
 - **Path**：本站 `core/browser_traffic.py` 的 `StaticResourceCache` 与 `RoxyTrafficOptimizer._on_request_paused`。
-- **修复**：删除旧的 miss 协调类、claim/wait/release 调用和 loading 状态，让每个 Profile 的 miss 独立回源，保持公共静态资源的白名单、响应状态检查和完整性校验。
+- **修复**：恢复有界的 miss 协调：首个 Profile 回源并原子写入，其他 Profile 最多等待 8 秒读取通过 schema、状态、摘要、缓存头校验的 body；超时或首个请求失败时立即回到各自实时网络。注册 workers、Profile 数量和浏览器并发不变。
 
 ### 响应头与私有请求
 
@@ -132,16 +132,16 @@
 
 ### 写入并发与残余共享
 
-- **Evidence**：每个 Profile 的 miss 已独立回源，但所有 Profile 仍可读取同一安装级 `ROXY_CACHE_DIR` 的公共 warm 条目；每个 `StaticResourceCache` 的写锁只覆盖当前实例。
+- **Evidence**：所有 Profile 仍可读取同一安装级 `ROXY_CACHE_DIR` 的公共 warm 条目；冷 miss 通过目录级 coordinator 短暂合并，单个 `StaticResourceCache` 的写锁仍只覆盖自身临时文件替换。
 - **Finding**：公共静态 warm hit 仍可能呈现相同命中模式；跨进程同 URL 写入发生交错时，摘要校验会把短暂的 metadata/body 不匹配降级为 miss，但不会把不匹配 body 回放。
 - **Path**：`core/browser_traffic.py:StaticResourceCache.cache_key/read/write`、`RoxyTrafficOptimizer` cache construction。
-- **状态**：本次保留上游兼容的 URL-only 公共资源共享与原子替换；Cookie 不进入缓存 key、metadata 或回放头。强画像隔离批次仍应关闭 static cache 或按 Profile 分片，这一项未在本次继续优化中改动。
+- **状态**：本次保留上游兼容的 URL-only 公共资源共享与原子替换，同时为冷启动增加 8 秒单飞等待；Cookie 不进入缓存 key、metadata 或回放头。强画像隔离批次仍可关闭 static cache 或按 Profile 分片。
 
 ### 验证
 
 - 定向测试：最新结果见 `VERIFICATION.txt`。
 - 全量测试：最新结果见 `VERIFICATION.txt`。
-- 旧 miss 协调符号扫描：结果为空。
+- miss 协调符号扫描：`CACHE_LOAD_WAIT_SECONDS`、`claim_load`、`wait_for_load` 和 `release_load` 仅出现在 `core/browser_traffic.py` 及对应测试。
 
 ## 最新 5MB / 0 命中批次复核（2026-09-03 14:08–14:09）
 

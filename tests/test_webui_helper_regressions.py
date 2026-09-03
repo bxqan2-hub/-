@@ -647,7 +647,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
             response = self.client.post("/api/jobs", json={"count": 501, "workers": 7})
 
         self.assertEqual(response.status_code, 200)
-        submit_registration.assert_called_once_with(count=501, workers=2)
+        submit_registration.assert_called_once_with(count=501, workers=7)
         html = self.client.get("/").get_data(as_text=True)
         self.assertIn('id="regCountV2" type="number" min="1" value="1"', html)
         self.assertNotIn('id="regCountV2" type="number" min="1" max="200"', html)
@@ -666,7 +666,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["requested_count"], 201)
-        submit_registration.assert_called_once_with(workers=2, email_items=email_items)
+        submit_registration.assert_called_once_with(workers=9, email_items=email_items)
 
 
 if __name__ == "__main__":

@@ -15,8 +15,8 @@
 
 ### 中概率：冷启动时每个 Profile 独立回源，重复抓取公共 JS/CSS
 
-- `core/browser_traffic.py::RoxyTrafficOptimizer._on_request_paused` 当前没有跨 Profile miss 合并；`49c522a` 按上游对齐删除了 `CacheLoadCoordinator`。因此共享缓存为空时，多个 Profile 可同时为相同公共资源走 `Fetch.continue_request(..., intercept_response=True)`，并各自解码、写入和采集响应体。
-- 这会放大网络、磁盘和 renderer 内存峰值，但不涉及 Cookie、Authorization、Session、Token 或 TOTP Secret 共享；认证、挑战、Sentinel 和业务 API 仍保持实时网络。
+- 修改前 `core/browser_traffic.py::RoxyTrafficOptimizer._on_request_paused` 没有跨 Profile miss 合并；共享缓存为空时，多个 Profile 会同时为相同公共资源走 `Fetch.continue_request(..., intercept_response=True)`，并各自解码、写入和采集响应体。
+- 这会放大网络、磁盘和 renderer 内存峰值，但不涉及 Cookie、Authorization、Session、Token 或 TOTP Secret 共享；现已在公共资源范围增加最多 8 秒单飞等待，认证、挑战、Sentinel 和业务 API 仍保持实时网络。
 
 ### 中概率：Roxy 生命周期接口超时放大残留进程
 
@@ -30,10 +30,8 @@
 
 ## 修复
 
-- `config/roxybrowser.py::ROXY_MAX_CONCURRENT_REGISTRATIONS` 新增默认值 2，并纳入 `.env.example` 与 WebUI 配置编辑器，链路为“配置页/`.env` → `config.roxybrowser` → `/api/jobs` 并发裁剪”。
-- `webui/app.py::api_jobs_create` 在 Roxy 驱动下将超过上限的请求裁剪为上限并返回明确提示；非 Roxy 驱动保持原 workers。
-- `webui/templates/index.html` 将注册并发输入和缺省回退改为 2，并在提交后显示服务端实际并发，避免界面继续显示 10 造成误判。
-- 未修改注册页面、代理、Cookie、Token、密码或 MFA 顺序；上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 Roxy `open_profile(args)` 和 `Network.enable({})` 对照已完成，本地新增的是主机负载护栏。
+- `core/browser_traffic.py::StaticResourceCache` 新增 8 秒目录级 miss coordinator；`RoxyTrafficOptimizer._on_request_paused` 只对严格公共、已校验 JS/CSS 等待同 URL 首个回源结果，超时自动实时回源。
+- 未修改注册 workers、并发输入、Profile 数量、代理、Cookie、Token、密码或 MFA 顺序；上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 Roxy `open_profile(args)` 和 `Network.enable({})` 对照已完成，本地修改的是缓存回源负载路径。
 
 ## 验证
 
@@ -43,4 +41,4 @@
 
 ## 结论
 
-清理缓存本身没有改坏账号数据；它移除了下一批可复用的公共资源，使 10 路可视 Roxy 冷启动同时回源。将注册并发硬上限设为 2 后，冷启动最多同时维持两个 Profile，后续可在配置页逐步调高并以实际 Roxy 工作集、子进程数和系统事件复核。
+清理缓存本身没有改坏账号数据；它移除了下一批可复用的公共资源，使用户输入的多路可视 Roxy 冷启动同时回源。现在公共资源 miss 只做有界单飞合并，注册 workers 和 Profile 并发完全保留用户输入；冷启动后的 Roxy 工作集、子进程数和系统事件应继续复核。
