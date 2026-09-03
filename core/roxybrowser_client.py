@@ -654,11 +654,17 @@ class RoxyBrowserClient:
                 if observed_exit_ip:
                     from config import proxy as _proxy_cfg
 
-                    if _proxy_cfg.reserve_registration_exit_ip(
-                        observed_exit_ip,
+                    canonical_ip = _proxy_cfg.normalize_exit_ip(observed_exit_ip)
+                    if not canonical_ip:
+                        logger.warning(
+                            "[Roxy] 代理预检返回了非法出口 IP，跳过当前线路",
+                        )
+                        preflight_exit_geo = {}
+                    elif _proxy_cfg.reserve_registration_exit_ip(
+                        canonical_ip,
                         self._exit_ip_reservation_owner,
                     ):
-                        self._reserved_exit_ip = _proxy_cfg.normalize_exit_ip(observed_exit_ip)
+                        self._reserved_exit_ip = canonical_ip
                         # Keep the canonical value in the result used by the
                         # registration record, so equivalent IPv6 spellings
                         # cannot bypass the reservation comparison.
@@ -668,13 +674,13 @@ class RoxyBrowserClient:
                             self._reserved_exit_ip,
                         )
                         break
-                    canonical_ip = _proxy_cfg.normalize_exit_ip(observed_exit_ip) or observed_exit_ip
-                    duplicate_exit_ips.add(canonical_ip)
-                    preflight_exit_geo = {}
-                    logger.warning(
-                        "[Roxy] 代理预检出口 IP 已被其他并发注册任务占用，跳过当前线路：ip=%s",
-                        canonical_ip,
-                    )
+                    else:
+                        duplicate_exit_ips.add(canonical_ip)
+                        preflight_exit_geo = {}
+                        logger.warning(
+                            "[Roxy] 代理预检出口 IP 已被其他并发注册任务占用，跳过当前线路：ip=%s",
+                            canonical_ip,
+                        )
                 failed_proxies.add(str(self.profile_proxy or ""))
                 if self.profile_proxy_source != "pool" or proxy_attempt >= proxy_attempts:
                     break

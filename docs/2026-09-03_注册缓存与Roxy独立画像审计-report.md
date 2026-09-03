@@ -70,6 +70,7 @@
 - **出口 IP**：预检得到真实 IP 后 canonicalize 并原子占用；占用冲突时排除当前代理并轮换候选，池耗尽或显式代理冲突直接终止，不创建 Profile。任务结束关闭/删除 Profile 后释放，释放记录保留 15 分钟冷却。
 - **窗口复核**：Selenium 上下文 IP 与预检 IP 同时存在且不一致时，先保护实际地址并 fail-closed；一致或仅有预检回退时才进入注册。`ROXY_KEEP_BROWSER_OPEN` 在打开时快照，保留现场时不释放 reservation。
 - **失败分类**：出口冲突/漂移统一标记为 `stage=proxy_isolation`，与 `stage=proxy_transport`、邮箱 OTP、密码和 2FA 业务错误分开记录。
+- **输入校验**：预检返回的非 IP 值单独记为无效出口并轮换候选，不再误报为并发冲突。
 - **指纹**：现有 `/browser/create` payload 合并后强制 `randomFingerprint=True`；名称/系统选择使用独立随机值，不向 Roxy 伪造 `fingerInfo` 或 `coreVersion`。账号记录新增无凭据的 isolation 摘要（Profile、core、OS、出口 IP、验证来源）。
 - **路由记录**：账号 `registration_exit_ip`/`registration_exit_country` 与 isolation 摘要记录核对结果；代理池凭据不额外写入账号字段。
 

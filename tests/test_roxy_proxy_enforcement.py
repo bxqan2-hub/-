@@ -146,6 +146,15 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
                 client.open_profile(require_proxy_exit_ip=True)
         create_profile.assert_not_called()
 
+    def test_invalid_preflight_ip_is_not_misreported_as_duplicate(self):
+        client = RoxyBrowserClient(profile_proxy="socks5h://fixed.example:1080")
+        with patch("core.browser_exit_geo.probe_proxy_exit_geo", return_value={"ip": "not-an-ip"}), \
+             patch.object(client, "create_profile") as create_profile:
+            with self.assertRaisesRegex(RuntimeError, "快速检测失败") as raised:
+                client.open_profile(require_proxy_exit_ip=True)
+        self.assertNotIn("并发注册任务重复", str(raised.exception))
+        create_profile.assert_not_called()
+
     def test_released_exit_ip_is_not_immediately_reused(self):
         self.assertTrue(proxy_config.reserve_registration_exit_ip("2001:0db8::1", "owner-a"))
         self.assertTrue(proxy_config.release_registration_exit_ip("2001:db8:0:0:0:0:0:1", "owner-a"))
