@@ -156,10 +156,13 @@ def is_cacheable_request(url: str, method: str, resource_type: str, headers=None
     private_headers = set(_header_values(headers)) & CACHE_PRIVATE_REQUEST_HEADERS
     if private_headers & {"authorization", "proxy-authorization"}:
         return False
-    # Same-origin public bundles naturally carry the browser's Cookie header.
-    # Only allow that header on immutable/static paths; response cache controls
-    # and Set-Cookie/Vary checks still decide whether the body may be stored.
-    if "cookie" in private_headers and not path.startswith(PUBLIC_STATIC_PATH_PREFIXES):
+    # The shared cache is intentionally narrower than the traffic allow-list:
+    # only immutable public asset prefixes may be replayed across profiles.
+    # This excludes challenge/Sentinel and ``/backend-api`` scripts even when
+    # a request has no Cookie header.  Those scripts can participate in
+    # account- or browser-specific challenge state and must stay on the live
+    # per-profile network path.
+    if not path.startswith(PUBLIC_STATIC_PATH_PREFIXES):
         return False
     return True
 

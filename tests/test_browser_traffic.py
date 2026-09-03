@@ -79,6 +79,21 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
         self.assertFalse(is_cacheable_request(
             "https://chatgpt.com/api/account-script", "GET", "script", {"Cookie": "account-state"},
         ))
+        # Challenge, Sentinel, unauthenticated script, and backend paths must
+        # never be replayed from the cross-profile static cache, even without
+        # a Cookie header.
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/backend-api/sentinel/sdk.js", "GET", "script",
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/sentinel/20260810913b/sdk.js", "GET", "script",
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/cdn-cgi/challenge-platform/main.js", "GET", "script",
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/unauth-mweb/scripts/declarative-partial-updates.js", "GET", "script",
+        ))
         self.assertFalse(is_cacheable_request(
             "https://chatgpt.com/_next/static/app.js", "GET", "script", {"Authorization": "Bearer token"},
         ))
