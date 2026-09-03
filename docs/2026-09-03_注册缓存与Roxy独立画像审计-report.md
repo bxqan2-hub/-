@@ -203,8 +203,8 @@
 
 ### 本轮回归结果
 
-- 基线定向：`146 passed in 1.05s`；修改后定向：`159 passed in 1.27s`。
-- 基线全量：`716 passed, 16 subtests passed in 64.28s (0:01:04)`；修改后全量：`729 passed, 16 subtests passed in 64.13s (0:01:04)`。
+- 基线定向：`146 passed in 1.05s`；修改后定向：`159 passed in 17.39s`。
+- 基线全量：`716 passed, 16 subtests passed in 64.28s (0:01:04)`；修改后全量：`729 passed, 16 subtests passed in 67.37s (0:01:07)`。
 - 完整命令、退出状态、hash 与 rollback 结果见项目根目录 `VERIFICATION.txt`。
 
 ## 本次 Roxy 指纹生成字段复核（2026-09-03）
