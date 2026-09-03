@@ -21,6 +21,9 @@ class WebUiHelperRegressionTests(unittest.TestCase):
                     "downloaded": 1_500,
                     "cache_saved_bytes": 1_000,
                     "cache_hits": 2,
+                    "cache_misses": 3,
+                    "cache_candidates": 5,
+                    "cache_writes": 1,
                     "blocked": 3,
                 },
             }),
@@ -35,6 +38,9 @@ class WebUiHelperRegressionTests(unittest.TestCase):
                     "downloaded_excludes_cache_replay": True,
                     "cache_saved_bytes": 1_000,
                     "cache_hits": 2,
+                    "cache_misses": 3,
+                    "cache_candidates": 5,
+                    "cache_writes": 1,
                     "blocked": 3,
                     "within_budget": True,
                 },
@@ -43,6 +49,9 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(legacy["registration_traffic"]["network_bytes"], 500)
         self.assertEqual(current["registration_traffic"]["network_bytes"], 500)
         self.assertEqual(current["registration_traffic"]["cache_saved_bytes"], 1_000)
+        self.assertEqual(current["registration_traffic"]["cache_candidates"], 5)
+        self.assertEqual(current["registration_traffic"]["cache_misses"], 3)
+        self.assertEqual(current["registration_traffic"]["cache_writes"], 1)
         self.assertNotIn("extra_json", current)
         self.assertFalse(current["password_configured"])
 

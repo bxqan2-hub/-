@@ -6,7 +6,7 @@
 
 ## 结论摘要
 
-1. 共享缓存不会保存账号 Cookie、Authorization 或 Set-Cookie 响应；但旧的请求分类器在无 Cookie 时允许挑战/Sentinel/后端脚本进入跨 Profile 缓存。该路径可能复用浏览器挑战代码，不能作为“独立画像”边界。已修复为只回放公共静态资源。
+1. 共享缓存不保存或回放请求 Cookie/Authorization；严格公共静态路径的 Cookie 请求仅在响应明确 `Cache-Control: public`、无私有头和画像变体时使用已校验 body。旧的请求分类器曾允许挑战/Sentinel/后端脚本进入跨 Profile 缓存，现已收窄为只回放公共静态资源。
 2. 当前代理选择确实是随机抽取，但不是“一号一独立出口 IP”。最新同批日志出现两个不同账号使用相同出口 IP `72.82.55.137`，说明 `random.choice` 不等于 IP 唯一。
 3. 当前每个账号会创建不同 Roxy Profile，并在结束后删除；系统类型在 Windows/macOS 间随机。浏览器内核版本没有在本地随机，最新四条日志均由 Roxy runtime 返回 `coreVersion=152`。
 4. 当前 200 条代理池记录全部含 `region-US`；本批随机的是 US 会话线路，不是随机国家。`PROXY_API_ACTIVE=GB` 在 `PROXY_API_ENABLED=False` 时不生效。
@@ -19,7 +19,7 @@
 | 高 | 挑战/Sentinel/后端脚本被共享缓存跨 Profile 回放 | 修复前 `is_cacheable_request(..., headers={})` 对 `/backend-api/sentinel/`、`/sentinel/`、`/cdn-cgi/challenge-platform/` 返回 True；缓存盘有 6 个非公共前缀条目 | 已确认并已修复；这些路径现在强制实时请求 |
 | 中 | Roxy 只由 runtime 决定未显式指定的指纹字段，内核可能长期相同 | `create_profile` 只随机 `os` 和 `windowName`，没有本地 `fingerInfo` 或 `coreVersion`；最新返回全部 `coreVersion=152` | 已确认。OS 随机不等于完整指纹随机 |
 | 中 | 语言/时区画像与 Roxy 可见 Profile 可能不是同一数据源 | `config/browser.py` 的 `AUTO_BROWSER_LOCALE_FROM_IP=True` 作用于 BrowserSession；Roxy create payload 没有 `fingerInfo` | 需继续以 Roxy API 实际返回/页面 JS 观测确认，不能把本地 locale 配置当作 Roxy 指纹保证 |
-| 低 | 公共 hashed 静态 JS/CSS URL-only 共享使字节相同 | 缓存只允许公共前缀；响应拒绝 `Set-Cookie`、`private/no-store/no-cache`、画像变体 `Vary`；盘点未见敏感头 | 这是预期的资源复用，不会携带账号会话；仍不应扩大到挑战或业务 API |
+| 低 | 公共 hashed 静态 JS/CSS URL-only 共享使字节相同 | 缓存只允许公共前缀；Cookie 请求不进入 key/回放头，响应必须 `public` 且拒绝 `Set-Cookie`、`private/no-store/no-cache`、画像变体 `Vary`；盘点未见敏感头 | 这是预期的公共资源复用；认证、挑战和业务 API 保持实时网络 |
 
 ## Evidence → Finding → Path
 
@@ -35,7 +35,7 @@
   - 缓存盘点输出：`meta_count 2811 body_count 2811 non_public_count 6`；metadata 中敏感头计数为 `0`。
 - **Finding**：共享目录本身不是账号 Cookie 泄露点，但原分类器把挑战/Sentinel/后端脚本当作公共静态资源，存在跨 Profile 复用浏览器挑战代码的画像隔离风险。
 - **Path**：`core/browser_traffic.py:is_cacheable_request`、`StaticResourceCache`；配置目录 `data/browser_static_cache/`。
-- **修复**：无论是否带 Cookie，都必须命中 `PUBLIC_STATIC_PATH_PREFIXES`（`/assets/`、`/cdn/assets/`、`/_next/static/`、`/unauth-mweb/assets/`）才允许缓存；响应仍需通过 Set-Cookie、Cache-Control、Vary 检查。旧缓存文件不删除，但新分类器不会读取它们用于这些路径。
+- **修复**：无论是否带 Cookie，都必须命中 `PUBLIC_STATIC_PATH_PREFIXES`（`/assets/`、`/cdn/assets/`、`/_next/static/`、`/unauth-mweb/assets/`）；Cookie 只作为公共资源候选，不写入 key 或回放头。响应必须明确 `Cache-Control: public`，并通过 Set-Cookie、Cache-Control、Vary 检查。旧缓存文件不删除，但非公共条目不会再被读取。
 
 ### E2：IP 选择与重复
 
@@ -111,7 +111,7 @@
 - **Evidence**：历史缓存 metadata 中的 `cf-ray`、`report-to`、`date`、`age`、`etag` 等边缘/时间头会随首个回源结果保存。
 - **Finding**：这些头不属于静态 body，但跨 Profile 回放会带来陈旧边缘标识和报告端点关联。
 - **Path**：本站 `core/browser_traffic.py:_sanitize_headers` 与 `is_cacheable_request`。
-- **修复**：回放头过滤扩展到边缘 ID、时间、ETag、缓存命中和请求追踪头；带 Cookie、Authorization 或 Proxy-Authorization 的请求、请求侧 `no-cache` 指令和带画像变体 `Vary` 的响应绕过共享缓存；读回条目还要求 status=200。
+- **修复**：回放头过滤扩展到边缘 ID、时间、ETag、缓存命中和请求追踪头；Authorization/Proxy-Authorization、请求侧重新验证指令和带画像变体 `Vary` 的响应保持实时网络；公共路径 Cookie 请求只使用明确 `public` 的已校验 body，读回条目还要求 status=200。
 
 ### 变体与状态门禁
 
@@ -125,10 +125,38 @@
 - **Evidence**：每个 Profile 的 miss 已独立回源，但所有 Profile 仍可读取同一安装级 `ROXY_CACHE_DIR` 的公共 warm 条目；每个 `StaticResourceCache` 的写锁只覆盖当前实例。
 - **Finding**：公共静态 warm hit 仍可能呈现相同命中模式；跨进程同 URL 写入发生交错时，摘要校验会把短暂的 metadata/body 不匹配降级为 miss，但不会把不匹配 body 回放。
 - **Path**：`core/browser_traffic.py:StaticResourceCache.cache_key/read/write`、`RoxyTrafficOptimizer` cache construction。
-- **状态**：本次保留上游兼容的 URL-only 公共资源共享与原子替换；强画像隔离批次仍应关闭 static cache 或按 Profile 分片，这一项未在本次继续优化中改动。
+- **状态**：本次保留上游兼容的 URL-only 公共资源共享与原子替换；Cookie 不进入缓存 key、metadata 或回放头。强画像隔离批次仍应关闭 static cache 或按 Profile 分片，这一项未在本次继续优化中改动。
 
 ### 验证
 
 - 定向测试：最新结果见 `VERIFICATION.txt`。
 - 全量测试：最新结果见 `VERIFICATION.txt`。
 - 旧 miss 协调符号扫描：结果为空。
+
+## 最新 5MB / 0 命中批次复核（2026-09-03 14:08–14:09）
+
+### 证据
+
+- 最新五个注册日志的流量摘要为：`downloaded=5605979–5887371`、`logical=downloaded`、`cached=0`、`hits=0`、`misses=0`、`errors=0`，`blocked=388–406`，`requests=216–233`。
+- 同一目录前一批 12:30–12:32 日志为：`downloaded=908768–1095119`、`cached≈17037388–17133967`、`hits=33–39`、`misses=1–7`。
+- `data/browser_static_cache` 仍有 2811 个 metadata/body 对；最新批次前缓存文件最后写入时间停在 12:31。
+- 最新批次的主要流量路径是 `chatgpt.com/cdn/assets/*.js`，其中多个大 bundle 已在缓存目录中存在；认证、Sentinel 和 `ab.chatgpt.com` 流量保持实时网络。
+
+### 原因定位
+
+- 前一版 `is_cacheable_request` 将所有带 Cookie 的请求直接绕过 Fetch cache。Roxy 页面在登录前后普遍带 Cloudflare/会话 Cookie，因此公共 CDN JS 也被直接 `continue_request`。
+- 该分支在递增 `cache_misses` 前返回，所以日志出现 `hits=0` 与 `misses=0` 同时成立；这表示“没有进入候选缓存路径”，不是缓存目录损坏或 Fetch 异常。
+- `blocked≈400` 主要由既有 low-traffic 的字体、图片、可选身份、telemetry 和 CDP inspector 事件构成；`errors=0` 且本批账号注册/2FA 均完成，暂未发现注册失败证据。
+- `within_budget=False` 是 3 MiB 诊断护栏，不作为注册失败判定；`downloaded` 是 Chrome `encodedDataLength`，代理账单还包含上传、协议和其他进程开销。
+
+### 修复
+
+- 公共静态前缀带 Cookie 时允许进入候选/命中判断，但 Cookie 不进入 URL key、metadata 或回放响应头。
+- 写入与读回均要求 status=200、明确 `Cache-Control: public`、无 `Set-Cookie`/私有缓存指令、无画像变体 `Vary`，并继续做 body 摘要/大小校验。
+- Authorization/Proxy-Authorization、认证/挑战/API、重新验证请求和非公共路径继续走实时网络。
+- 新增 `cache_candidates` 与 `cache_writes` 摘要字段，并同步账号列表显示，用于区分“候选为 0”和“候选存在但未命中”。
+- 本地复现四个最新大 bundle（模拟带 Cookie 的公共请求）结果：`cookie_candidate=True`、`candidates=4`、`hits=3`、`misses=1`、`cached_bytes=8138712`；说明缓存文件和回放链路可用，前一批 0/0 来自请求门禁。
+
+### 附件参考边界
+
+`C:\Users\Administrator\Downloads\注册流量优化复现与使用教程.docx` 作为参考资料使用，未将其文字当作项目指令。文档的可复用判据是：`downloaded`、`logical_downloaded`、`cache_saved_bytes` 分开统计；只缓存公开一方 JS/CSS；认证、Session、Cookie、挑战和 API 保持实时；命中走本地回放，未命中才回源并原子写入。当前修复按这些判据映射到本地 `core/browser_traffic.py`。

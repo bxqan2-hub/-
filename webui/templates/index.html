@@ -5414,12 +5414,15 @@ function _registrationTrafficLine(r) {
   const title = [
     `实际网络压缩响应: ${network}`,
     `缓存回放节省: ${saved}`,
+    `缓存候选: ${Number(t.cache_candidates || 0)}`,
     `缓存命中: ${Number(t.cache_hits || 0)}`,
+    `缓存未命中: ${Number(t.cache_misses || 0)}`,
+    `缓存写入: ${Number(t.cache_writes || 0)}`,
     `拦截请求: ${Number(t.blocked || 0)}`,
     t.within_budget ? '浏览器预算内' : '浏览器预算超限（只作诊断）',
   ].join('；');
   return `<div class="acc-v2-sub" title="${esc(title)}">流量: ${esc(network)} · 缓存省: ${esc(saved)}</div>`
-    + `<div class="acc-v2-sub" title="${esc(title)}">命中: ${esc(t.cache_hits)} · 拦截: ${esc(t.blocked)}</div>`;
+    + `<div class="acc-v2-sub" title="${esc(title)}">命中: ${esc(t.cache_hits)} · 未命中: ${esc(t.cache_misses)} · 拦截: ${esc(t.blocked)}</div>`;
 }
 function _accountCreatedCell(r) {
   const value = r.openai_created_at || r.created_at || '';

@@ -186,7 +186,10 @@ def is_cacheable_request(url: str, method: str, resource_type: str, headers=None
         return False
     request_headers = _header_values(headers)
     private_headers = set(request_headers) & CACHE_PRIVATE_REQUEST_HEADERS
-    if private_headers:
+    # A public static asset may arrive with ambient Cookie state. The cookie
+    # is never part of the URL key or replay headers; auth credentials remain
+    # on the live path.
+    if private_headers - {"cookie"}:
         return False
     request_cache_control = request_headers.get("cache-control", "").lower()
     if any(token in request_cache_control for token in (
@@ -199,10 +202,11 @@ def is_cacheable_request(url: str, method: str, resource_type: str, headers=None
     if any(segment in {".", ".."} for segment in decoded_path.split("/")) or "\\" in decoded_path:
         return False
     # The shared cache is intentionally narrower than the traffic allow-list:
-    # only immutable public asset prefixes without private request headers may
-    # be replayed across profiles. This excludes challenge/Sentinel and
-    # ``/backend-api`` scripts, and also avoids relying on a server's Vary
-    # declaration when a Cookie is present.
+    # only immutable public asset prefixes may be replayed across profiles.
+    # This excludes challenge/Sentinel and ``/backend-api`` scripts. The
+    # response gate below requires an explicit public cache directive and no
+    # profile-varying response; ambient Cookie state is never stored or
+    # included in the replay response.
     if not path.startswith(PUBLIC_STATIC_PATH_PREFIXES):
         return False
     return True
@@ -217,6 +221,9 @@ def is_cacheable_response(headers) -> bool:
     if any(token in cache_control for token in (
         "private", "no-store", "no-cache", "must-revalidate", "proxy-revalidate", "max-age=0", "s-maxage=0",
     )):
+        return False
+    directives = {part.split("=", 1)[0].strip() for part in cache_control.split(",") if part.strip()}
+    if "public" not in directives:
         return False
     vary = {part.strip().lower() for part in values.get("vary", "").split(",") if part.strip()}
     # A URL-only cache cannot safely represent a response that varies with a
@@ -277,10 +284,13 @@ class StaticResourceCache:
                 return None
             if str(meta.get("url") or "") != str(url):
                 return None
+            headers = meta.get("headers") or []
+            if not is_cacheable_response(headers):
+                return None
             return {
                 "status": status,
                 "phrase": str(meta.get("phrase") or "OK"),
-                "headers": _sanitize_headers(meta.get("headers") or []),
+                "headers": _sanitize_headers(headers),
                 "body": body,
                 "saved_at": float(meta.get("saved_at") or 0),
             }
@@ -288,7 +298,8 @@ class StaticResourceCache:
             return None
 
     def write(self, url: str, *, status: int, phrase: str, headers, body: bytes) -> bool:
-        if not body or len(body) > self.max_item_bytes:
+        headers = list(headers or [])
+        if status != 200 or not is_cacheable_response(headers) or not body or len(body) > self.max_item_bytes:
             return False
         meta_path, body_path = self._paths(url)
         token = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
@@ -428,7 +439,14 @@ class RoxyTrafficOptimizer:
         self._fetch_enabled = False
         self._session_only = False
         self._lock = threading.RLock()
-        self._stats = {"cache_hits": 0, "cache_misses": 0, "cached_bytes": 0, "cache_errors": 0}
+        self._stats = {
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "cache_candidates": 0,
+            "cache_writes": 0,
+            "cached_bytes": 0,
+            "cache_errors": 0,
+        }
         self._cached_urls: list[str] = []
         self._cached_request_ids: list[str] = []
         self._install_errors: list[str] = []
@@ -553,6 +571,8 @@ class RoxyTrafficOptimizer:
             if not is_cacheable_request(url, method, resource, getattr(event.request, "headers", None)):
                 connection.execute(devtools.fetch.continue_request(request_id))
                 return
+            with self._lock:
+                self._stats["cache_candidates"] += 1
             cached = self.cache.read(url)
             if cached and not self._should_refresh(url, len(cached["body"])):
                 self._fulfill_cached_request(
@@ -605,13 +625,16 @@ class RoxyTrafficOptimizer:
             if status == 200 and is_cacheable_request(url, method, resource, getattr(event.request, "headers", None)) and is_cacheable_response(event.response_headers or []):
                 payload, encoded = connection.execute(devtools.fetch.get_response_body(request_id))
                 body = base64.b64decode(payload) if encoded else str(payload).encode("utf-8")
-                if not self.cache.write(
+                if self.cache.write(
                     url,
                     status=status,
                     phrase=str(event.response_status_text or "OK"),
                     headers=event.response_headers or [],
                     body=body,
                 ):
+                    with self._lock:
+                        self._stats["cache_writes"] += 1
+                else:
                     with self._lock:
                         self._stats["cache_errors"] += 1
             connection.execute(devtools.fetch.continue_response(request_id))
@@ -657,6 +680,8 @@ class RoxyTrafficOptimizer:
             "static_cache": self.static_cache_enabled,
             "traffic_capture": self.capture,
             "cache_errors": stats["cache_errors"],
+            "cache_candidates": stats["cache_candidates"],
+            "cache_writes": stats["cache_writes"],
             "refresh_bytes": self._refresh_used,
             "session_only": self._session_only,
             "degraded_reason": self._degraded_reason,
