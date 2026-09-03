@@ -19,7 +19,7 @@
 | 高 | 挑战/Sentinel/后端脚本被共享缓存跨 Profile 回放 | 修复前 `is_cacheable_request(..., headers={})` 对 `/backend-api/sentinel/`、`/sentinel/`、`/cdn-cgi/challenge-platform/` 返回 True；缓存盘有 6 个非公共前缀条目 | 已确认并已修复；这些路径现在强制实时请求 |
 | 中 | Roxy 只由 runtime 决定未显式指定的指纹字段，内核可能长期相同 | `create_profile` 只随机 `os` 和 `windowName`，没有本地 `fingerInfo` 或 `coreVersion`；最新返回全部 `coreVersion=152` | 已确认。OS 随机不等于完整指纹随机 |
 | 中 | 语言/时区画像与 Roxy 可见 Profile 可能不是同一数据源 | `config/browser.py` 的 `AUTO_BROWSER_LOCALE_FROM_IP=True` 作用于 BrowserSession；Roxy create payload 没有 `fingerInfo` | 需继续以 Roxy API 实际返回/页面 JS 观测确认，不能把本地 locale 配置当作 Roxy 指纹保证 |
-| 低 | 公共 hashed 静态 JS/CSS URL-only 共享使字节相同 | 缓存只允许公共前缀，响应拒绝 `Set-Cookie`、`private/no-store` 和 `Vary: Cookie/Authorization`；盘点未见敏感头 | 这是预期的资源复用，不会携带账号会话；仍不应扩大到挑战或业务 API |
+| 低 | 公共 hashed 静态 JS/CSS URL-only 共享使字节相同 | 缓存只允许公共前缀；响应拒绝 `Set-Cookie`、`private/no-store/no-cache`、画像变体 `Vary`；盘点未见敏感头 | 这是预期的资源复用，不会携带账号会话；仍不应扩大到挑战或业务 API |
 
 ## Evidence → Finding → Path
 
@@ -64,7 +64,7 @@
 - 行为：将“带 Cookie 时才检查公共前缀”改为“所有请求都必须命中公共前缀”；因此挑战、Sentinel、`/backend-api`、`/unauth-mweb/scripts` 不再进入跨 Profile 缓存。
 - 回归：`tests/test_browser_traffic.py` 新增四个非公共路径断言。
 
-## 验证
+## 验证（前一轮公共前缀修复）
 
 ### 基线
 
@@ -74,7 +74,7 @@
 退出状态：0
 ```
 
-### 修改后
+### 修改后（前一轮）
 
 ```text
 命令：.venv\Scripts\python.exe -m pytest -q tests/test_browser_traffic.py tests/test_roxy_proxy_enforcement.py
@@ -96,3 +96,39 @@
 2. 要求严格独立 IP 时，在 `open_profile` 的代理预检阶段增加批次级出口 IP reservation（加锁、冲突换代理、注册结束释放），并把 `registration_exit_ip` 作为唯一性校验字段；若池中没有新 IP，应明确失败而不是复用。
 3. 若要验证“完整指纹随机”，在 Roxy `/browser/create`/`/browser/open` 的脱敏日志中记录 `os`、`osVersion`、`coreVersion`、语言、时区、WebGL/字体等非凭据摘要，并与 `registration_exit_country` 做一致性检查；不要记录 Cookie、Token 或 MFA Secret。
 4. Roxy 官方建议语言、显示语言、时区和地理位置自动匹配代理 IP；当前本地 `BROWSER_LOCALE_PROFILE` 不能替代 Roxy `fingerInfo`。参考：[Roxy API endpoint 文档](https://roxybrowser.com/docs/api-documentation/api-endpoint.html)、[Roxy Profile configuration 文档](https://roxybrowser.com/docs/features/profile-configuration.html)。
+
+## 继续风险复核（2026-09-03）
+
+### 同 URL miss 合并
+
+- **Evidence**：上游锁定版本的 `browser_traffic.py` 未实现跨 Profile miss 等待；本站原先的 `StaticResourceCache` 有跨缓存根目录的 miss 协调状态。
+- **Finding**：miss 合并主要形成并发冷启动的流量/时序关联信号，不直接传递 Cookie、Token、TLS 或浏览器存储；公共静态 warm hit 仍属于 URL 共享。
+- **Path**：本站 `core/browser_traffic.py` 的 `StaticResourceCache` 与 `RoxyTrafficOptimizer._on_request_paused`。
+- **修复**：删除旧的 miss 协调类、claim/wait/release 调用和 loading 状态，让每个 Profile 的 miss 独立回源，保持公共静态资源的白名单、响应状态检查和完整性校验。
+
+### 响应头与私有请求
+
+- **Evidence**：历史缓存 metadata 中的 `cf-ray`、`report-to`、`date`、`age`、`etag` 等边缘/时间头会随首个回源结果保存。
+- **Finding**：这些头不属于静态 body，但跨 Profile 回放会带来陈旧边缘标识和报告端点关联。
+- **Path**：本站 `core/browser_traffic.py:_sanitize_headers` 与 `is_cacheable_request`。
+- **修复**：回放头过滤扩展到边缘 ID、时间、ETag、缓存命中和请求追踪头；带 Cookie、Authorization 或 Proxy-Authorization 的请求、请求侧 `no-cache` 指令和带画像变体 `Vary` 的响应绕过共享缓存；读回条目还要求 status=200。
+
+### 变体与状态门禁
+
+- **Evidence**：URL-only key 无法区分 `Accept-Language`、User-Agent、Client Hints 或 Origin 变体；污染的 schema v2 metadata 也可能伪造非 200 状态；编码 dot-segment 可能让表面公共前缀在服务端归一化后落到业务路径。
+- **Finding**：画像/地区变体或错误状态被回放时，会把同一 URL 的错误响应带入其他 Profile，并造成注册页面行为差异。
+- **Path**：本站 `core/browser_traffic.py:is_cacheable_request`、`is_cacheable_response`、`StaticResourceCache.read`。
+- **修复**：请求侧遇到 `Cache-Control: no-cache/no-store/private/max-age=0/s-maxage=0` 或 `Pragma: no-cache` 时直接回源；响应 `Vary` 除 `Accept-Encoding` 外一律拒绝，重复头会合并检查；读回条目必须为 status=200；路径含 dot-segment 或反斜杠时直接回源。
+
+### 写入并发与残余共享
+
+- **Evidence**：每个 Profile 的 miss 已独立回源，但所有 Profile 仍可读取同一安装级 `ROXY_CACHE_DIR` 的公共 warm 条目；每个 `StaticResourceCache` 的写锁只覆盖当前实例。
+- **Finding**：公共静态 warm hit 仍可能呈现相同命中模式；跨进程同 URL 写入发生交错时，摘要校验会把短暂的 metadata/body 不匹配降级为 miss，但不会把不匹配 body 回放。
+- **Path**：`core/browser_traffic.py:StaticResourceCache.cache_key/read/write`、`RoxyTrafficOptimizer` cache construction。
+- **状态**：本次保留上游兼容的 URL-only 公共资源共享与原子替换；强画像隔离批次仍应关闭 static cache 或按 Profile 分片，这一项未在本次继续优化中改动。
+
+### 验证
+
+- 定向测试：最新结果见 `VERIFICATION.txt`。
+- 全量测试：最新结果见 `VERIFICATION.txt`。
+- 旧 miss 协调符号扫描：结果为空。

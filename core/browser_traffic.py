@@ -7,12 +7,12 @@ import hashlib
 import json
 import logging
 import os
-import random
+import secrets
 import threading
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +60,38 @@ REPLAY_STRIPPED_HEADERS = {
     "content-length",
     "set-cookie",
     "transfer-encoding",
+    # Edge/timing identifiers belong to the original response, not the
+    # immutable asset. Replaying them across Profiles creates stale shared
+    # cache metadata and an avoidable correlation signal.
+    "age",
+    "alt-svc",
+    "cf-cache-status",
+    "cf-ray",
+    "date",
+    "etag",
+    "expires",
+    "last-modified",
+    "nel",
+    "report-to",
+    "request-id",
+    "server-timing",
+    "server",
+    "timing-allow-origin",
+    "traceparent",
+    "tracestate",
+    "via",
+    "x-cache",
+    "x-cache-hits",
+    "x-ms-request-id",
+    "x-ms-request-priority",
+    "x-request-id",
+    "x-correlation-id",
+    "x-served-by",
 }
 CACHE_SCHEMA_VERSION = 2
 CACHE_PRIVATE_REQUEST_HEADERS = {"authorization", "cookie", "proxy-authorization"}
 CACHE_PRIVATE_RESPONSE_HEADERS = {"set-cookie", "www-authenticate"}
-CACHE_LOAD_WAIT_SECONDS = 30.0
+SAFE_VARY_HEADERS = {"accept-encoding"}
 PUBLIC_STATIC_PATH_PREFIXES = (
     "/assets/",
     "/cdn/assets/",
@@ -95,7 +122,11 @@ def _header_values(headers) -> dict[str, str]:
             name, value = getattr(item, "name", ""), getattr(item, "value", "")
         name = str(name or "").strip().lower()
         if name:
-            values[name] = str(value or "")
+            value = str(value or "")
+            if name in values and values[name]:
+                values[name] += "," + value
+            else:
+                values[name] = value
     return values
 
 
@@ -153,15 +184,25 @@ def is_cacheable_request(url: str, method: str, resource_type: str, headers=None
         return False
     if path.endswith("/service-worker.js") or path.endswith("/sw.js"):
         return False
-    private_headers = set(_header_values(headers)) & CACHE_PRIVATE_REQUEST_HEADERS
-    if private_headers & {"authorization", "proxy-authorization"}:
+    request_headers = _header_values(headers)
+    private_headers = set(request_headers) & CACHE_PRIVATE_REQUEST_HEADERS
+    if private_headers:
+        return False
+    request_cache_control = request_headers.get("cache-control", "").lower()
+    if any(token in request_cache_control for token in (
+        "no-cache", "no-store", "private", "max-age=0", "s-maxage=0",
+    )):
+        return False
+    if "no-cache" in request_headers.get("pragma", "").lower():
+        return False
+    decoded_path = unquote(path)
+    if any(segment in {".", ".."} for segment in decoded_path.split("/")) or "\\" in decoded_path:
         return False
     # The shared cache is intentionally narrower than the traffic allow-list:
-    # only immutable public asset prefixes may be replayed across profiles.
-    # This excludes challenge/Sentinel and ``/backend-api`` scripts even when
-    # a request has no Cookie header.  Those scripts can participate in
-    # account- or browser-specific challenge state and must stay on the live
-    # per-profile network path.
+    # only immutable public asset prefixes without private request headers may
+    # be replayed across profiles. This excludes challenge/Sentinel and
+    # ``/backend-api`` scripts, and also avoids relying on a server's Vary
+    # declaration when a Cookie is present.
     if not path.startswith(PUBLIC_STATIC_PATH_PREFIXES):
         return False
     return True
@@ -173,10 +214,15 @@ def is_cacheable_response(headers) -> bool:
     if set(values) & CACHE_PRIVATE_RESPONSE_HEADERS:
         return False
     cache_control = values.get("cache-control", "").lower()
-    if "private" in cache_control or "no-store" in cache_control:
+    if any(token in cache_control for token in (
+        "private", "no-store", "no-cache", "must-revalidate", "proxy-revalidate", "max-age=0", "s-maxage=0",
+    )):
         return False
-    vary = {part.strip().lower() for part in values.get("vary", "").split(",")}
-    return not ({"cookie", "authorization"} & vary)
+    vary = {part.strip().lower() for part in values.get("vary", "").split(",") if part.strip()}
+    # A URL-only cache cannot safely represent a response that varies with a
+    # browser/profile attribute. Accept-Encoding is normalized away before
+    # replay; every other Vary token, including '*', stays on the live path.
+    return not (vary - SAFE_VARY_HEADERS)
 
 
 def _sanitize_headers(headers) -> list[dict[str, str]]:
@@ -188,7 +234,10 @@ def _sanitize_headers(headers) -> list[dict[str, str]]:
         else:
             name = str(getattr(header, "name", "") or "")
             value = str(getattr(header, "value", "") or "")
-        if name and name.lower() not in REPLAY_STRIPPED_HEADERS:
+        lower_name = name.lower()
+        if lower_name.startswith(("x-envoy-", "x-amzn-", "x-azure-")):
+            continue
+        if name and lower_name not in REPLAY_STRIPPED_HEADERS:
             cleaned.append({"name": name, "value": value})
     return cleaned
 
@@ -196,17 +245,11 @@ def _sanitize_headers(headers) -> list[dict[str, str]]:
 class StaticResourceCache:
     """TTL cache with atomic metadata/body replacement and digest validation."""
 
-    _coordinators_lock = threading.RLock()
-    _coordinators: dict[str, "_CacheLoadCoordinator"] = {}
-
     def __init__(self, root: Path, *, max_age: int, max_item_bytes: int):
         self.root = Path(root)
         self.max_age = max(0, int(max_age))
         self.max_item_bytes = max(1, int(max_item_bytes))
         self._lock = threading.RLock()
-        with self._coordinators_lock:
-            cache_root = str(self.root.resolve())
-            self._coordinator = self._coordinators.setdefault(cache_root, _CacheLoadCoordinator())
 
     @staticmethod
     def cache_key(url: str) -> str:
@@ -222,6 +265,9 @@ class StaticResourceCache:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if int(meta.get("schema_version") or 0) != CACHE_SCHEMA_VERSION:
                 return None
+            status = int(meta.get("status") or 0)
+            if status != 200:
+                return None
             if self.max_age and time.time() - float(meta.get("saved_at") or 0) > self.max_age:
                 return None
             body = body_path.read_bytes()
@@ -232,7 +278,7 @@ class StaticResourceCache:
             if str(meta.get("url") or "") != str(url):
                 return None
             return {
-                "status": int(meta.get("status") or 200),
+                "status": status,
                 "phrase": str(meta.get("phrase") or "OK"),
                 "headers": _sanitize_headers(meta.get("headers") or []),
                 "body": body,
@@ -274,53 +320,6 @@ class StaticResourceCache:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
-
-    def claim_load(self, url: str) -> bool:
-        """Claim one cache miss so parallel profiles do not fetch the same public asset."""
-        return self._coordinator.claim(str(url))
-
-    def wait_for_load(self, url: str, *, timeout: float = CACHE_LOAD_WAIT_SECONDS) -> dict | None:
-        """Wait briefly for another profile to atomically populate a missing entry."""
-        return self._coordinator.wait_for_cache(self, str(url), timeout=timeout)
-
-    def release_load(self, url: str) -> None:
-        self._coordinator.release(str(url))
-
-
-class _CacheLoadCoordinator:
-    """Coordinates cache misses across Roxy profiles sharing one cache directory."""
-
-    def __init__(self):
-        self._condition = threading.Condition(threading.RLock())
-        self._loading: dict[str, float] = {}
-
-    def claim(self, url: str) -> bool:
-        now = time.monotonic()
-        with self._condition:
-            expires_at = self._loading.get(url, 0.0)
-            if expires_at > now:
-                return False
-            self._loading[url] = now + CACHE_LOAD_WAIT_SECONDS
-            return True
-
-    def wait_for_cache(self, cache: StaticResourceCache, url: str, *, timeout: float) -> dict | None:
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        with self._condition:
-            while True:
-                cached = cache.read(url)
-                if cached:
-                    return cached
-                now = time.monotonic()
-                expires_at = self._loading.get(url, 0.0)
-                if expires_at <= now or now >= deadline:
-                    return None
-                self._condition.wait(min(deadline - now, expires_at - now))
-
-    def release(self, url: str) -> None:
-        with self._condition:
-            self._loading.pop(url, None)
-            self._condition.notify_all()
-
 
 def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int = 0, cache_hits: int = 0,
                                cache_misses: int = 0, cached_request_urls=(), cached_request_ids=(),
@@ -421,7 +420,9 @@ class RoxyTrafficOptimizer:
         self.refresh_budget = max(0, int(cache_refresh_budget_bytes))
         self.refresh_max_item = max(0, int(cache_refresh_max_item_bytes))
         self._refresh_used = 0
-        self._salt = random.randbytes(16) if hasattr(random, "randbytes") else os.urandom(16)
+        # A per-Profile cryptographic salt keeps the bounded refresh sample
+        # independent even when worker processes share the same cache root.
+        self._salt = secrets.token_bytes(16)
         self._devtools = None
         self._connection = None
         self._fetch_enabled = False
@@ -430,7 +431,6 @@ class RoxyTrafficOptimizer:
         self._stats = {"cache_hits": 0, "cache_misses": 0, "cached_bytes": 0, "cache_errors": 0}
         self._cached_urls: list[str] = []
         self._cached_request_ids: list[str] = []
-        self._loading_requests: dict[str, str] = {}
         self._install_errors: list[str] = []
         self._degraded_reason = ""
 
@@ -543,7 +543,6 @@ class RoxyTrafficOptimizer:
         if not devtools or not connection:
             return
         request_id = event.request_id
-        claimed_url = ""
         try:
             if event.response_status_code is not None:
                 self._handle_response(event)
@@ -560,23 +559,10 @@ class RoxyTrafficOptimizer:
                     request_id, url, cached, network_id=getattr(event, "network_id", None),
                 )
                 return
-            if not cached and not self.cache.claim_load(url):
-                cached = self.cache.wait_for_load(url)
-                if cached:
-                    self._fulfill_cached_request(
-                        request_id, url, cached, network_id=getattr(event, "network_id", None),
-                    )
-                    return
-            elif not cached:
-                claimed_url = url
-                with self._lock:
-                    self._loading_requests[str(request_id)] = url
             with self._lock:
                 self._stats["cache_misses"] += 1
             connection.execute(devtools.fetch.continue_request(request_id, intercept_response=True))
         except Exception:
-            if claimed_url:
-                self._release_loading_request(request_id, claimed_url)
             with self._lock:
                 self._stats["cache_errors"] += 1
             try:
@@ -604,12 +590,6 @@ class RoxyTrafficOptimizer:
                 self._cached_request_ids.append(str(network_id))
             else:
                 self._cached_urls.append(url)
-
-    def _release_loading_request(self, request_id, fallback_url: str = "") -> None:
-        with self._lock:
-            url = self._loading_requests.pop(str(request_id), fallback_url)
-        if url:
-            self.cache.release_load(url)
 
     def _handle_response(self, event) -> None:
         devtools = self._devtools
@@ -642,14 +622,8 @@ class RoxyTrafficOptimizer:
                 connection.execute(devtools.fetch.continue_response(request_id))
             except Exception:
                 pass
-        finally:
-            self._release_loading_request(request_id)
 
     def finalize(self) -> dict:
-        with self._lock:
-            loading_request_ids = list(self._loading_requests)
-        for request_id in loading_request_ids:
-            self._release_loading_request(request_id)
         if self._fetch_enabled and self._devtools and self._connection:
             try:
                 self._connection.execute(self._devtools.fetch.disable())

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 import json
 import tempfile
-import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from core.browser_traffic import (
@@ -70,7 +70,7 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
         self.assertFalse(is_cacheable_request(
             "https://auth.openai.com/assets/login.js", "GET", "script",
         ))
-        self.assertTrue(is_cacheable_request(
+        self.assertFalse(is_cacheable_request(
             "https://chatgpt.com/cdn/assets/app.js", "GET", "script", {"Cookie": "session=browser-state"},
         ))
         self.assertFalse(is_cacheable_request("https://chatgpt.com/_next/static/app.js", "POST", "script"))
@@ -96,6 +96,21 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
         ))
         self.assertFalse(is_cacheable_request(
             "https://chatgpt.com/_next/static/app.js", "GET", "script", {"Authorization": "Bearer token"},
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/_next/static/app.js", "GET", "script", {"Proxy-Authorization": "Basic proxy"},
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/_next/static/app.js", "GET", "script", {"Cache-Control": "no-cache"},
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/_next/static/app.js", "GET", "script", {"Pragma": "no-cache"},
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/assets/../backend-api/sdk.js", "GET", "script",
+        ))
+        self.assertFalse(is_cacheable_request(
+            "https://chatgpt.com/assets/%2e%2e/backend-api/sdk.js", "GET", "script",
         ))
 
     def test_roxy_patterns_cover_current_telemetry_and_session_shell_paths(self):
@@ -124,30 +139,73 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
     def test_cache_rejects_stateful_responses(self):
         self.assertFalse(is_cacheable_response([{"name": "Set-Cookie", "value": "sid=secret"}]))
         self.assertFalse(is_cacheable_response([{"name": "Cache-Control", "value": "private, max-age=60"}]))
+        self.assertFalse(is_cacheable_response([{"name": "Cache-Control", "value": "no-cache, must-revalidate, s-maxage=0"}]))
         self.assertFalse(is_cacheable_response([{"name": "Vary", "value": "Accept-Encoding, Cookie"}]))
+        self.assertFalse(is_cacheable_response([{"name": "Vary", "value": "Accept-Language"}]))
+        self.assertFalse(is_cacheable_response([{"name": "Vary", "value": "User-Agent"}]))
+        self.assertFalse(is_cacheable_response([{"name": "Vary", "value": "*"}]))
+        self.assertFalse(is_cacheable_response([
+            {"name": "Vary", "value": "Accept-Encoding"},
+            {"name": "Vary", "value": "Origin"},
+        ]))
+        self.assertTrue(is_cacheable_response([{"name": "Vary", "value": "Accept-Encoding"}]))
         self.assertTrue(is_cacheable_response([{"name": "Cache-Control", "value": "public, max-age=3600"}]))
 
 
 class StaticCacheTests(unittest.TestCase):
-    def test_parallel_caches_reuse_the_first_public_asset_load(self):
+    def test_each_profile_miss_continues_to_live_network(self):
+        optimizer = RoxyTrafficOptimizer(
+            MagicMock(),
+            low_traffic=False,
+            static_cache=True,
+            capture=False,
+            cache_dir=Path("unused-test-cache"),
+            cache_max_age=60,
+            cache_max_item_bytes=1024,
+            cache_refresh_rate=0,
+            cache_refresh_budget_bytes=0,
+            cache_refresh_max_item_bytes=0,
+            budget_bytes=1024,
+        )
+        optimizer._devtools = MagicMock()
+        optimizer._connection = MagicMock()
+        optimizer._devtools.fetch.continue_request.side_effect = (
+            lambda request_id, **kwargs: ("continue_request", request_id, kwargs)
+        )
+        optimizer.cache.read = MagicMock(return_value=None)
+
+        def event(request_id):
+            return SimpleNamespace(
+                request_id=request_id,
+                request=SimpleNamespace(
+                    url="https://chatgpt.com/_next/static/app.js",
+                    method="GET",
+                    headers={},
+                ),
+                resource_type="script",
+                response_status_code=None,
+            )
+
+        optimizer._on_request_paused(event("profile-a"))
+        optimizer._on_request_paused(event("profile-b"))
+
+        self.assertEqual(optimizer._connection.execute.call_count, 2)
+        self.assertTrue(all(
+            call_args.args[0][0] == "continue_request"
+            and call_args.args[0][2]["intercept_response"] is True
+            for call_args in optimizer._connection.execute.call_args_list
+        ))
+
+    def test_cache_instances_share_only_validated_public_asset_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             first = StaticResourceCache(Path(tmp), max_age=3600, max_item_bytes=1024)
             second = StaticResourceCache(Path(tmp), max_age=3600, max_item_bytes=1024)
             url = "https://chatgpt.com/cdn/assets/app.js"
-            result = {}
-
-            self.assertTrue(first.claim_load(url))
-
-            waiter = threading.Thread(
-                target=lambda: result.setdefault("cached", second.wait_for_load(url, timeout=1)),
-            )
-            waiter.start()
             self.assertTrue(first.write(url, status=200, phrase="OK", headers=[], body=b"shared"))
-            first.release_load(url)
-            waiter.join(timeout=2)
-
-            self.assertFalse(waiter.is_alive())
-            self.assertEqual(result["cached"]["body"], b"shared")
+            self.assertEqual(second.read(url)["body"], b"shared")
+            # Cache bytes remain shareable only after validation; misses are
+            # fetched independently by each Profile, matching the upstream
+            # implementation and avoiding a synchronized waiter pattern.
 
     def test_write_read_and_header_sanitization(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +219,12 @@ class StaticCacheTests(unittest.TestCase):
                     {"name": "Content-Type", "value": "application/javascript"},
                     {"name": "Content-Length", "value": "3"},
                     {"name": "Set-Cookie", "value": "secret=never-replay"},
+                    {"name": "CF-Ray", "value": "edge-id"},
+                    {"name": "Date", "value": "Wed, 03 Sep 2026 00:00:00 GMT"},
+                    {"name": "Report-To", "value": '{"group":"cf-nel"}'},
+                    {"name": "ETag", "value": '"stale-edge-tag"'},
+                    {"name": "Traceparent", "value": "00-edge-trace"},
+                    {"name": "X-Envoy-Upstream-Service-Time", "value": "12"},
                 ],
                 body=b"abc",
             ))
@@ -192,6 +256,17 @@ class StaticCacheTests(unittest.TestCase):
             cache.write(url, status=200, phrase="OK", headers=[], body=b"abc")
             body_path = next(Path(tmp).glob("*.bin"))
             body_path.write_bytes(b"tampered")
+            self.assertIsNone(cache.read(url))
+
+    def test_non_success_status_metadata_is_not_replayed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = StaticResourceCache(Path(tmp), max_age=3600, max_item_bytes=1024)
+            url = "https://chatgpt.com/_next/static/app.js"
+            self.assertTrue(cache.write(url, status=200, phrase="OK", headers=[], body=b"abc"))
+            meta_path, _ = cache._paths(url)
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta["status"] = 404
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
             self.assertIsNone(cache.read(url))
 
 
