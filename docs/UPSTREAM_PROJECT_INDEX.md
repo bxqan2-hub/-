@@ -157,3 +157,4 @@
 - 代理证据：当前 `ROXY_CREATE_USE_PROXY_POOL=True`、`PROXY_API_ENABLED=False`、静态池 200 条、`PROXY_POOL_ACTIVE` 为空，选择路径是 `config/proxy.py::_pick_static_or_system_proxy` 的 `random.choice(available)`。随机只代表抽取随机，不代表出口 IP 唯一；最新四条成功日志中两条 Profile 实际复用了出口 IP `72.82.55.137`，因此当前没有“一号一独立出口 IP”保证。当前 200 条池条目均标记 `region-US`，所以本批随机的是 US 会话线路，不是随机国家。
 - Roxy 证据：`ROXY_ONE_PROFILE_PER_ACCOUNT=True` 且 `ROXY_DELETE_PROFILE_AFTER_RUN=True`，每次创建的 Profile ID 不同并在结束后删除；`ROXY_RANDOM_OS_ON_CREATE=True` 只在 `Windows,macOS` 中随机系统，`coreVersion` 未由本地 payload 指定，最新日志全部由已安装 Roxy runtime 返回 `152`，因此浏览器内核当前固定为 152 而非随机。`fingerInfo` 未在本地 `/browser/create` payload 中显式设置，语言/时区/地理联动不能仅凭 `BROWSER_LOCALE_PROFILE` 推断为 Roxy 可见指纹。
 - 详细证据、Finding→Path、修复和验证记录见 `docs/2026-09-03_注册缓存与Roxy独立画像审计-report.md`。
+- 上游与本站缓存实现的逐项差异见 `docs/2026-09-03_上游与本站流量缓存机制对比-report.md`；该对比确认上游锁定版本的 `browser_traffic.py` 没有跨 Profile miss 协调，而本站有 `_CacheLoadCoordinator`。
