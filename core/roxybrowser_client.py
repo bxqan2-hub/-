@@ -846,7 +846,13 @@ class RoxyBrowserClient:
         try:
             if not opened or not opened.profile_id:
                 return
-            keep_open = bool(getattr(opened, "keep_open", False))
+            keep_open = bool(
+                getattr(
+                    opened,
+                    "keep_open",
+                    getattr(_cfg, "ROXY_KEEP_BROWSER_OPEN", False),
+                )
+            )
             if not keep_open:
                 self.close_profile(opened.profile_id)
 
