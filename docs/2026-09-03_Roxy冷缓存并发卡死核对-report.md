@@ -21,7 +21,7 @@
 ### 中概率：Roxy 生命周期接口超时放大残留进程
 
 - Job 3 在 20:22:51–20:23:22 记录 `/browser/close`、`/browser/delete` 15 秒超时；重启后的 20:32:40–20:33:03 又出现多次 `WinError 10061`，说明 Roxy 管理 API 与任务清理存在独立阻塞。
-- 这些日志发生在注册页面已运行之后，是卡死后的清理/恢复后果，不是 OTP 或密码路径把电脑锁死的证据；本次修复先限制启动并发，保留现有生命周期重试边界。
+- 这些日志发生在注册页面已运行之后，是卡死后的清理/恢复后果，不是 OTP 或密码路径把电脑锁死的证据；本次优化先减少重复冷回源，保留现有生命周期重试边界。
 
 ### 低概率：邮箱 OTP、密码、2FA 或 Cloudflare
 
@@ -36,8 +36,8 @@
 ## 验证
 
 - 基线定向：`.\\venv\\Scripts\\python.exe -m pytest -q tests/test_webui_gptmail.py tests/test_webui_cloudflare.py tests/test_webui_helper_regressions.py tests/test_browser_cache_service.py` → `53 passed in 19.81s`，退出 0。
-- 修改后定向：同命令并加入 `tests/test_config_defaults.py` → `70 passed in 19.83s`，退出 0。
-- 修改后全量：`.\\venv\\Scripts\\python.exe -m pytest -q`、`.\\venv\\Scripts\\python.exe -m compileall -q config core webui tests`；最终原始输出写入根目录 `VERIFICATION.txt`。
+- 修改后定向：`.\\venv\\Scripts\\python.exe -m pytest -q tests/test_browser_traffic.py tests/test_webui_gptmail.py tests/test_webui_cloudflare.py tests/test_webui_helper_regressions.py tests/test_config_defaults.py tests/test_browser_cache_service.py` → `91 passed in 24.58s`，退出 0。
+- 修改后全量：`.\\venv\\Scripts\\python.exe -m pytest -q` → `741 passed, 16 subtests passed in 81.05s (0:01:21)`；编译命令 `.\\venv\\Scripts\\python.exe -m compileall -q config core webui tests` 输出 `COMPILEALL_OK`，均退出 0。
 
 ## 结论
 
