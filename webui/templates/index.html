@@ -2047,6 +2047,30 @@
     .config-filter-meta-v2 {
       min-width: 118px; color: #909399; font-size: 12px; text-align: right; white-space: nowrap;
     }
+    .roxy-cache-tool-v2 {
+      min-height: 64px; padding: 12px 14px;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04);
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 14px; flex-wrap: wrap;
+    }
+    .roxy-cache-tool-main-v2 { min-width: 0; display: grid; gap: 3px; }
+    .roxy-cache-tool-label-v2 { color: #606266; font-size: 13px; font-weight: 700; }
+    .roxy-cache-tool-value-v2 { color: #303133; font-size: 17px; font-weight: 700; line-height: 1.2; }
+    .roxy-cache-tool-hint-v2 { color: #909399; font-size: 12px; line-height: 1.4; }
+    .roxy-cache-tool-btn-v2 {
+      min-height: 44px; padding: 0 16px; border: 1px solid #f2b8b5; border-radius: 8px;
+      background: #fff7f6; color: #c2413a; cursor: pointer; display: inline-flex;
+      align-items: center; justify-content: center; gap: 7px; white-space: nowrap;
+      font: inherit; font-size: 13px; font-weight: 700;
+      transition: color .15s ease, border-color .15s ease, background .15s ease, opacity .15s ease;
+    }
+    .roxy-cache-tool-btn-v2 svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .roxy-cache-tool-btn-v2:hover:not(:disabled) { color: #a3312a; border-color: #e58f8a; background: #fff0ee; }
+    .roxy-cache-tool-btn-v2:focus-visible { outline: 2px solid rgba(194,65,58,.35); outline-offset: 2px; }
+    .roxy-cache-tool-btn-v2:disabled { opacity: .56; cursor: not-allowed; }
+    .roxy-cache-tool-btn-v2.is-loading svg { animation: roxy-cache-spin-v2 .9s linear infinite; }
+    @keyframes roxy-cache-spin-v2 { to { transform: rotate(360deg); } }
     .config-cards-v2 {
       display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
     }
@@ -3026,6 +3050,17 @@
           </label>
           <button type="button" class="config-scope-v2" id="configScopeV2" aria-pressed="false">仅当前驱动</button>
           <span class="config-filter-meta-v2" id="configFilterMetaV2" aria-live="polite">正在读取配置…</span>
+        </div>
+        <div class="roxy-cache-tool-v2" id="roxyCacheToolV2" aria-label="Roxy 浏览器缓存">
+          <div class="roxy-cache-tool-main-v2">
+            <div class="roxy-cache-tool-label-v2">浏览器缓存</div>
+            <div class="roxy-cache-tool-value-v2" id="roxyCacheValueV2" aria-live="polite">正在读取…</div>
+            <div class="roxy-cache-tool-hint-v2" id="roxyCacheHintV2">仅清理可回收网页缓存，不删除账号、Cookie、指纹或代理配置</div>
+          </div>
+          <button type="button" class="roxy-cache-tool-btn-v2" id="btnClearRoxyCacheV2" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            <span>清理缓存</span>
+          </button>
         </div>
         <div class="config-cards-v2" id="configCardsV2" aria-label="配置概览卡片">
           <div class="config-card-v2" id="configCardRegistrationV2">
@@ -8393,6 +8428,7 @@ let CONFIG_CODEX_ACTIVE_SECTION_V2 = '基础配置';
 let CONFIG_ROXY_ACTIVE_SECTION_V2 = '连接与团队';
 let CONFIG_QUERY_V2 = '';
 let CONFIG_SHOW_ALL_DRIVERS_V2 = false;
+let ROXY_CACHE_CLEARING_V2 = false;
 const CONFIG_PENDING_UPDATES = {};
 
 const CONFIG_DRIVER_GROUPS_V2 = new Set(['CloakBrowser', 'Browser Use', 'Skyvern', 'RoxyBrowser', 'Roxy流量优化']);
@@ -9840,11 +9876,107 @@ function bindConfigLayoutV2() {
   }
 }
 
+function renderRoxyCacheStatusV2(status) {
+  const value = $('#roxyCacheValueV2');
+  const hint = $('#roxyCacheHintV2');
+  const button = $('#btnClearRoxyCacheV2');
+  if (!value || !hint || !button) return;
+  const scopes = status?.scopes || {};
+  const profile = scopes.profile_web_cache || {};
+  const roxyApp = scopes.roxy_app_cache || {};
+  const shared = scopes.shared_static_cache || {};
+  const reclaimable = Number(status?.reclaimable_bytes || 0);
+  const total = Number(status?.profile_store?.bytes || 0) + Number(roxyApp.bytes || 0) + Number(shared.bytes || 0);
+  value.textContent = `${_trafficBytes(reclaimable)} 可清理`;
+  const detail = `Profile 网页缓存 ${_trafficBytes(profile.bytes)} · Roxy 管理器 ${_trafficBytes(roxyApp.bytes)} · 总占用 ${_trafficBytes(total)}`;
+  const blockers = Array.isArray(status?.blockers) ? status.blockers.filter(Boolean) : [];
+  if (blockers.length) {
+    hint.textContent = `${blockers.join('；')}；${detail}`;
+    button.disabled = true;
+    button.title = blockers.join('；');
+  } else {
+    hint.textContent = `${detail} · 公开 JS/CSS 缓存 ${_trafficBytes(shared.bytes)} 已保留`;
+    button.disabled = ROXY_CACHE_CLEARING_V2;
+    button.title = '仅清理可回收网页缓存，不删除账号、Cookie、指纹或代理配置';
+  }
+}
+
+async function loadRoxyCacheStatusV2() {
+  const value = $('#roxyCacheValueV2');
+  const hint = $('#roxyCacheHintV2');
+  const button = $('#btnClearRoxyCacheV2');
+  if (!value || !hint || !button) return;
+  try {
+    const status = await api('/api/roxy/cache/status');
+    renderRoxyCacheStatusV2(status);
+  } catch (e) {
+    value.textContent = '读取失败';
+    hint.textContent = `缓存状态读取失败：${e.message}`;
+    button.disabled = true;
+  }
+}
+
+async function clearRoxyCacheV2() {
+  if (ROXY_CACHE_CLEARING_V2) return;
+  let current;
+  try {
+    current = await api('/api/roxy/cache/status');
+  } catch (e) {
+    showToast('读取缓存状态失败: ' + e.message);
+    return;
+  }
+  const reclaimable = _trafficBytes(current?.reclaimable_bytes || 0);
+  if (Array.isArray(current?.blockers) && current.blockers.length) {
+    renderRoxyCacheStatusV2(current);
+    showToast(current.blockers.join('；'));
+    return;
+  }
+  if (!confirm(`确定清理约 ${reclaimable} 的浏览器缓存吗？\n\n只清理可回收网页缓存和 Roxy 管理器缓存；不会删除账号、Cookie、指纹、代理或共享公开 JS/CSS 缓存。`)) return;
+  const button = $('#btnClearRoxyCacheV2');
+  const oldText = button?.querySelector('span')?.textContent || '清理缓存';
+  ROXY_CACHE_CLEARING_V2 = true;
+  if (button) {
+    button.disabled = true;
+    button.classList.add('is-loading');
+    const label = button.querySelector('span');
+    if (label) label.textContent = '清理中…';
+  }
+  try {
+    const result = await api('/api/roxy/cache/clear', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({confirm: true}),
+    });
+    renderRoxyCacheStatusV2(result.status || {});
+    showToast(result.partial ? '缓存已清理，部分占用文件已跳过' : '浏览器缓存已清理');
+  } catch (e) {
+    showToast('清理缓存失败: ' + e.message);
+    await loadRoxyCacheStatusV2();
+  } finally {
+    ROXY_CACHE_CLEARING_V2 = false;
+    if (button) {
+      button.classList.remove('is-loading');
+      const label = button.querySelector('span');
+      if (label) label.textContent = oldText;
+    }
+    await loadRoxyCacheStatusV2();
+  }
+}
+
+function bindRoxyCacheToolV2() {
+  const button = $('#btnClearRoxyCacheV2');
+  if (!button || button.dataset.bound) return;
+  button.dataset.bound = '1';
+  button.addEventListener('click', clearRoxyCacheV2);
+}
+
 async function loadConfig() {
   try {
     CONFIG = await api('/api/config');
     renderConfigLayoutV2();
     bindConfigLayoutV2();
+    bindRoxyCacheToolV2();
+    loadRoxyCacheStatusV2();
   } catch(e) {
     showToast('加载配置失败: ' + e.message);
   }
@@ -9982,6 +10114,7 @@ document.addEventListener('click', (e) => {
 // ---------- 初始化 ----------
 const accountLifetimeHeader = document.querySelector('#accountsPanelV2 thead .col-time');
 if (accountLifetimeHeader) accountLifetimeHeader.textContent = '注册时间';
+bindRoxyCacheToolV2();
 loadAccountGroups();
 loadAtValiditySchedule();
 loadSummary();
@@ -9991,6 +10124,7 @@ setInterval(loadSummary, 5000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 2000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) loadAtValiditySchedule(); }, 30000);
 setInterval(() => { if (!$('#tab-outlook').classList.contains('hidden')) loadOutlook(); }, 3000);
+setInterval(() => { if (!$('#tab-config').classList.contains('hidden')) loadRoxyCacheStatusV2(); }, 10000);
 </script>
 </body>
 </html>

@@ -202,3 +202,12 @@
 - Roxy 官方 API 文档确认 `/browser/open` 支持 `args` 列表，并列明 `--no-first-run`、`--no-default-browser-check` 等内置参数不可修改；本次未重复注入这些字段。
 - 详细 Finding、路径、边界和验证记录见 `docs/2026-09-03_Roxy并发进程页面负载优化-report.md`。
 - 验证覆盖：有界 Network 缓冲、旧版 CDP 回退、并发 Profile 启动参数合并与去重；下一批需保持原并发数量采集前后 Roxy 工作集、子进程数和页面等待时间。
+
+## 本次 Roxy 浏览器缓存盘点与 WebUI 清理按钮（2026-09-03）
+
+- 上游锁定 commit 仍为 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；Roxy 官方 API 文档提供 `/browser/clear_local_cache`，其中 `partial` 级别保留扩展、登录状态、指纹和 IP。本地没有扩大清理范围，而是新增固定目录白名单清理。
+- 当前盘点：Roxy `browser-cache` Profile 存储约 1.28 GiB，其中可回收网页缓存约 276.8 MiB；Roxy 管理器 `Cache` 约 67.2 MiB；注册共享公开 JS/CSS 缓存约 765.6 MiB。按钮只清理前两项，公开静态缓存继续保留。
+- 新增 `core/browser_cache_service.py`，清理前核对注册任务为 0 且 `RoxyChrome/chromedriver` 为 0；只清理 `Cache`、`Code Cache`、`GPUCache`、Shader/Dawn 缓存和 Roxy 管理器缓存子项，保留 Cookies、Local Storage、指纹、代理、Profile 运行时文件。
+- 新增 WebUI 接口 `GET /api/roxy/cache/status` 与 `POST /api/roxy/cache/clear`；清理接口要求显式 `confirm=true`，并返回删除字节、删除文件、部分占用文件和清理后的容量。
+- 配置页顶部新增“清理缓存”按钮，显示总占用、可回收容量和活动阻断原因；确认框、加载状态、成功提示和禁用状态遵循现有 WebUI 样式。
+- 详细容量、边界和验证见 `docs/2026-09-03_Roxy浏览器缓存清理与容量审计-report.md`。

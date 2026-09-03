@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request
 from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-from core import account_operation_control, codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, gopay_service, momo_service, at_validity_scheduler
+from core import account_operation_control, browser_cache_service, codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, gopay_service, momo_service, at_validity_scheduler
 from core import chatgpt_plan, integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
@@ -4530,6 +4530,29 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify(result)
         except Exception as exc:
             logger.exception("获取 Roxy 团队/工作区失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.get("/api/roxy/cache/status")
+    def api_roxy_cache_status():
+        """Return safe-to-clear browser cache sizes without exposing paths."""
+        try:
+            return jsonify(browser_cache_service.cache_status())
+        except Exception as exc:
+            logger.exception("读取 Roxy 浏览器缓存状态失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.post("/api/roxy/cache/clear")
+    def api_roxy_cache_clear():
+        """Clear disposable browser caches after an explicit UI confirmation."""
+        data = request.get_json(silent=True) or {}
+        if data.get("confirm") is not True:
+            return jsonify({"ok": False, "error": "请先确认清理浏览器缓存"}), 400
+        try:
+            result = browser_cache_service.clear_cache()
+            http_status = int(result.pop("http_status", 200) or 200)
+            return jsonify(result), http_status
+        except Exception as exc:
+            logger.exception("清理 Roxy 浏览器缓存失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
     # ----------------------------------------------------------
