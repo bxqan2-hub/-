@@ -212,6 +212,13 @@
 - 配置页顶部新增“清理缓存”按钮，显示总占用、可回收容量和活动阻断原因；确认框、加载状态、成功提示和禁用状态遵循现有 WebUI 样式。
 - 详细容量、边界和验证见 `docs/2026-09-03_Roxy浏览器缓存清理与容量审计-report.md`。
 
+## 本次冷缓存十路并发卡死核对与并发护栏（2026-09-03）
+
+- 上游锁定 commit 仍为 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`。已读取上游 `vendor/turb_gpt_free_register/core/roxybrowser_client.py`（`open_profile` 使用 `args` 列表）与 `core/browser_traffic.py`（`Network.enable({})`）；上游没有本地主机注册并发上限，本次新增的是本地资源护栏，不改变注册协议。
+- 失败批次证据：20:21:12–20:21:13 同时启动 `reg-worker-1_0`…`reg-worker-1_9` 共 10 个任务；清理后的共享缓存随后在 20:21:27–20:22:04 冷启动重建 38 个条目。20:24:27 触发 Kernel-Power Event 41，20:24:33 记录 EventLog 6008，20:32:27 WebUI 才在重启后恢复。
+- 本地修复：`config/roxybrowser.py` 新增 `ROXY_MAX_CONCURRENT_REGISTRATIONS=2` 并接入 `.env.example` 与配置编辑器；`webui/app.py::api_jobs_create` 在 Roxy 驱动下裁剪超过上限的 workers，`webui/templates/index.html` 默认并发改为 2 并显示服务端实际值。
+- 该修复不改 Roxy Profile、代理出口、Cookie、access token、密码或 2FA；高/中/低原因、事件证据、路径和验证见 `docs/2026-09-03_Roxy冷缓存并发卡死核对-report.md`。
+
 ## 本次 Profile 目录与共享 JS/CSS 缓存分离清理（2026-09-03）
 
 - 复核官方 `/browser/list_v3` 后确认当前返回 0 个 Profile，而本地 `browser-cache` 仍有 12 个 32 位 Profile 目录；它们合计约 1.00 GiB，属于已从 Roxy 列表移除的孤儿运行数据。

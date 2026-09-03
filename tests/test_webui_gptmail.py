@@ -50,15 +50,16 @@ class GPTMailWebUiTests(unittest.TestCase):
 
     @patch("webui.app.db.outlook_pool_summary")
     @patch("webui.app.svc.submit_registration", return_value=[{"id": 1}])
-    def test_jobs_use_registration_page_worker_count_for_roxy(self, submit_registration, outlook_pool_summary):
+    def test_jobs_clamp_registration_page_worker_count_for_roxy(self, submit_registration, outlook_pool_summary):
         with patch.object(email_config, "USE_EMAIL_SERVICE", True), patch.object(
             email_config, "EMAIL_SOURCE", "gptmail"
         ), patch.object(email_config, "GPTMAIL_API_KEY", "key-123"):
             response = self.client.post("/api/jobs", json={"count": 1, "workers": 50})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["workers"], 50)
-        submit_registration.assert_called_once_with(count=1, workers=50)
+        self.assertEqual(response.get_json()["workers"], 2)
+        self.assertIn("冷启动并发", response.get_json()["warning"])
+        submit_registration.assert_called_once_with(count=1, workers=2)
 
     @patch("webui.app.db.generic_api_email_pool_summary", return_value={"total": 2, "available": 2, "used": 0, "failed": 0})
     @patch("webui.app.svc.submit_registration", return_value=[{"id": 1}])

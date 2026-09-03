@@ -4136,6 +4136,12 @@ def create_app(auth_code: str | None = None) -> Flask:
         from config import roxybrowser as _roxy_cfg
         gc_mode = bool(getattr(_roxy_cfg, "GC_REGISTRATION_MODE", False))
         driver_mode = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "") or "").strip().lower()
+        worker_warning = ""
+        if driver_mode in {"roxy", "roxybrowser", "fingerprint", "browser"}:
+            roxy_cap = max(1, int(getattr(_roxy_cfg, "ROXY_MAX_CONCURRENT_REGISTRATIONS", 2) or 2))
+            if workers > roxy_cap:
+                worker_warning = f"Roxy 冷启动并发已从 {workers} 降为 {roxy_cap}，避免同时启动过多 Chromium Profile"
+                workers = roxy_cap
         if gc_mode and driver_mode not in {"roxy", "roxybrowser", "fingerprint", "browser"}:
             return jsonify({
                 "ok": False,
@@ -4187,6 +4193,8 @@ def create_app(auth_code: str | None = None) -> Flask:
                 if (item["source"], item["email"].lower()) not in submitted_keys
             ]
             warning = f"{len(skipped)} 个邮箱未提交，仍保留选中状态" if skipped else ""
+            if worker_warning:
+                warning = "；".join(filter(None, [worker_warning, warning]))
             return jsonify({
                 "ok": True,
                 "submitted": len(jobs),
@@ -4217,7 +4225,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "ok": True,
                 "submitted": len(jobs),
                 "jobs": jobs,
-                "warning": f"手动 OTP 模式：将使用 {reg_email}；验证码请在任务页提交",
+                "warning": "；".join(filter(None, [worker_warning, f"手动 OTP 模式：将使用 {reg_email}；验证码请在任务页提交"])),
                 "workers": workers,
                 "gc_mode": gc_mode,
             })
@@ -4324,6 +4332,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         if requested_proxy_mode:
             submit_kwargs["proxy_mode"] = requested_proxy_mode
         jobs = svc.submit_registration(**submit_kwargs)
+        if worker_warning:
+            warning = "；".join(filter(None, [worker_warning, warning]))
         return jsonify({"ok": True, "submitted": len(jobs), "jobs": jobs, "warning": warning, "workers": workers, "gc_mode": gc_mode})
 
     @app.get("/api/manual-otp/waiting")

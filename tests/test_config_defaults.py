@@ -60,6 +60,12 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ROXY_DEFAULT_OS")
         self.assertEqual(field["options"], ["Windows", "macOS"])
 
+    def test_roxy_registration_concurrency_guard_is_editable(self):
+        field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ROXY_MAX_CONCURRENT_REGISTRATIONS")
+        self.assertEqual(field["type"], "int")
+        from config import roxybrowser
+        self.assertEqual(roxybrowser.ROXY_MAX_CONCURRENT_REGISTRATIONS, 2)
+
     def test_unused_post_registration_chat_settings_are_not_exposed(self):
         keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
         self.assertTrue({

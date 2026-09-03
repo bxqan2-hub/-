@@ -257,6 +257,10 @@ EDITABLE_FIELDS = [
         "label": "保留浏览器", "help": "调试时可开启，任务结束后不自动关闭 Roxy 环境",
     },
     {
+        "key": "ROXY_MAX_CONCURRENT_REGISTRATIONS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Roxy 最大并发", "help": "同时运行的 Roxy 注册 Profile 上限；默认 2，防止冷缓存启动时耗尽渲染器和桌面合成资源",
+    },
+    {
         "key": "ROXY_LOW_TRAFFIC", "file": "roxybrowser.py", "type": "bool", "group": "Roxy流量优化",
         "label": "省流模式", "help": "拦截明确非必要的遥测、重资源和可选登录入口；安全验证与未知请求默认放行",
     },

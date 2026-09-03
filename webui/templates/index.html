@@ -2534,7 +2534,7 @@
         </label>
         <label class="jobs-tb-field">并发线程数
           <span class="el-input-number">
-            <input id="regWorkersV2" type="number" min="1" value="10" inputmode="numeric">
+            <input id="regWorkersV2" type="number" min="1" value="2" inputmode="numeric">
             <button type="button" class="el-input-number__increase" data-step-for="regWorkersV2" data-step="1" aria-label="增加">
               <svg viewBox="0 0 24 24"><polyline points="6 14 12 8 18 14"/></svg>
             </button>
@@ -3802,7 +3802,7 @@ async function loadSummary() {
 // ---------- 注册 / 任务 ----------
 async function startRegistrationFromInputs(countEl, workersEl, startBtn, sourceEl, proxyMode = '') {
   const count = parseInt((countEl?.value || '1'), 10);
-  const workers = parseInt((workersEl?.value || '10'), 10);
+  const workers = parseInt((workersEl?.value || '2'), 10);
   const email_source = (sourceEl?.value || '').trim();
   const activeCount = Number(JOB_STATUS_COUNTS.active || 0);
   if (activeCount > 0) {
@@ -3827,7 +3827,7 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn, sourceE
     const warnHtml = r.warning ? `<div class="banner warn">${esc(r.warning)}（本次并发 ${r.workers || workers}）${modeText}</div>` : `<div class="banner info">已提交 ${r.submitted} 个任务，本次并发 ${r.workers || workers}${modeText}</div>`;
     const warnEl = $('#regWarnV2'); if (warnEl) warnEl.innerHTML = warnHtml;
     const c2 = $('#regCountV2'); if (c2) c2.value = count;
-    const w2 = $('#regWorkersV2'); if (w2) w2.value = workers;
+    const w2 = $('#regWorkersV2'); if (w2) w2.value = r.workers || workers;
     refreshJobs();
   } catch(e) {
     const warnEl = $('#regWarnV2'); if (warnEl) warnEl.innerHTML = `<div class="banner warn">${esc(e.message)}</div>`;
@@ -3837,7 +3837,7 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn, sourceE
 async function pushSelectedOutlookToRegistration() {
   const email_items = selectedOutlookItems();
   if (!email_items.length) { showToast('请先选择邮箱'); return; }
-  const workers = parseInt(($('#regWorkersV2')?.value || '10'), 10);
+  const workers = parseInt(($('#regWorkersV2')?.value || '2'), 10);
   const activeCount = Number(JOB_STATUS_COUNTS.active || 0);
   if (activeCount > 0 && !confirm(`当前已有 ${activeCount} 个任务在跑或排队，仍要推送选中的 ${email_items.length} 个邮箱吗？`)) return;
   const btn = $('#btnPushSelectedOutlookToRegistration');

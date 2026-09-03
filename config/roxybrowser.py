@@ -65,6 +65,10 @@ ROXY_API_TIMEOUT: int = 15
 # ROXY_API_TIMEOUT，避免它们失败时长时间占用队列。
 ROXY_CREATE_API_TIMEOUT: int = 45
 ROXY_KEEP_BROWSER_OPEN: bool = False
+# Running too many visible Roxy/Chromium profiles at once can exhaust the
+# desktop compositor and renderer budget, especially after a cold cache start.
+# Keep the default conservative; the registration API clamps larger requests.
+ROXY_MAX_CONCURRENT_REGISTRATIONS: int = 2
 
 # 注册快速等待预算。这些值只限制单个阶段，成功信号仍会立即结束等待。
 # 旧逻辑把邮箱提交、OTP、session 请求共用 90s Selenium 超时，
@@ -177,6 +181,7 @@ apply_env_overrides(globals(), {
     'ROXY_PROFILE_ID': 'str', 'ROXY_WORKSPACE_ID': 'str', 'ROXY_PROJECT_ID': 'str',
     'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool',
     'ROXY_CLOSE_PATH': 'str', 'ROXY_KEEP_BROWSER_OPEN': 'bool',
+    'ROXY_MAX_CONCURRENT_REGISTRATIONS': 'int',
     'ROXY_SELENIUM_TIMEOUT': 'int', 'ROXY_API_TIMEOUT': 'int',
     'ROXY_CREATE_API_TIMEOUT': 'int',
     'ROXY_EMAIL_SUBMIT_TIMEOUT': 'int',
