@@ -1450,6 +1450,75 @@ def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -
     assert mail_kwargs["exclude_message_ids"] == {"mail-old"}
 
 
+def test_password_setup_retries_transient_email_code_submit(monkeypatch) -> None:
+    """邮箱重认证验证码提交遇到一次 DOM 瞬态失败时重定位同一表单。"""
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
+    monkeypatch.setattr(account_export, "_snapshot_otp_message_ids", lambda *args, **kwargs: set())
+    import core.email_provider
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
+    monkeypatch.setattr(account_export.time, "sleep", lambda *args, **kwargs: None)
+
+    class Driver:
+        def __init__(self):
+            self.stage = "email"
+            self.url = "https://chatgpt.com/"
+
+        def execute_async_script(self, _script):
+            return {"ok": True, "stage": "signin", "status": 200, "url": "https://auth.openai.com/reauth"}
+
+        def execute_script(self, script, *_args):
+            if "document.body" in script:
+                return {
+                    "email": "Enter the verification code sent to your email",
+                    "password": "Set a password",
+                    "done": "Password updated",
+                }.get(self.stage, "")
+            return False
+
+        def get(self, url):
+            self.url = str(url)
+
+    driver = Driver()
+    visible_calls = []
+
+    def visible_inputs(_driver, selector):
+        visible_calls.append(selector)
+        if "password" in selector:
+            return [object()] if driver.stage == "password" else []
+        return [object()] if driver.stage == "email" else []
+
+    monkeypatch.setattr(account_export, "_password_visible_inputs", visible_inputs)
+    submit_calls = []
+
+    def submit_code(_driver, code):
+        submit_calls.append(code)
+        if len(submit_calls) == 2:
+            driver.stage = "password"
+            return True
+        return False
+
+    monkeypatch.setattr(account_export, "_password_submit_code", submit_code)
+
+    def submit_password(_driver, _fields, _password):
+        driver.stage = "done"
+        return True
+
+    monkeypatch.setattr(account_export, "_password_submit_new_password", submit_password)
+
+    result = account_export._setup_password_with_driver(
+        driver=driver,
+        session=object(),
+        email="user@example.com",
+        password="Ab3!cdefgh123",
+        timeout_seconds=30,
+    )
+
+    assert result["ok"] is True, result
+    assert result["email_reauth_used"] is True
+    assert submit_calls == ["123456", "123456"]
+    assert visible_calls
+
+
 def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypatch) -> None:
     """初始 create-account/password 成功后，TOTP 阶段不能再次改密。"""
     from config import email as email_cfg

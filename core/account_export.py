@@ -1485,7 +1485,29 @@ def _setup_password_with_driver(
                         "code": "password_email_code_wait_failed", "message": f"{type(exc).__name__}: {str(exc)[:160]}",
                         "http_status": None,
                     }
-                if not _password_submit_code(driver, code):
+                code_submitted = False
+                for code_submit_attempt in (1, 2):
+                    if code_submit_attempt == 2:
+                        # The auth form can re-render between OTP discovery and
+                        # the first key/click sequence. Re-query once before
+                        # declaring a password re-auth failure; do not fetch a
+                        # second code or advance the workflow blindly.
+                        time.sleep(0.75)
+                        logger.info("%s[2FA][密码] 邮箱验证码提交瞬态失败，重新定位表单重试一次", prefix)
+                    if _password_submit_code(driver, code):
+                        code_submitted = True
+                        break
+                if not code_submitted:
+                    try:
+                        visible_code_inputs = len(_password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR))
+                    except Exception:
+                        visible_code_inputs = 0
+                    logger.warning(
+                        "%s[2FA][密码] 邮箱验证码提交失败：url=%s visible_code_inputs=%s",
+                        prefix,
+                        _password_page_url(driver)[:180],
+                        visible_code_inputs,
+                    )
                     return {
                         "ok": False, "status": "failed", "stage": "password_email",
                         "code": "password_email_reauth_submit_failed", "message": "邮箱重认证验证码提交失败",

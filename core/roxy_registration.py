@@ -317,6 +317,7 @@ def _safe_get(driver, url: str, *, timeout: int = 45, attempts: int = 2, accept_
 
     last_exc: Exception | None = None
     old_timeout = int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)
+    old_script_timeout = old_timeout
     hosts = tuple(h.lower() for h in (accept_hosts or ()))
     for attempt in range(1, max(1, attempts) + 1):
         try:
@@ -372,6 +373,10 @@ def _safe_get(driver, url: str, *, timeout: int = 45, attempts: int = 2, accept_
         finally:
             try:
                 driver.set_page_load_timeout(old_timeout)
+            except Exception:
+                pass
+            try:
+                driver.set_script_timeout(old_script_timeout)
             except Exception:
                 pass
     raise last_exc or RuntimeError(f"页面跳转失败: {url}")

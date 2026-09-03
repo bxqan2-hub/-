@@ -185,6 +185,14 @@
 - 响应写入/读回要求 `Cache-Control: public`、status=200、无私有/画像变体指令；认证、挑战、Sentinel、API、Authorization 和 Proxy-Authorization 继续实时联网。
 - `cache_candidates` 与 `cache_writes` 已从 `core/browser_traffic.py` 传入注册摘要、Roxy 日志和账号列表，后续日志可直接区分候选为 0 与真实 0 命中；前一轮缓存定向为 68 项、全量为 716 项，本轮 IP/指纹隔离回归结果见上方。
 
+## 本次最新注册失败、Roxy 启动并发与 2FA 复核（2026-09-03）
+
+- 复核 `注册日志/` 22:20–22:39：58 个任务中 40 成功、14 失败、4 手动停止；43 个任务进入 2FA，40 个完成 enroll/activate。3 条 2FA 失败日志中 Job 74 与 Job 81 是同一邮箱/账号记录，因此为 2 个独立账号。
+- 高概率 2FA 原因：Job 61 的 Selenium `script timeout` 来自 `_safe_get` 临时 8 秒脚本预算未恢复；已在 `core/roxy_registration.py::_safe_get` 的 `finally` 恢复 script timeout，并新增回归测试。Job 74/81 的 `password_email_reauth_submit_failed` 属于 OTP 提交 DOM 瞬态；`core/account_export.py::_setup_password_with_driver` 现在对同一验证码重新定位并重试一次，仍失败时记录脱敏状态。
+- Roxy 打开速度确有下降：同窗口批次 `create` 中位数 8.5 秒/P90 23 秒，`open` 中位数 23 秒/P90 47 秒/最大 71 秒。原因是 10 路可视 Profile 与 `_ROXY_LIFECYCLE_LOCK` 串行化叠加，而非 workers 被代码调小；锁暂不删除，下一轮按固定并发采集后再评估分离锁或有限 semaphore。
+- 上游仍锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；本地保持上游同窗 Cookie/代理、显式或同源 Session Token、enroll → activate、`success=true` 后才 checkpoint 的边界。完整 Finding→Path→修复→验证见 `docs/2026-09-03_最新注册失败与2FA并发复核-report.md`。
+- 验证：定向 `126 passed`，全量 `743 passed, 16 subtests passed`，`compileall` 输出 `COMPILEALL_OK`；新进程下一批需复核 Job 61 的 timeout 消失和密码重认证重试成功率。
+
 ## 本次 Roxy 指纹生成字段显式映射（2026-09-03）
 
 - 上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `core/roxybrowser_client.py::create_profile` 会在 `/browser/create` payload 中显式发送 `randomFingerprint`，默认值为真；该字段由 Roxy 负责生成整套 Profile 指纹，不应由本地 Selenium 再改写 `navigator`。
