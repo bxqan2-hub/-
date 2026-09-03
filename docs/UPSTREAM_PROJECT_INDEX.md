@@ -176,7 +176,7 @@
 - 预检返回非法 IP 时单独轮换候选并保留“快速检测失败”原因，避免把输入格式问题误报为并发占用。
 - 账号 `extra_json.roxybrowser.isolation` 记录无凭据摘要（Profile、core、OS、出口 IP、验证来源）；本轮不新增代理凭据字段，也不记录 Cookie、Authorization、Token 或 TOTP Secret。
 - 同一 Python 进程线程池内已保证并发 IP 不重复；不同进程（CLI/多个 WebUI）尚未共享 reservation，需串行运行。详细高/中/低原因、证据和测试见 `docs/2026-09-03_注册缓存与Roxy独立画像审计-report.md`。
-- 验证：基线定向 `146 passed`、修改后定向 `158 passed`；基线全量 `716 passed, 16 subtests passed`、修改后全量 `728 passed, 16 subtests passed`。
+- 验证：基线定向 `146 passed`、修改后定向 `159 passed`；基线全量 `716 passed, 16 subtests passed`、修改后全量 `729 passed, 16 subtests passed`。
 
 ## 本次 5MB / 0 命中回归复核（2026-09-03）
 
