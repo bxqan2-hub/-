@@ -24,6 +24,21 @@ logger = logging.getLogger(__name__)
 _ROXY_LIFECYCLE_LOCK = threading.RLock()
 _ROXY_CREATE_LOCK = _ROXY_LIFECYCLE_LOCK
 
+# Keep every Profile process alive for the registration worker, but stop
+# Chromium's optional background services from competing with the foreground
+# page.  These switches do not change the Profile's UA/OS/fingerprint and do
+# not alter the worker count; they only remove update/sync/telemetry work that
+# is unused during a disposable registration run.
+_ROXY_PROFILE_EFFICIENCY_ARGS = (
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-domain-reliability",
+    "--disable-sync",
+    "--disable-breakpad",
+    "--metrics-recording-only",
+    "--mute-audio",
+)
+
 
 @dataclass
 class RoxyOpenResult:
@@ -737,7 +752,24 @@ class RoxyBrowserClient:
         # Roxy 官方 /browser/open body: {workspaceId, dirId, args, forceOpen, headless}
         params.setdefault("workspaceId", _workspace_id_value())
         params.setdefault("dirId", int(pid) if str(pid).isdigit() else pid)
-        params.setdefault("args", [])
+        configured_args = params.get("args")
+        if configured_args is None:
+            configured_args = []
+        elif not isinstance(configured_args, (list, tuple)):
+            logger.warning("[Roxy] open args 不是列表，已忽略无效值并使用性能参数")
+            configured_args = []
+        # Preserve caller-supplied arguments while de-duplicating the small
+        # performance set.  Roxy documents ``args`` as the browser startup
+        # parameter list; keeping the merge here means every concurrent
+        # Profile receives the same optimization without a second launch path.
+        merged_args: list[str] = []
+        seen_args: set[str] = set()
+        for value in (*configured_args, *_ROXY_PROFILE_EFFICIENCY_ARGS):
+            arg = str(value or "").strip()
+            if arg and arg not in seen_args:
+                merged_args.append(arg)
+                seen_args.add(arg)
+        params["args"] = merged_args
         params.setdefault("forceOpen", True)
         # ROXY_OPEN_HEADLESS 是显式开关，优先级应高于 ROXY_OPEN_EXTRA_PARAMS，
         # 否则 extra 里残留 headless=False 会导致 WebUI 保存无头后仍弹窗口。

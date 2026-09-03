@@ -99,6 +99,19 @@ PUBLIC_STATIC_PATH_PREFIXES = (
     "/unauth-mweb/assets/",
 )
 
+# Chromium keeps Network-domain event data until the DevTools client drains
+# it.  A registration Profile only needs small request metadata and the
+# Fetch-domain response body; an unbounded Network buffer therefore grows in
+# every concurrent Roxy process without improving the registration flow.
+# These limits are per Profile and do not change the number of workers or
+# renderer processes.  Older Roxy/CDP builds may reject optional limits, so
+# the caller falls back to the normal Network.enable payload.
+_NETWORK_ENABLE_LIMITS = {
+    "maxTotalBufferSize": 2 * 1024 * 1024,
+    "maxResourceBufferSize": 512 * 1024,
+    "maxPostDataSize": 4 * 1024,
+}
+
 
 def _host_matches(host: str, suffixes: tuple[str, ...]) -> bool:
     host = str(host or "").lower().rstrip(".")
@@ -452,11 +465,25 @@ class RoxyTrafficOptimizer:
         self._install_errors: list[str] = []
         self._degraded_reason = ""
 
+    def _enable_network_domain(self) -> None:
+        """Enable CDP Network with a bounded per-Profile event buffer."""
+        try:
+            self.driver.execute_cdp_cmd("Network.enable", dict(_NETWORK_ENABLE_LIMITS))
+            return
+        except Exception as exc:
+            # Keep compatibility with older Roxy runtimes that implement
+            # Network.enable but do not expose the optional buffer fields.
+            logger.info(
+                "[Roxy流量] Network 缓冲上限不被当前 CDP 接受，回退默认配置：%s",
+                type(exc).__name__,
+            )
+        self.driver.execute_cdp_cmd("Network.enable", {})
+
     def install(self) -> None:
         if not (self.low_traffic or self.static_cache_enabled or self.capture):
             return
         try:
-            self.driver.execute_cdp_cmd("Network.enable", {})
+            self._enable_network_domain()
             self.driver.execute_cdp_cmd("Network.setCacheDisabled", {"cacheDisabled": False})
             self.driver.execute_cdp_cmd("Network.setBypassServiceWorker", {"bypass": False})
             if self.capture:

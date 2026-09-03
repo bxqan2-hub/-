@@ -192,3 +192,13 @@
 - 本次直接在现有 `create_profile` 路径强制写入 `randomFingerprint=True`，覆盖旧模板或调用方误传的 false；未新增开关、未伪造 `fingerInfo`、`coreVersion`、语言或时区值。`coreVersion` 继续由已安装 Roxy runtime 返回并记录为观察值。
 - `ROXY_ONE_PROFILE_PER_ACCOUNT=True`、注册前代理出口预检和代理 reservation 共同决定账号级环境/出口隔离；随机抽取本身不代表 IP 唯一，IP 冲突由代理层单独处理。
 - 验证覆盖：`tests/test_roxy_proxy_enforcement.py::test_profile_create_always_requests_fresh_random_fingerprint`，并检查模板与调用 payload 传 false 时最终请求仍为 true；未记录 Cookie、Token、邮箱或 MFA Secret。
+
+## 本次 Roxy 并发进程页面负载优化（2026-09-03）
+
+- 上游锁定 commit 仍为 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；上游 `core/roxy_registration.py` 通过 `/browser/open` 的 `args` 传递启动参数，`core/browser_traffic.py` 以默认参数调用 `Network.enable`。
+- 现象核对：当前批次高峰同时运行 10 个 Profile 时曾出现约 90 个 `RoxyChrome` 子进程、约 7.9 GB 工作集；批次收敛后 `RoxyChrome=0`、Roxy 工作集约 0.99 GB，说明页面卡顿主要由活动 Profile 的进程/缓冲负载触发，不是历史账号条目数直接造成。
+- 本地 `core/roxybrowser_client.py::RoxyBrowserClient.open_profile` 保留调用方 args 并去重追加后台服务优化参数；不改变 worker/Profile 并发数、UA、OS、`randomFingerprint`、代理或 Cookie。
+- 本地 `core/browser_traffic.py::RoxyTrafficOptimizer._enable_network_domain` 为每个 Profile 设置 2 MiB 总 Network 缓冲、512 KiB 单资源缓冲和 4 KiB POST 元数据上限；旧版 CDP 拒绝可选字段时回退默认 `Network.enable`。
+- Roxy 官方 API 文档确认 `/browser/open` 支持 `args` 列表，并列明 `--no-first-run`、`--no-default-browser-check` 等内置参数不可修改；本次未重复注入这些字段。
+- 详细 Finding、路径、边界和验证记录见 `docs/2026-09-03_Roxy并发进程页面负载优化-report.md`。
+- 验证覆盖：有界 Network 缓冲、旧版 CDP 回退、并发 Profile 启动参数合并与去重；下一批需保持原并发数量采集前后 Roxy 工作集、子进程数和页面等待时间。

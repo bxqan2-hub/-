@@ -17,6 +17,67 @@ from core.browser_traffic import (
 
 
 class BrowserTrafficClassifierTests(unittest.TestCase):
+    def test_network_enable_uses_bounded_per_profile_buffers(self):
+        driver = MagicMock()
+        optimizer = RoxyTrafficOptimizer(
+            driver,
+            low_traffic=True,
+            static_cache=False,
+            capture=False,
+            cache_dir=Path("unused-test-cache"),
+            cache_max_age=60,
+            cache_max_item_bytes=1024,
+            cache_refresh_rate=0,
+            cache_refresh_budget_bytes=0,
+            cache_refresh_max_item_bytes=0,
+            budget_bytes=1024,
+        )
+
+        optimizer.install()
+
+        enable_calls = [
+            item for item in driver.execute_cdp_cmd.call_args_list
+            if item.args and item.args[0] == "Network.enable"
+        ]
+        self.assertEqual(len(enable_calls), 1)
+        self.assertEqual(enable_calls[0].args[1], {
+            "maxTotalBufferSize": 2 * 1024 * 1024,
+            "maxResourceBufferSize": 512 * 1024,
+            "maxPostDataSize": 4 * 1024,
+        })
+
+    def test_network_enable_falls_back_for_legacy_cdp(self):
+        driver = MagicMock()
+        driver.execute_cdp_cmd.side_effect = [RuntimeError("unknown parameter"), None, None, None, None]
+        optimizer = RoxyTrafficOptimizer(
+            driver,
+            low_traffic=True,
+            static_cache=False,
+            capture=False,
+            cache_dir=Path("unused-test-cache"),
+            cache_max_age=60,
+            cache_max_item_bytes=1024,
+            cache_refresh_rate=0,
+            cache_refresh_budget_bytes=0,
+            cache_refresh_max_item_bytes=0,
+            budget_bytes=1024,
+        )
+
+        optimizer.install()
+
+        enable_calls = [
+            item for item in driver.execute_cdp_cmd.call_args_list
+            if item.args and item.args[0] == "Network.enable"
+        ]
+        self.assertEqual([item.args[1] for item in enable_calls], [
+            {
+                "maxTotalBufferSize": 2 * 1024 * 1024,
+                "maxResourceBufferSize": 512 * 1024,
+                "maxPostDataSize": 4 * 1024,
+            },
+            {},
+        ])
+
     def test_recovery_disables_fetch_and_clears_blocked_urls(self):
         driver = MagicMock()
         optimizer = RoxyTrafficOptimizer(

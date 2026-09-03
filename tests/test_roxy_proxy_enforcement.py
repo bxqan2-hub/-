@@ -76,6 +76,32 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertEqual(opened.preflight_exit_geo, {})
         probe_proxy_exit_geo.assert_not_called()
 
+    def test_open_merges_profile_efficiency_args_without_reducing_concurrency(self):
+        client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+        with patch.object(client, "create_profile", return_value="created-profile"), \
+             patch.object(
+                 client,
+                 "request",
+                 return_value={"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}},
+             ) as request:
+            with patch(
+                "core.roxybrowser_client._cfg.ROXY_OPEN_EXTRA_PARAMS",
+                {"args": ["--custom-flag", "--disable-sync", "--custom-flag"]},
+            ):
+                client.open_profile(require_proxy_exit_ip=False)
+
+        body = request.call_args.kwargs["json_body"]
+        args = body["args"]
+        self.assertEqual(args[0], "--custom-flag")
+        self.assertEqual(args.count("--custom-flag"), 1)
+        self.assertEqual(args.count("--disable-sync"), 1)
+        self.assertIn("--disable-background-networking", args)
+        self.assertIn("--disable-component-update", args)
+        self.assertIn("--disable-domain-reliability", args)
+        self.assertIn("--disable-breakpad", args)
+        self.assertIn("--metrics-recording-only", args)
+        self.assertIn("--mute-audio", args)
+
     def test_failed_proxy_exit_ip_probe_never_creates_or_opens_profile(self):
         client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
         with patch.object(client, "create_profile") as create_profile, \
