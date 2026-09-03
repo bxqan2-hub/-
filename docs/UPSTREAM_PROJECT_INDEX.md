@@ -226,3 +226,30 @@
 - 新增旁边的“清理共享 JS/CSS”按钮和 `POST /api/roxy/cache/clear-shared`，只处理 `data/browser_static_cache`；它与 Profile 清理的确认、活动进程检查和结果提示分开。
 - 共享缓存默认保留以降低注册冷启动流量；显式清理后，下一批注册会重新构建公开资源缓存。
 - 详细 Finding、容量、路径和验证见 `docs/2026-09-03_Roxy浏览器缓存清理与容量审计-report.md`。
+
+## 本次最新注册日志 2FA 失败核对与 Token 刷新修复（2026-09-03）
+
+### 日志证据（21:52–21:57）
+
+- 本批 7 个 Job 中，Job 21、24 的 MFA enroll/activate 与 Token 校验均完成；Job 29 的 enroll/activate 已完成，但后续只读 Token 校验连续 3 次未通过，日志明确写成 `totp_token_validation_failed`，账号仍保存 Secret。该只读失败不能倒推为 2FA 未激活。
+- Job 25、28 在 `stage=password_email`、`code=password_email_reauth_submit_failed` 停止，均未进入 MFA enroll；这是邮箱重认证验证码提交/页面推进失败，不是缓存命中失败。
+- Job 27 在补设密码成功后进入 `stage=totp_enroll`，HTTP 401 返回 `token_revoked`。补设密码前后，注册 Token 可能被服务端吊销；旧调用链仍把注册阶段旧 Token 传给 MFA enroll，正好解释该条 401。
+- Job 26 在邮箱 OTP 取码端超时并未到达 2FA；其响应为 HTML 邮件内容未提取到 6 位码，属于邮箱取码失败。
+
+### 流量缓存核对
+
+- `data/browser_static_cache` 在本批开始后从冷目录重建为 666 个文件，文件写入集中于 21:52:20–21:56:19；日志同时出现 `cache_hits/cache_misses` 和大量回源，说明删除缓存只改变了公共 JS/CSS 的冷启动负载。
+- 认证、Session、Sentinel、MFA API 不进入共享缓存：`core/browser_traffic.py::is_cacheable_request` 只接受 GET 的一方公共 script/stylesheet，`set_session_only` 后 ChatGPT 文档与 Session-required 路径继续实时联网。因此没有“缓存回放旧 MFA 响应”的证据。
+- 对照结果：Job 28 在正常命中（36 hits/4 misses）下仍发生 `password_email_reauth_submit_failed`，Job 29 在同样 36 hits/4 misses 下完成 MFA；这直接把缓存命中与 MFA 成败拆开。冷缓存可能放大 10 路可视 Profile 的页面/网络负载，但不是这些 2FA 业务错误的直接请求路径。
+
+### Finding → Path → 修复
+
+- **高概率（已修复）**：密码重认证成功后旧 registration access token 被吊销，MFA enroll 使用旧 Token。路径：`core/account_export.py::_setup_2fa_result` → `_setup_password_with_driver` → `_setup_totp_with_driver`。修复后在浏览器补设密码并同步 Cookie 后清空旧 Token，让同一浏览器上下文的 MFA helper 重新读取当前 `/api/auth/session` Token；未补设密码的原路径仍显式透传注册 Token。
+- **中概率（待继续观察）**：`password_email_reauth_submit_failed` 表示验证码已取到但页面提交没有推进，现有日志没有 DOM/响应体证据，不能归因于缓存；保留为独立 `password_email` 阶段，不与 MFA enroll 混报。
+- **低概率**：Job 29 的只读 Token 校验瞬态失败；激活已确认且 Secret 已 checkpoint，按现有规则保留 Secret，后续可单独重试只读校验。
+
+### 本轮验证
+
+- 定向：`.\\venv\\Scripts\\python.exe -m pytest -q tests\\test_twofa_registration.py tests\\test_roxy_registration_session_recovery.py tests\\test_roxy_registration_otp_recovery.py` → `124 passed`，退出 0。
+- 全量：`.\\venv\\Scripts\\python.exe -m pytest -q` → `742 passed, 16 subtests passed`，退出 0。
+- 编译：`.\\venv\\Scripts\\python.exe -m compileall -q config core webui tests` → `COMPILEALL_OK`，退出 0。

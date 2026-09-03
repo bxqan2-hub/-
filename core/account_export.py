@@ -1807,6 +1807,7 @@ def _setup_2fa_result(
     # TOTP activate 之后，导致 MFA 重认证先失败时密码永远没有执行。
     password_setup: dict | None = None
     configured_password = str(existing_password or "").strip() or None
+    password_reauth_refreshed = False
     try:
         from core.registration_password import registration_password_required
         require_password = registration_password_required()
@@ -1884,6 +1885,10 @@ def _setup_2fa_result(
         # 浏览器重认证可能刷新 session-token/Cloudflare Cookie；MFA 协议阶段
         # 必须重新同步，而不是继续使用补设密码之前的旧 Cookie 快照。
         import_browser_cookies(session, driver, require_auth=True)
+        # post_login_add_password may revoke the registration access token.  Do
+        # not send that stale token to MFA enroll; an empty value makes the
+        # browser helper read the current same-origin session token explicitly.
+        password_reauth_refreshed = True
 
     # 参考项目当前 Roxy 实现已不再为 TOTP 重走 NextAuth CSRF/邮箱 OTP：
     # 直接在已登录浏览器网络栈中调用 enroll/activate，可复用真实浏览器指纹、
@@ -1893,7 +1898,7 @@ def _setup_2fa_result(
             driver,
             email,
             authenticated_email=authenticated_email,
-            access_token=access_token,
+            access_token="" if password_reauth_refreshed else access_token,
         )
         setattr(session, "_twofa_session_expires", browser_expires)
         totp_checkpoint_persisted = _persist_activated_totp_checkpoint(email, secret, new_token)

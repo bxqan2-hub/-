@@ -610,6 +610,57 @@ def test_setup_2fa_prefers_live_browser_mfa_and_skips_csrf_reauth(monkeypatch) -
     assert "fetch('/api/auth/session'" in calls[0][0]
 
 
+def test_setup_2fa_refreshes_token_after_browser_password_reauth(monkeypatch) -> None:
+    """补设密码可能吊销注册 Token，MFA enroll 必须读取同窗新会话。"""
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda *args, **kwargs: None)
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", lambda **kwargs: {
+        "ok": True,
+        "status": "success",
+        "stage": "password_done",
+        "code": "password_setup_success",
+        "message": "密码已补设",
+    })
+    monkeypatch.setattr(account_export, "import_browser_cookies", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: 200)
+    calls = []
+
+    class Driver:
+        def execute_async_script(self, script, path, payload, access_token):
+            calls.append((path, access_token))
+            if path.endswith("/enroll"):
+                return {
+                    "status": 200,
+                    "json": True,
+                    "email": "user@example.com",
+                    "accessToken": "fresh-after-password",
+                    "body": {"secret": "JBSWY3DPEHPK3PXP", "session_id": "sid"},
+                }
+            return {
+                "status": 200,
+                "json": True,
+                "accessToken": "fresh-after-password",
+                "body": {"success": True},
+            }
+
+    result = account_export.setup_2fa_result(
+        SimpleNamespace(),
+        "user@example.com",
+        driver=Driver(),
+        desired_password="Strong-pass-1!",
+        authenticated_email="user@example.com",
+        access_token="stale-registration-token",
+    )
+
+    assert result.access_token == "fresh-after-password"
+    assert calls == [
+        ("/backend-api/accounts/mfa/enroll", ""),
+        ("/backend-api/accounts/mfa/user/activate_enrollment", "fresh-after-password"),
+    ]
+
+
 def test_browser_mfa_http_failure_keeps_stage_and_status(monkeypatch) -> None:
     from config import twofa
 
