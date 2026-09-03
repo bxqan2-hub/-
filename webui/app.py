@@ -4555,6 +4555,20 @@ def create_app(auth_code: str | None = None) -> Flask:
             logger.exception("清理 Roxy 浏览器缓存失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
+    @app.post("/api/roxy/cache/clear-shared")
+    def api_roxy_shared_cache_clear():
+        """Clear the shared public JS/CSS cache through a separate action."""
+        data = request.get_json(silent=True) or {}
+        if data.get("confirm") is not True:
+            return jsonify({"ok": False, "error": "请先确认清理共享公开 JS/CSS 缓存"}), 400
+        try:
+            result = browser_cache_service.clear_shared_static_cache()
+            http_status = int(result.pop("http_status", 200) or 200)
+            return jsonify(result), http_status
+        except Exception as exc:
+            logger.exception("清理共享公开 JS/CSS 缓存失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
     # ----------------------------------------------------------
     # 配置读写
     # ----------------------------------------------------------

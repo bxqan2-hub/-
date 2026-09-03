@@ -211,3 +211,11 @@
 - 新增 WebUI 接口 `GET /api/roxy/cache/status` 与 `POST /api/roxy/cache/clear`；清理接口要求显式 `confirm=true`，并返回删除字节、删除文件、部分占用文件和清理后的容量。
 - 配置页顶部新增“清理缓存”按钮，显示总占用、可回收容量和活动阻断原因；确认框、加载状态、成功提示和禁用状态遵循现有 WebUI 样式。
 - 详细容量、边界和验证见 `docs/2026-09-03_Roxy浏览器缓存清理与容量审计-report.md`。
+
+## 本次 Profile 目录与共享 JS/CSS 缓存分离清理（2026-09-03）
+
+- 复核官方 `/browser/list_v3` 后确认当前返回 0 个 Profile，而本地 `browser-cache` 仍有 12 个 32 位 Profile 目录；它们合计约 1.00 GiB，属于已从 Roxy 列表移除的孤儿运行数据。
+- 现有“清理 Profile 缓存”按钮已扩展为：官方列表核对成功、注册任务和 `RoxyChrome/chromedriver` 均为空时，删除不在官方列表中的孤儿 Profile 目录；已登记 Profile 只清理网页缓存子项。
+- 新增旁边的“清理共享 JS/CSS”按钮和 `POST /api/roxy/cache/clear-shared`，只处理 `data/browser_static_cache`；它与 Profile 清理的确认、活动进程检查和结果提示分开。
+- 共享缓存默认保留以降低注册冷启动流量；显式清理后，下一批注册会重新构建公开资源缓存。
+- 详细 Finding、容量、路径和验证见 `docs/2026-09-03_Roxy浏览器缓存清理与容量审计-report.md`。

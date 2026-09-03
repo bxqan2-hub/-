@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -33,6 +34,7 @@ _PROFILE_CACHE_DIR_NAMES = frozenset({
     "ShaderCache",
 })
 _ACTIVE_JOB_STATES = frozenset({"pending", "running", "stopping"})
+_PROFILE_DIR_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
 _CLEAR_LOCK = threading.Lock()
 
 
@@ -92,7 +94,7 @@ def _measure(root: Path) -> dict[str, int]:
     return {"bytes": total, "files": files}
 
 
-def _profile_cache_dirs(root: Path) -> list[Path]:
+def _profile_cache_dirs(root: Path, profile_ids: set[str] | None = None) -> list[Path]:
     if not root.is_dir() or _is_link(root):
         return []
     found: list[Path] = []
@@ -101,6 +103,8 @@ def _profile_cache_dirs(root: Path) -> list[Path]:
         if child.is_dir() and not _is_link(child)
     ]
     for profile in profiles:
+        if profile_ids is not None and profile.name.lower() not in profile_ids:
+            continue
         for current, dirs, _files in os.walk(profile, topdown=True, followlinks=False):
             current_path = Path(current)
             dirs[:] = [name for name in dirs if not _is_link(current_path / name)]
@@ -110,6 +114,69 @@ def _profile_cache_dirs(root: Path) -> list[Path]:
                 # nested cache directories a second time.
                 dirs[:] = []
     return found
+
+
+def _profile_inventory() -> tuple[set[str], bool, str]:
+    """Read Roxy's official Profile list before deleting a whole directory."""
+    try:
+        from core.roxybrowser_client import RoxyBrowserClient
+        from config import roxybrowser as _cfg
+
+        client = RoxyBrowserClient()
+        page = 1
+        page_size = 100
+        profile_ids: set[str] = set()
+        total = None
+        while page <= 10:
+            response = client.http.get(
+                client.api_base.rstrip("/") + "/browser/list_v3",
+                params={
+                    "workspaceId": getattr(_cfg, "ROXY_WORKSPACE_ID", ""),
+                    "page_index": page,
+                    "page_size": page_size,
+                },
+                timeout=3,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or int(payload.get("code") or 0) != 0:
+                return set(), False, "profile_list_response"
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                return set(), False, "profile_list_data"
+            rows = data.get("rows")
+            if not isinstance(rows, list):
+                return set(), False, "profile_list_rows"
+            if total is None:
+                try:
+                    total = max(0, int(data.get("total") or 0))
+                except (TypeError, ValueError):
+                    total = 0
+            for row in rows:
+                if isinstance(row, dict):
+                    profile_id = str(row.get("dirId") or row.get("dir_id") or row.get("id") or "").strip().lower()
+                    if profile_id:
+                        profile_ids.add(profile_id)
+            if not rows or len(profile_ids) >= total or len(rows) < page_size:
+                break
+            page += 1
+        if total is not None and total > len(profile_ids) and page >= 10:
+            return set(), False, "profile_list_too_large"
+        return profile_ids, True, ""
+    except Exception as exc:
+        return set(), False, type(exc).__name__
+
+
+def _orphan_profile_dirs(root: Path, profile_ids: set[str], inventory_ok: bool) -> list[Path]:
+    if not inventory_ok or not root.is_dir() or _is_link(root):
+        return []
+    return [
+        child for child in root.iterdir()
+        if child.is_dir()
+        and not _is_link(child)
+        and _PROFILE_DIR_PATTERN.fullmatch(child.name)
+        and child.name.lower() not in profile_ids
+    ]
 
 
 def _dedupe_roots(roots: list[Path]) -> list[Path]:
@@ -196,18 +263,21 @@ def _active_job_count() -> int:
 def _build_snapshot() -> dict:
     roxy_root = _roxy_root()
     profile_root = roxy_root / "browser-cache"
-    profile_cache_roots = _profile_cache_dirs(profile_root)
+    profile_ids, inventory_ok, inventory_error = _profile_inventory()
+    profile_cache_roots = _profile_cache_dirs(profile_root, profile_ids if inventory_ok else set())
+    orphan_profile_roots = _orphan_profile_dirs(profile_root, profile_ids, inventory_ok)
     app_cache_root = roxy_root / "Cache"
     static_root = _project_static_cache_root()
 
     profile_store = _measure(profile_root)
     scopes = {
         "profile_web_cache": _scope("Roxy Profile 网页缓存", profile_cache_roots, clearable=True),
+        "orphan_profile_store": _scope("Roxy 孤儿 Profile 目录", orphan_profile_roots, clearable=inventory_ok),
         "roxy_app_cache": _scope("Roxy 管理器缓存", [app_cache_root], clearable=True),
         "shared_static_cache": _scope(
             "注册公开 JS/CSS 缓存",
             [static_root],
-            clearable=False,
+            clearable=True,
             reason="保留以避免下一批注册重新冷启动下载",
         ),
     }
@@ -228,16 +298,19 @@ def _build_snapshot() -> dict:
         blockers.append("浏览器进程状态读取失败")
     if job_error:
         blockers.append("注册任务状态读取失败")
+    if not inventory_ok:
+        blockers.append("Roxy Profile 列表核对失败")
     reclaimable = sum(
         int(item["bytes"])
         for item in scopes.values()
-        if item["clearable"]
+        if item["clearable"] and item["label"] != "注册公开 JS/CSS 缓存"
     )
     reclaimable_files = sum(
         int(item["files"])
         for item in scopes.values()
-        if item["clearable"]
+        if item["clearable"] and item["label"] != "注册公开 JS/CSS 缓存"
     )
+    shared_reclaimable = scopes["shared_static_cache"]
     public_scopes = {
         key: {k: v for k, v in value.items() if not k.startswith("_")}
         for key, value in scopes.items()
@@ -249,12 +322,22 @@ def _build_snapshot() -> dict:
         "active_jobs": max(0, active_jobs),
         "active_browser_processes": active_browser_processes,
         "processes": processes,
+        "profile_inventory": {
+            "verified": inventory_ok,
+            "known_profiles": len(profile_ids),
+            "orphan_profiles": len(orphan_profile_roots),
+            "error": inventory_error,
+        },
         "profile_store": profile_store,
         "scopes": public_scopes,
         "reclaimable_bytes": reclaimable,
         "reclaimable_files": reclaimable_files,
-        "total_cache_bytes": profile_store["bytes"] + sum(int(item["bytes"]) for item in scopes.values() if item["label"] != "Roxy Profile 网页缓存"),
-        "total_cache_files": profile_store["files"] + sum(int(item["files"]) for item in scopes.values() if item["label"] != "Roxy Profile 网页缓存"),
+        "browser_reclaimable_bytes": reclaimable,
+        "browser_reclaimable_files": reclaimable_files,
+        "shared_reclaimable_bytes": int(shared_reclaimable["bytes"]),
+        "shared_reclaimable_files": int(shared_reclaimable["files"]),
+        "total_cache_bytes": profile_store["bytes"] + int(scopes["roxy_app_cache"]["bytes"]) + int(scopes["shared_static_cache"]["bytes"]),
+        "total_cache_files": profile_store["files"] + int(scopes["roxy_app_cache"]["files"]) + int(scopes["shared_static_cache"]["files"]),
     }
 
 
@@ -297,6 +380,45 @@ def _clear_directory_contents(root: Path) -> tuple[int, int, list[str]]:
     return deleted_bytes, deleted_files, errors
 
 
+def _remove_directory_tree(root: Path, parent: Path) -> tuple[int, int, list[str]]:
+    root = root.resolve(strict=False)
+    parent = parent.resolve(strict=False)
+    if not _path_within(root, parent) or _is_link(root):
+        return 0, 0, ["path_boundary"]
+    measured = _measure(root)
+    try:
+        shutil.rmtree(root)
+    except OSError as exc:
+        return 0, 0, [type(exc).__name__]
+    return measured["bytes"], measured["files"], []
+
+
+def _activity_status() -> dict:
+    processes, process_error = _process_counts()
+    try:
+        active_jobs = _active_job_count()
+        job_error = ""
+    except Exception as exc:
+        active_jobs = -1
+        job_error = type(exc).__name__
+    active_browser_processes = processes["RoxyChrome"] + processes["chromedriver"]
+    blockers: list[str] = []
+    if active_jobs != 0:
+        blockers.append("有注册任务正在排队或运行") if active_jobs > 0 else blockers.append("注册任务状态读取失败")
+    if active_browser_processes:
+        blockers.append("有 Roxy 浏览器自动化进程正在运行")
+    if process_error:
+        blockers.append("浏览器进程状态读取失败")
+    if job_error:
+        blockers.append("注册任务状态读取失败")
+    return {
+        "active_jobs": max(0, active_jobs),
+        "active_browser_processes": active_browser_processes,
+        "processes": processes,
+        "blockers": blockers,
+    }
+
+
 def clear_cache() -> dict:
     if not _CLEAR_LOCK.acquire(blocking=False):
         return {"ok": False, "http_status": 409, "error": "缓存清理正在进行，请稍候"}
@@ -312,11 +434,25 @@ def clear_cache() -> dict:
 
         roxy_root = _roxy_root()
         profile_root = roxy_root / "browser-cache"
-        targets = [*_profile_cache_dirs(profile_root), roxy_root / "Cache"]
+        profile_ids, inventory_ok, _inventory_error = _profile_inventory()
+        if not inventory_ok:
+            return {
+                "ok": False,
+                "http_status": 409,
+                "error": "Roxy Profile 列表核对失败，已跳过 Profile 目录清理",
+                "status": before,
+            }
+        orphan_targets = _orphan_profile_dirs(profile_root, profile_ids, inventory_ok)
+        profile_cache_targets = _profile_cache_dirs(profile_root, profile_ids)
         deleted_bytes = 0
         deleted_files = 0
         errors: list[str] = []
-        for root in _dedupe_roots(targets):
+        for root in _dedupe_roots(orphan_targets):
+            size, files, root_errors = _remove_directory_tree(root, profile_root)
+            deleted_bytes += size
+            deleted_files += files
+            errors.extend(root_errors)
+        for root in _dedupe_roots(profile_cache_targets + [roxy_root / "Cache"]):
             if not _path_within(root, roxy_root):
                 errors.append("path_boundary")
                 continue
@@ -334,6 +470,44 @@ def clear_cache() -> dict:
             "message": "浏览器缓存已清理" if not errors else "浏览器缓存已清理，部分占用文件已跳过",
             "before": before,
             "status": after,
+        }
+    finally:
+        _CLEAR_LOCK.release()
+
+
+def clear_shared_static_cache() -> dict:
+    """Clear only the shared public JS/CSS cache after a separate confirmation."""
+    if not _CLEAR_LOCK.acquire(blocking=False):
+        return {"ok": False, "http_status": 409, "error": "缓存清理正在进行，请稍候"}
+    try:
+        activity = _activity_status()
+        if activity["blockers"]:
+            return {
+                "ok": False,
+                "http_status": 409,
+                "error": "当前有注册任务或浏览器自动化进程，清理已跳过",
+                "status": {"ok": True, **activity},
+            }
+        root = _project_static_cache_root()
+        if not _path_within(root, _PROJECT_ROOT):
+            return {
+                "ok": False,
+                "http_status": 409,
+                "error": "共享静态缓存路径不在项目目录内，清理已跳过",
+            }
+        before = _measure(root)
+        deleted_bytes, deleted_files, errors = _clear_directory_contents(root)
+        after = _measure(root)
+        return {
+            "ok": True,
+            "partial": bool(errors),
+            "deleted_bytes": deleted_bytes,
+            "deleted_files": deleted_files,
+            "errors": errors[:20],
+            "message": "共享公开 JS/CSS 缓存已清理" if not errors else "共享公开 JS/CSS 缓存已清理，部分占用文件已跳过",
+            "before": before,
+            "after": after,
+            "status": {"ok": True, **activity},
         }
     finally:
         _CLEAR_LOCK.release()

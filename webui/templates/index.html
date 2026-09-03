@@ -2058,6 +2058,7 @@
     .roxy-cache-tool-label-v2 { color: #606266; font-size: 13px; font-weight: 700; }
     .roxy-cache-tool-value-v2 { color: #303133; font-size: 17px; font-weight: 700; line-height: 1.2; }
     .roxy-cache-tool-hint-v2 { color: #909399; font-size: 12px; line-height: 1.4; }
+    .roxy-cache-tool-actions-v2 { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
     .roxy-cache-tool-btn-v2 {
       min-height: 44px; padding: 0 16px; border: 1px solid #f2b8b5; border-radius: 8px;
       background: #fff7f6; color: #c2413a; cursor: pointer; display: inline-flex;
@@ -2067,6 +2068,8 @@
     }
     .roxy-cache-tool-btn-v2 svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
     .roxy-cache-tool-btn-v2:hover:not(:disabled) { color: #a3312a; border-color: #e58f8a; background: #fff0ee; }
+    .roxy-cache-tool-btn-v2--shared { color: #8a5a00; border-color: #e8ca8a; background: #fffaf0; }
+    .roxy-cache-tool-btn-v2--shared:hover:not(:disabled) { color: #6f4700; border-color: #d9b45e; background: #fff5d8; }
     .roxy-cache-tool-btn-v2:focus-visible { outline: 2px solid rgba(194,65,58,.35); outline-offset: 2px; }
     .roxy-cache-tool-btn-v2:disabled { opacity: .56; cursor: not-allowed; }
     .roxy-cache-tool-btn-v2.is-loading svg { animation: roxy-cache-spin-v2 .9s linear infinite; }
@@ -3057,10 +3060,16 @@
             <div class="roxy-cache-tool-value-v2" id="roxyCacheValueV2" aria-live="polite">正在读取…</div>
             <div class="roxy-cache-tool-hint-v2" id="roxyCacheHintV2">仅清理可回收网页缓存，不删除账号、Cookie、指纹或代理配置</div>
           </div>
-          <button type="button" class="roxy-cache-tool-btn-v2" id="btnClearRoxyCacheV2" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-            <span>清理缓存</span>
-          </button>
+          <div class="roxy-cache-tool-actions-v2">
+            <button type="button" class="roxy-cache-tool-btn-v2" id="btnClearRoxyCacheV2" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              <span>清理 Profile 缓存</span>
+            </button>
+            <button type="button" class="roxy-cache-tool-btn-v2 roxy-cache-tool-btn-v2--shared" id="btnClearRoxySharedCacheV2" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+              <span>清理共享 JS/CSS</span>
+            </button>
+          </div>
         </div>
         <div class="config-cards-v2" id="configCardsV2" aria-label="配置概览卡片">
           <div class="config-card-v2" id="configCardRegistrationV2">
@@ -8429,6 +8438,7 @@ let CONFIG_ROXY_ACTIVE_SECTION_V2 = '连接与团队';
 let CONFIG_QUERY_V2 = '';
 let CONFIG_SHOW_ALL_DRIVERS_V2 = false;
 let ROXY_CACHE_CLEARING_V2 = false;
+let ROXY_SHARED_CACHE_CLEARING_V2 = false;
 const CONFIG_PENDING_UPDATES = {};
 
 const CONFIG_DRIVER_GROUPS_V2 = new Set(['CloakBrowser', 'Browser Use', 'Skyvern', 'RoxyBrowser', 'Roxy流量优化']);
@@ -9880,24 +9890,31 @@ function renderRoxyCacheStatusV2(status) {
   const value = $('#roxyCacheValueV2');
   const hint = $('#roxyCacheHintV2');
   const button = $('#btnClearRoxyCacheV2');
-  if (!value || !hint || !button) return;
+  const sharedButton = $('#btnClearRoxySharedCacheV2');
+  if (!value || !hint || !button || !sharedButton) return;
   const scopes = status?.scopes || {};
   const profile = scopes.profile_web_cache || {};
+  const orphan = scopes.orphan_profile_store || {};
   const roxyApp = scopes.roxy_app_cache || {};
   const shared = scopes.shared_static_cache || {};
-  const reclaimable = Number(status?.reclaimable_bytes || 0);
+  const reclaimable = Number(status?.browser_reclaimable_bytes ?? status?.reclaimable_bytes ?? 0);
+  const sharedReclaimable = Number(status?.shared_reclaimable_bytes ?? shared.bytes ?? 0);
   const total = Number(status?.profile_store?.bytes || 0) + Number(roxyApp.bytes || 0) + Number(shared.bytes || 0);
-  value.textContent = `${_trafficBytes(reclaimable)} 可清理`;
-  const detail = `Profile 网页缓存 ${_trafficBytes(profile.bytes)} · Roxy 管理器 ${_trafficBytes(roxyApp.bytes)} · 总占用 ${_trafficBytes(total)}`;
+  value.textContent = `Profile 可清理 ${_trafficBytes(reclaimable)} · 共享缓存 ${_trafficBytes(sharedReclaimable)}`;
+  const detail = `Profile 网页缓存 ${_trafficBytes(profile.bytes)} · 孤儿目录 ${_trafficBytes(orphan.bytes)} · Roxy 管理器 ${_trafficBytes(roxyApp.bytes)} · 总占用 ${_trafficBytes(total)}`;
   const blockers = Array.isArray(status?.blockers) ? status.blockers.filter(Boolean) : [];
   if (blockers.length) {
     hint.textContent = `${blockers.join('；')}；${detail}`;
     button.disabled = true;
+    sharedButton.disabled = true;
     button.title = blockers.join('；');
+    sharedButton.title = blockers.join('；');
   } else {
-    hint.textContent = `${detail} · 公开 JS/CSS 缓存 ${_trafficBytes(shared.bytes)} 已保留`;
-    button.disabled = ROXY_CACHE_CLEARING_V2;
-    button.title = '仅清理可回收网页缓存，不删除账号、Cookie、指纹或代理配置';
+    hint.textContent = `${detail} · 公开 JS/CSS 缓存可单独清理`;
+    button.disabled = ROXY_CACHE_CLEARING_V2 || ROXY_SHARED_CACHE_CLEARING_V2;
+    sharedButton.disabled = ROXY_CACHE_CLEARING_V2 || ROXY_SHARED_CACHE_CLEARING_V2;
+    button.title = '清理网页缓存和已从 Roxy 列表移除的孤儿 Profile 目录';
+    sharedButton.title = '清理共享公开 JS/CSS 缓存；下一批注册会重新下载资源';
   }
 }
 
@@ -9913,11 +9930,13 @@ async function loadRoxyCacheStatusV2() {
     value.textContent = '读取失败';
     hint.textContent = `缓存状态读取失败：${e.message}`;
     button.disabled = true;
+    const sharedButton = $('#btnClearRoxySharedCacheV2');
+    if (sharedButton) sharedButton.disabled = true;
   }
 }
 
-async function clearRoxyCacheV2() {
-  if (ROXY_CACHE_CLEARING_V2) return;
+async function runRoxyCacheClearV2({endpoint, confirmText, shared = false}) {
+  if (ROXY_CACHE_CLEARING_V2 || ROXY_SHARED_CACHE_CLEARING_V2) return;
   let current;
   try {
     current = await api('/api/roxy/cache/status');
@@ -9925,24 +9944,29 @@ async function clearRoxyCacheV2() {
     showToast('读取缓存状态失败: ' + e.message);
     return;
   }
-  const reclaimable = _trafficBytes(current?.reclaimable_bytes || 0);
   if (Array.isArray(current?.blockers) && current.blockers.length) {
     renderRoxyCacheStatusV2(current);
     showToast(current.blockers.join('；'));
     return;
   }
-  if (!confirm(`确定清理约 ${reclaimable} 的浏览器缓存吗？\n\n只清理可回收网页缓存和 Roxy 管理器缓存；不会删除账号、Cookie、指纹、代理或共享公开 JS/CSS 缓存。`)) return;
+  const amount = shared
+    ? _trafficBytes(current?.shared_reclaimable_bytes ?? current?.scopes?.shared_static_cache?.bytes ?? 0)
+    : _trafficBytes(current?.browser_reclaimable_bytes ?? current?.reclaimable_bytes ?? 0);
+  if (!confirm(confirmText(amount))) return;
   const button = $('#btnClearRoxyCacheV2');
-  const oldText = button?.querySelector('span')?.textContent || '清理缓存';
-  ROXY_CACHE_CLEARING_V2 = true;
-  if (button) {
-    button.disabled = true;
-    button.classList.add('is-loading');
-    const label = button.querySelector('span');
+  const sharedButton = $('#btnClearRoxySharedCacheV2');
+  const activeButton = shared ? sharedButton : button;
+  const oldText = activeButton?.querySelector('span')?.textContent || '';
+  if (shared) ROXY_SHARED_CACHE_CLEARING_V2 = true;
+  else ROXY_CACHE_CLEARING_V2 = true;
+  [button, sharedButton].filter(Boolean).forEach(item => { item.disabled = true; });
+  if (activeButton) {
+    activeButton.classList.add('is-loading');
+    const label = activeButton.querySelector('span');
     if (label) label.textContent = '清理中…';
   }
   try {
-    const result = await api('/api/roxy/cache/clear', {
+    const result = await api(endpoint, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({confirm: true}),
@@ -9953,21 +9977,43 @@ async function clearRoxyCacheV2() {
     showToast('清理缓存失败: ' + e.message);
     await loadRoxyCacheStatusV2();
   } finally {
-    ROXY_CACHE_CLEARING_V2 = false;
-    if (button) {
-      button.classList.remove('is-loading');
-      const label = button.querySelector('span');
+    if (shared) ROXY_SHARED_CACHE_CLEARING_V2 = false;
+    else ROXY_CACHE_CLEARING_V2 = false;
+    if (activeButton) {
+      activeButton.classList.remove('is-loading');
+      const label = activeButton.querySelector('span');
       if (label) label.textContent = oldText;
     }
     await loadRoxyCacheStatusV2();
   }
 }
 
+function clearRoxyCacheV2() {
+  return runRoxyCacheClearV2({
+    endpoint: '/api/roxy/cache/clear',
+    confirmText: amount => `确定清理约 ${amount} 的 Profile 缓存和残留目录吗？\n\n会清理网页缓存以及已从 Roxy Profile 列表移除的孤儿目录；账号、Cookie、指纹、代理和共享公开 JS/CSS 缓存会保留。`,
+  });
+}
+
+function clearRoxySharedCacheV2() {
+  return runRoxyCacheClearV2({
+    endpoint: '/api/roxy/cache/clear-shared',
+    shared: true,
+    confirmText: amount => `确定清理约 ${amount} 的共享公开 JS/CSS 缓存吗？\n\n下一批注册会重新下载公开资源，注册流量会暂时增加。Profile、账号、Cookie、指纹和代理数据会保留。`,
+  });
+}
+
 function bindRoxyCacheToolV2() {
   const button = $('#btnClearRoxyCacheV2');
-  if (!button || button.dataset.bound) return;
-  button.dataset.bound = '1';
-  button.addEventListener('click', clearRoxyCacheV2);
+  const sharedButton = $('#btnClearRoxySharedCacheV2');
+  if (button && !button.dataset.bound) {
+    button.dataset.bound = '1';
+    button.addEventListener('click', clearRoxyCacheV2);
+  }
+  if (sharedButton && !sharedButton.dataset.bound) {
+    sharedButton.dataset.bound = '1';
+    sharedButton.addEventListener('click', clearRoxySharedCacheV2);
+  }
 }
 
 async function loadConfig() {
