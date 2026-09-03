@@ -67,7 +67,9 @@ def _is_proxy_isolation_failure(value) -> bool:
     text = f"{type(value).__name__}: {value}"
     return any(marker in text for marker in (
         "出口 IP 与并发注册任务重复",
+        "出口 IP 已被其他任务占用或仍在冷却",
         "注册出口 IP 已被其他并发任务占用",
+        "注册出口 IP 已被其他任务占用或处于冷却",
         "出口 IP 与创建前预检不一致",
     ))
 
@@ -3516,7 +3518,7 @@ def _verify_registration_exit_geo(
         # worker cannot start on it during this profile's cleanup window.
         if not client.reconcile_registration_exit_ip(browser_ip):
             raise RuntimeError(
-                f"Roxy 浏览器实际出口 IP 与并发注册任务重复：ip={browser_ip}；"
+                f"Roxy 浏览器实际出口 IP 已被其他任务占用或处于冷却：ip={browser_ip}；"
                 "已终止注册并回收当前环境"
             )
         raise RuntimeError(
@@ -3530,7 +3532,7 @@ def _verify_registration_exit_geo(
         return {}
     if not client.reconcile_registration_exit_ip(selected_ip):
         raise RuntimeError(
-            f"Roxy 注册出口 IP 已被其他并发任务占用：ip={selected_ip}；已终止注册"
+            f"Roxy 注册出口 IP 已被其他任务占用或处于冷却：ip={selected_ip}；已终止注册"
         )
     selected["ip"] = selected_ip
     selected["verification_source"] = "browser_context" if browser_ip else "same_proxy_preflight_fallback"

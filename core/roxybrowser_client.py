@@ -678,7 +678,7 @@ class RoxyBrowserClient:
                         duplicate_exit_ips.add(canonical_ip)
                         preflight_exit_geo = {}
                         logger.warning(
-                            "[Roxy] 代理预检出口 IP 已被其他并发注册任务占用，跳过当前线路：ip=%s",
+                            "[Roxy] 代理预检出口 IP 已被其他任务占用或仍在冷却，跳过当前线路：ip=%s",
                             canonical_ip,
                         )
                 failed_proxies.add(str(self.profile_proxy or ""))
@@ -697,7 +697,7 @@ class RoxyBrowserClient:
                 self._release_exit_ip_reservation()
                 if duplicate_exit_ips:
                     raise RuntimeError(
-                        f"Roxy 代理出口 IP 与并发注册任务重复（已检测 {len(failed_proxies)} 条代理，"
+                        f"Roxy 代理出口 IP 已被其他任务占用或仍在冷却（已检测 {len(failed_proxies)} 条代理，"
                         f"冲突 IP {len(duplicate_exit_ips)} 个）；未创建环境、未打开窗口"
                     )
                 raise RuntimeError(

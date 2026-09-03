@@ -172,7 +172,7 @@
 
 - 上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `create_profile` 明确提交 `randomFingerprint`；本地在模板和调用 payload 合并后强制为 `True`，并用 `secrets` 生成系统/环境名随机值。
 - `config/proxy.py` 新增 canonical IP reservation、owner 校验、15 分钟 reuse cooldown 和清理接口；`core/roxybrowser_client.py::open_profile` 在创建前预检并占用真实 IP，`core/roxy_registration.py::_verify_registration_exit_geo` 在 Selenium 上下文复核漂移/重复，`cleanup_profile` 在终态释放或保留现场时继续持有。
-- 出口冲突/漂移在 `core/roxy_registration.py` 中标记为 `stage=proxy_isolation`，与代理传输、邮箱 OTP、密码和 2FA 失败分开统计。
+- 出口冲突/冷却/漂移在 `core/roxy_registration.py` 中标记为 `stage=proxy_isolation`，与代理传输、邮箱 OTP、密码和 2FA 失败分开统计。
 - 预检返回非法 IP 时单独轮换候选并保留“快速检测失败”原因，避免把输入格式问题误报为并发占用。
 - 账号 `extra_json.roxybrowser.isolation` 记录无凭据摘要（Profile、core、OS、出口 IP、验证来源）；本轮不新增代理凭据字段，也不记录 Cookie、Authorization、Token 或 TOTP Secret。
 - 同一 Python 进程线程池内已保证并发 IP 不重复；不同进程（CLI/多个 WebUI）尚未共享 reservation，需串行运行。详细高/中/低原因、证据和测试见 `docs/2026-09-03_注册缓存与Roxy独立画像审计-report.md`。

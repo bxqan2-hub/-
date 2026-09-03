@@ -142,7 +142,7 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertTrue(proxy_config.reserve_registration_exit_ip("203.0.113.22", "other-worker"))
         with patch("core.browser_exit_geo.probe_proxy_exit_geo", return_value={"ip": "203.0.113.22", "country": "JP"}), \
              patch.object(client, "create_profile") as create_profile:
-            with self.assertRaisesRegex(RuntimeError, "并发注册任务重复"):
+            with self.assertRaisesRegex(RuntimeError, "已被其他任务占用或仍在冷却"):
                 client.open_profile(require_proxy_exit_ip=True)
         create_profile.assert_not_called()
 

@@ -15,7 +15,7 @@
 
 | 概率 | 原因/风险 | 证据核对 | 结论 |
 | --- | --- | --- | --- |
-| 高 | 代理池随机抽取后没有跨任务出口 IP 去重 | 历史日志有 `72.82.55.137` 重复；现已在 `open_profile` 预检后调用 `reserve_registration_exit_ip`，冲突时换候选并拒绝创建 | 已修复（同一 Python 进程线程池内）；释放后 15 分钟内仍拒绝复用 |
+| 高 | 代理池随机抽取后没有跨任务出口 IP 去重 | 历史日志有 `72.82.55.137` 重复；现已在 `open_profile` 预检后调用 `reserve_registration_exit_ip`，占用/冷却冲突时换候选并拒绝创建 | 已修复（同一 Python 进程线程池内）；释放后 15 分钟内仍拒绝复用 |
 | 高 | 挑战/Sentinel/后端脚本被共享缓存跨 Profile 回放 | 修复前 `is_cacheable_request(..., headers={})` 对 `/backend-api/sentinel/`、`/sentinel/`、`/cdn-cgi/challenge-platform/` 返回 True；缓存盘有 6 个非公共前缀条目 | 已确认并已修复；这些路径现在强制实时请求 |
 | 中 | Roxy 只由 runtime 决定未显式指定的指纹字段，内核可能长期相同 | 上游 `create_profile` 显式发送 `randomFingerprint`；本站旧路径缺失，最新返回仍全部 `coreVersion=152` | 已修复请求字段；内核版本仍由已安装 runtime 决定，不能把版本固定误判为账号指纹复用 |
 | 中 | 语言/时区画像与 Roxy 可见 Profile 可能不是同一数据源 | `config/browser.py` 的 `AUTO_BROWSER_LOCALE_FROM_IP=True` 作用于 BrowserSession；Roxy create payload 没有 `fingerInfo` | 需继续以 Roxy API 实际返回/页面 JS 观测确认，不能把本地 locale 配置当作 Roxy 指纹保证 |
@@ -69,7 +69,7 @@
 - **文件/路径**：`config/proxy.py`、`core/roxybrowser_client.py`、`core/roxy_registration.py`。
 - **出口 IP**：预检得到真实 IP 后 canonicalize 并原子占用；占用冲突时排除当前代理并轮换候选，池耗尽或显式代理冲突直接终止，不创建 Profile。任务结束关闭/删除 Profile 后释放，释放记录保留 15 分钟冷却。
 - **窗口复核**：Selenium 上下文 IP 与预检 IP 同时存在且不一致时，先保护实际地址并 fail-closed；一致或仅有预检回退时才进入注册。`ROXY_KEEP_BROWSER_OPEN` 在打开时快照，保留现场时不释放 reservation。
-- **失败分类**：出口冲突/漂移统一标记为 `stage=proxy_isolation`，与 `stage=proxy_transport`、邮箱 OTP、密码和 2FA 业务错误分开记录。
+- **失败分类**：出口冲突/冷却/漂移统一标记为 `stage=proxy_isolation`，与 `stage=proxy_transport`、邮箱 OTP、密码和 2FA 业务错误分开记录。
 - **输入校验**：预检返回的非 IP 值单独记为无效出口并轮换候选，不再误报为并发冲突。
 - **指纹**：现有 `/browser/create` payload 合并后强制 `randomFingerprint=True`；名称/系统选择使用独立随机值，不向 Roxy 伪造 `fingerInfo` 或 `coreVersion`。账号记录新增无凭据的 isolation 摘要（Profile、core、OS、出口 IP、验证来源）。
 - **路由记录**：账号 `registration_exit_ip`/`registration_exit_country` 与 isolation 摘要记录核对结果；代理池凭据不额外写入账号字段。
