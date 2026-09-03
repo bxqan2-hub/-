@@ -855,6 +855,8 @@ ENABLE_CODEX_AUTO = False
 - 日常批量使用 WebUI，不建议直接同时开多个 CLI 进程。
 - 注册线程数建议不超过可用代理数。
 - Roxy 一号一环境建议保持开启，降低环境污染。
+- Roxy 注册会在真实出口预检后按 IP 做进程内 reservation，并在释放后保留 15 分钟冷却；代理漂移/重复会直接终止该账号，不会继续提交注册。CLI 与 WebUI 请保持串行运行。
+- `/browser/create` 会请求 `randomFingerprint=True`；不要把固定 `coreVersion` 或随机窗口名当作完整指纹隔离证明，逐号以日志/账号 isolation 摘要核对。
 - 调试页面问题时可临时设置：
 
 ```python

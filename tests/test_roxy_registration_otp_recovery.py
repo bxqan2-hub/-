@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 from core import registration_service, roxy_registration
+from core.roxybrowser_client import RoxyOpenResult
 
 
 class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
@@ -239,14 +240,71 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertTrue(submitted)
         type_name.assert_not_called()
 
-    def test_exit_geo_uses_same_proxy_preflight_when_browser_probe_is_temporarily_empty(self):
-        selected = roxy_registration._select_registration_exit_geo(
+    def test_browser_exit_geo_mismatch_is_rejected_after_reconciling_actual_ip(self):
+        opened = RoxyOpenResult(
+            "profile-1",
             {},
-            {"ip": "203.0.113.9", "country": "JP"},
-            has_proxy=True,
+            preflight_exit_geo={"ip": "203.0.113.30", "country": "JP"},
         )
-        self.assertEqual(selected["ip"], "203.0.113.9")
+        client = MagicMock()
+        client.reconcile_registration_exit_ip.return_value = True
+        with self.assertRaisesRegex(RuntimeError, "出口 IP 与创建前预检不一致"):
+            roxy_registration._verify_registration_exit_geo(
+                client,
+                opened,
+                {"ip": "203.0.113.31", "country": "JP"},
+            )
+        client.reconcile_registration_exit_ip.assert_called_once_with("203.0.113.31")
+
+    def test_empty_browser_probe_uses_reserved_same_proxy_preflight(self):
+        opened = RoxyOpenResult(
+            "profile-1b",
+            {},
+            preflight_exit_geo={"ip": "203.0.113.32", "country": "JP"},
+        )
+        client = MagicMock()
+        client.reconcile_registration_exit_ip.return_value = True
+        selected = roxy_registration._verify_registration_exit_geo(client, opened, {})
+        self.assertEqual(selected["ip"], "203.0.113.32")
         self.assertEqual(selected["verification_source"], "same_proxy_preflight_fallback")
+        client.reconcile_registration_exit_ip.assert_called_once_with("203.0.113.32")
+
+    def test_browser_exit_geo_is_reserved_when_preflight_was_skipped(self):
+        opened = RoxyOpenResult("profile-2", {}, preflight_exit_geo={})
+        client = MagicMock()
+        client.reconcile_registration_exit_ip.return_value = True
+        selected = roxy_registration._verify_registration_exit_geo(
+            client,
+            opened,
+            {"ip": "198.51.100.42", "country": "US"},
+        )
+        self.assertEqual(selected["ip"], "198.51.100.42")
+        self.assertEqual(selected["verification_source"], "browser_context")
+        client.reconcile_registration_exit_ip.assert_called_once_with("198.51.100.42")
+
+    def test_profile_isolation_summary_uses_create_payload_and_open_runtime_values(self):
+        client = MagicMock()
+        client._last_profile_create_summary = {
+            "fingerprint_requested": True,
+            "os": "Windows",
+            "os_version": None,
+        }
+        opened = RoxyOpenResult(
+            "profile-3",
+            {"data": {"coreVersion": "152"}},
+        )
+        summary = roxy_registration._profile_isolation_summary(
+            client,
+            opened,
+            {"ip": "198.51.100.43", "country": "US", "verification_source": "browser_context"},
+        )
+        self.assertEqual(summary["fingerprint_requested"], True)
+        self.assertEqual(summary["os"], "Windows")
+        self.assertEqual(summary["core_version"], "152")
+        self.assertEqual(summary["exit_ip"], "198.51.100.43")
+        self.assertNotIn("proxy", summary)
+        self.assertNotIn("access_token", summary)
+        self.assertNotIn("totp_secret", summary)
 
     def test_existing_otp_only_account_continues_when_signup_password_link_is_absent(self):
         driver = MagicMock()

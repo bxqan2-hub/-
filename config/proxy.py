@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from config.env_loader import apply_env_overrides, read_runtime_list_file
 import json
+import ipaddress
 import logging
 import os
 import random
@@ -131,6 +132,118 @@ _SUPPORTED_PROXY_PROTOCOLS = {"http", "https", "socks5", "socks5h"}
 _PROXY_API_LOCK = threading.Lock()
 _PROXY_API_CACHE = {"key": None, "proxy": "", "expires_at": 0.0}
 _PROXY_API_FLIGHTS = {}
+
+# 注册任务之间的真实出口 IP 占用表。代理端点相同或供应商返回同一出口时，
+# 仅按 URL 排除并发竞态；预检拿到 IP 后必须在此处原子占用，才能把“随机代理”
+# 与“一号一出口 IP”分开验证。占用只覆盖当前进程中仍在运行的注册会话，任务
+# 清理时由调用方释放；不把 IP 写入配置或凭据文件。
+_REGISTRATION_EXIT_IP_LOCK = globals().get("_REGISTRATION_EXIT_IP_LOCK") or threading.RLock()
+_REGISTRATION_EXIT_IP_OWNERS: dict[str, str] = globals().get("_REGISTRATION_EXIT_IP_OWNERS", {})
+# Keep a short-lived history after a task releases an address.  A process-local
+# active set prevents concurrent collisions; this history also prevents the
+# next queued account from immediately receiving the same observed exit IP.
+# It is deliberately bounded/expiring so a long-running WebUI can continue
+# after the provider rotates its pool, while a small pool fails closed during
+# the high-risk registration window instead of reusing an address.
+_REGISTRATION_EXIT_IP_LAST_USED: dict[str, float] = globals().get("_REGISTRATION_EXIT_IP_LAST_USED", {})
+_REGISTRATION_EXIT_IP_REUSE_COOLDOWN_SECONDS = globals().get(
+    "_REGISTRATION_EXIT_IP_REUSE_COOLDOWN_SECONDS",
+    15 * 60,
+)
+_REGISTRATION_EXIT_IP_HISTORY_LIMIT = globals().get("_REGISTRATION_EXIT_IP_HISTORY_LIMIT", 4096)
+
+
+def normalize_exit_ip(value: str | None) -> str:
+    """Return a canonical IP literal for reservation comparisons."""
+    text = str(value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    if not text:
+        return ""
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return ""
+
+
+def _purge_registration_exit_ip_history(now: float | None = None) -> None:
+    """Drop expired, released reservations while retaining active owners."""
+    current_time = float(now if now is not None else time.monotonic())
+    cooldown = max(0.0, float(_REGISTRATION_EXIT_IP_REUSE_COOLDOWN_SECONDS))
+    if cooldown <= 0:
+        _REGISTRATION_EXIT_IP_LAST_USED.clear()
+        return
+    cutoff = current_time - cooldown
+    for ip, last_used in list(_REGISTRATION_EXIT_IP_LAST_USED.items()):
+        if ip not in _REGISTRATION_EXIT_IP_OWNERS and last_used <= cutoff:
+            _REGISTRATION_EXIT_IP_LAST_USED.pop(ip, None)
+    # A malformed/very long-lived process must not grow this map without bound.
+    if len(_REGISTRATION_EXIT_IP_LAST_USED) > _REGISTRATION_EXIT_IP_HISTORY_LIMIT:
+        inactive = [
+            (timestamp, ip)
+            for ip, timestamp in _REGISTRATION_EXIT_IP_LAST_USED.items()
+            if ip not in _REGISTRATION_EXIT_IP_OWNERS
+        ]
+        inactive.sort()
+        remove_count = len(_REGISTRATION_EXIT_IP_LAST_USED) - _REGISTRATION_EXIT_IP_HISTORY_LIMIT
+        for _timestamp, ip in inactive[:max(0, remove_count)]:
+            _REGISTRATION_EXIT_IP_LAST_USED.pop(ip, None)
+
+
+def reserve_registration_exit_ip(exit_ip: str | None, owner: str) -> bool:
+    """Atomically reserve one observed registration exit IP for an owner.
+
+    A reservation is idempotent for the same owner and rejects a different
+    concurrent registration.  The caller must release it after the browser
+    profile is closed or the open attempt is rolled back.
+    """
+    normalized = normalize_exit_ip(exit_ip)
+    owner_text = str(owner or "").strip()
+    if not normalized or not owner_text:
+        return False
+    with _REGISTRATION_EXIT_IP_LOCK:
+        now = time.monotonic()
+        _purge_registration_exit_ip_history(now)
+        current = _REGISTRATION_EXIT_IP_OWNERS.get(normalized)
+        if current and current != owner_text:
+            return False
+        if current == owner_text:
+            return True
+        last_used = _REGISTRATION_EXIT_IP_LAST_USED.get(normalized)
+        cooldown = max(0.0, float(_REGISTRATION_EXIT_IP_REUSE_COOLDOWN_SECONDS))
+        if last_used is not None and (cooldown <= 0 or now - last_used < cooldown):
+            return False
+        _REGISTRATION_EXIT_IP_OWNERS[normalized] = owner_text
+        _REGISTRATION_EXIT_IP_LAST_USED[normalized] = now
+        return True
+
+
+def release_registration_exit_ip(exit_ip: str | None, owner: str) -> bool:
+    """Release an exit-IP reservation only when owned by the caller."""
+    normalized = normalize_exit_ip(exit_ip)
+    owner_text = str(owner or "").strip()
+    if not normalized or not owner_text:
+        return False
+    with _REGISTRATION_EXIT_IP_LOCK:
+        if _REGISTRATION_EXIT_IP_OWNERS.get(normalized) != owner_text:
+            return False
+        _REGISTRATION_EXIT_IP_OWNERS.pop(normalized, None)
+        _REGISTRATION_EXIT_IP_LAST_USED[normalized] = time.monotonic()
+        _purge_registration_exit_ip_history()
+        return True
+
+
+def reset_registration_exit_ip_reservations(*, clear_history: bool = False) -> None:
+    """Clear process-local registration claims (used by shutdown/tests).
+
+    Runtime callers normally release through the owning Roxy client.  The
+    explicit reset is kept small and side-effect free for controlled service
+    restarts and deterministic regression tests; it never touches disk.
+    """
+    with _REGISTRATION_EXIT_IP_LOCK:
+        _REGISTRATION_EXIT_IP_OWNERS.clear()
+        if clear_history:
+            _REGISTRATION_EXIT_IP_LAST_USED.clear()
 
 
 def _clean_proxy_text(raw: str) -> str:
@@ -662,16 +775,29 @@ def pick_proxy(*, strict: bool = False, excluded: set[str] | None = None) -> str
     - 池为空，或条目为 system/auto：跟随当前系统代理
     - 系统代理也没有时返回空串（直连；TUN 模式通常也是这种）
     """
+    excluded_values = {
+        str(value or "").strip()
+        for value in (excluded or set())
+        if str(value or "").strip()
+    }
     if bool(PROXY_API_ENABLED):
         try:
-            candidate = fetch_proxy_from_api()
-            if candidate not in (excluded or set()):
+            # A cached API result is useful for a single session, but it can
+            # hand the same endpoint back to a second registration after an
+            # exit-IP collision.  Bypass only that cache when exclusions are
+            # present; the reservation layer still verifies the real IP.
+            candidate = (
+                fetch_proxy_from_api(force=True)
+                if excluded_values
+                else fetch_proxy_from_api()
+            )
+            if candidate not in excluded_values:
                 return candidate
         except Exception:
             if strict or bool(PROXY_API_FAIL_CLOSED):
                 raise
             logger.exception("[代理API] 获取失败，按配置回退静态代理池/系统代理")
-    return _pick_static_or_system_proxy(strict=strict, excluded=excluded)
+    return _pick_static_or_system_proxy(strict=strict, excluded=excluded_values)
 
 
 def pick_local_proxy(*, strict: bool = False) -> str:

@@ -14,6 +14,18 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
         )
         self.assertFalse(roxy_registration._is_proxy_transport_failure(RuntimeError("password rejected")))
 
+    def test_proxy_isolation_failure_is_separate_from_transport(self):
+        self.assertTrue(
+            roxy_registration._is_proxy_isolation_failure(
+                RuntimeError("Roxy 浏览器出口 IP 与创建前预检不一致")
+            )
+        )
+        self.assertFalse(
+            roxy_registration._is_proxy_isolation_failure(
+                RuntimeError("net::ERR_PROXY_CONNECTION_FAILED")
+            )
+        )
+
     @patch.object(roxy_registration, "_fetch_chatgpt_session", return_value={"accessToken": "settled-at"})
     @patch.object(roxy_registration, "_safe_get")
     @patch.object(roxy_registration.time, "sleep")

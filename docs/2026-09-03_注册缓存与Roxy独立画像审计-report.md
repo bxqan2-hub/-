@@ -7,17 +7,17 @@
 ## 结论摘要
 
 1. 共享缓存不保存或回放请求 Cookie/Authorization；严格公共静态路径的 Cookie 请求仅在响应明确 `Cache-Control: public`、无私有头和画像变体时使用已校验 body。旧的请求分类器曾允许挑战/Sentinel/后端脚本进入跨 Profile 缓存，现已收窄为只回放公共静态资源。
-2. 当前代理选择确实是随机抽取，但不是“一号一独立出口 IP”。最新同批日志出现两个不同账号使用相同出口 IP `72.82.55.137`，说明 `random.choice` 不等于 IP 唯一。
-3. 当前每个账号会创建不同 Roxy Profile，并在结束后删除；系统类型在 Windows/macOS 间随机。浏览器内核版本没有在本地随机，最新四条日志均由 Roxy runtime 返回 `coreVersion=152`。
+2. 历史批次的随机抽取曾出现两个账号复用 `72.82.55.137`；本次已在真实出口预检后加入原子 reservation、15 分钟冷却和窗口内出口复核，冲突或漂移会在注册前 fail-closed。
+3. 当前每个账号会创建不同 Roxy Profile，并在结束后删除；`/browser/create` 已强制发送 `randomFingerprint=True`，系统类型在 Windows/macOS 间随机。浏览器内核版本没有在本地随机，最新五条日志均由 Roxy runtime 返回 `coreVersion=152`。
 4. 当前 200 条代理池记录全部含 `region-US`；本批随机的是 US 会话线路，不是随机国家。`PROXY_API_ACTIVE=GB` 在 `PROXY_API_ENABLED=False` 时不生效。
 
 ## 高概率、中概率、低概率核对
 
 | 概率 | 原因/风险 | 证据核对 | 结论 |
 | --- | --- | --- | --- |
-| 高 | 代理池随机抽取后没有跨任务出口 IP 去重 | `config/proxy.py::_pick_static_or_system_proxy` 使用 `random.choice(available)`；最新日志有 `72.82.55.137` 重复 | 已确认。当前只有随机，没有唯一 IP 保证 |
+| 高 | 代理池随机抽取后没有跨任务出口 IP 去重 | 历史日志有 `72.82.55.137` 重复；现已在 `open_profile` 预检后调用 `reserve_registration_exit_ip`，冲突时换候选并拒绝创建 | 已修复（同一 Python 进程线程池内）；释放后 15 分钟内仍拒绝复用 |
 | 高 | 挑战/Sentinel/后端脚本被共享缓存跨 Profile 回放 | 修复前 `is_cacheable_request(..., headers={})` 对 `/backend-api/sentinel/`、`/sentinel/`、`/cdn-cgi/challenge-platform/` 返回 True；缓存盘有 6 个非公共前缀条目 | 已确认并已修复；这些路径现在强制实时请求 |
-| 中 | Roxy 只由 runtime 决定未显式指定的指纹字段，内核可能长期相同 | `create_profile` 只随机 `os` 和 `windowName`，没有本地 `fingerInfo` 或 `coreVersion`；最新返回全部 `coreVersion=152` | 已确认。OS 随机不等于完整指纹随机 |
+| 中 | Roxy 只由 runtime 决定未显式指定的指纹字段，内核可能长期相同 | 上游 `create_profile` 显式发送 `randomFingerprint`；本站旧路径缺失，最新返回仍全部 `coreVersion=152` | 已修复请求字段；内核版本仍由已安装 runtime 决定，不能把版本固定误判为账号指纹复用 |
 | 中 | 语言/时区画像与 Roxy 可见 Profile 可能不是同一数据源 | `config/browser.py` 的 `AUTO_BROWSER_LOCALE_FROM_IP=True` 作用于 BrowserSession；Roxy create payload 没有 `fingerInfo` | 需继续以 Roxy API 实际返回/页面 JS 观测确认，不能把本地 locale 配置当作 Roxy 指纹保证 |
 | 低 | 公共 hashed 静态 JS/CSS URL-only 共享使字节相同 | 缓存只允许公共前缀；Cookie 请求不进入 key/回放头，响应必须 `public` 且拒绝 `Set-Cookie`、`private/no-store/no-cache`、画像变体 `Vary`；盘点未见敏感头 | 这是预期的公共资源复用；认证、挑战和业务 API 保持实时网络 |
 
@@ -41,11 +41,11 @@
 
 - **Evidence**
   - 当前配置输出：`pool_count 200 active '' api_enabled False`、`roxy_create_use_pool True`、`proxy regions {'US': 200}`。
-  - 最新四条日志的 `exit_ip`：`72.82.55.137`、`173.171.192.234`、`104.251.245.160`、`72.82.55.137`。
-  - 对应日志均记录 `创建环境使用代理池代理`，说明不是直连。
-- **Finding**：选择算法是随机的，但同一批存在重复实际出口 IP；代理端点的 session 参数不同也不能保证服务商返回不同 IP。当前没有批次级“已占用出口 IP”锁定。
-- **Path**：`config/proxy.py::_pick_static_or_system_proxy`、`config/proxy.py:pick_proxy`、`core/roxybrowser_client.py::_ensure_profile_proxy/open_profile`。
-- **结论**：若要求严格“一号一 IP”，需要在预检得到真实出口 IP 后做全局/批次级保留，并在并发任务间排除已保留 IP；仅把 `PROXY_POOL_ACTIVE` 留空或扩大池子都不能提供该保证。
+  - 对应日志均记录 `创建环境使用代理池代理`，说明不是直连；旧批次的重复是随机端点映射到同一真实出口造成的。
+  - 新增回归模拟：同一 IP 已被其他 owner 占用时，第一次候选被排除，第二条候选才允许创建；释放后冷却窗口内再次领取返回 False。
+- **Finding**：随机端点不能证明真实出口唯一；现行路径以预检取得的 canonical IP 为锁定对象，并在浏览器上下文再次核对，避免 Roxy 未应用 `proxyInfo` 或供应商漂移。
+- **Path**：`config/proxy.py::reserve_registration_exit_ip/release_registration_exit_ip`、`core/roxybrowser_client.py::open_profile/reconcile_registration_exit_ip/cleanup_profile`、`core/roxy_registration.py::_verify_registration_exit_geo`。
+- **结论**：同一 Python 进程的并发注册现已按真实出口 IP 去重；同一 IP 在释放后 15 分钟内仍拒绝复用。不同进程之间的 lease 尚未持久化，需保持 CLI/WebUI 不并行运行才能维持同一保证。
 
 ### E3：Roxy Profile、系统与内核
 
@@ -53,9 +53,9 @@
   - `ROXY_ONE_PROFILE_PER_ACCOUNT=True`、`ROXY_DELETE_PROFILE_AFTER_RUN=True`。
   - 最新日志各自返回不同 `dirId/profile`，并记录删除成功。
   - 创建参数记录 `random_os=True`，值为 `Windows` 或 `macOS`。
-  - 最新四条 open 返回均为 `coreVersion: "152"`，driver 路径为 `chrome-bin\\152\\chromedriver.exe`。
-- **Finding**：Profile 生命周期是一号一环境；系统类型随机；内核由 Roxy 安装/runtime 默认固定为 152，本地没有内核随机逻辑。`fingerInfo` 未显式传入，因此完整指纹随机性由 Roxy 默认策略决定，不能由本项目保证。
-- **Path**：`config/roxybrowser.py`、`core/roxybrowser_client.py:create_profile/open_profile`。
+  - 最新五条 open 返回均为 `coreVersion: "152"`，driver 路径为 `chrome-bin\\152\\chromedriver.exe`。
+- **Finding**：Profile 生命周期是一号一环境；系统类型随机；内核由 Roxy 安装/runtime 默认固定为 152，本地没有内核随机逻辑。现已显式请求 Roxy `randomFingerprint=True`，不再依赖模板默认值；`fingerInfo`/内核版本仍由 Roxy 版本决定。
+- **Path**：`config/roxybrowser.py`、`core/roxybrowser_client.py:create_profile/open_profile`、`core/roxy_registration.py::_profile_isolation_summary`。
 
 ## 已实施修改
 
@@ -63,6 +63,15 @@
 - 字段/分支：`is_cacheable_request` 的缓存资格判定。
 - 行为：将“带 Cookie 时才检查公共前缀”改为“所有请求都必须命中公共前缀”；因此挑战、Sentinel、`/backend-api`、`/unauth-mweb/scripts` 不再进入跨 Profile 缓存。
 - 回归：`tests/test_browser_traffic.py` 新增四个非公共路径断言。
+
+### 本轮独立出口与指纹修改
+
+- **文件/路径**：`config/proxy.py`、`core/roxybrowser_client.py`、`core/roxy_registration.py`。
+- **出口 IP**：预检得到真实 IP 后 canonicalize 并原子占用；占用冲突时排除当前代理并轮换候选，池耗尽或显式代理冲突直接终止，不创建 Profile。任务结束关闭/删除 Profile 后释放，释放记录保留 15 分钟冷却。
+- **窗口复核**：Selenium 上下文 IP 与预检 IP 同时存在且不一致时，先保护实际地址并 fail-closed；一致或仅有预检回退时才进入注册。`ROXY_KEEP_BROWSER_OPEN` 在打开时快照，保留现场时不释放 reservation。
+- **失败分类**：出口冲突/漂移统一标记为 `stage=proxy_isolation`，与 `stage=proxy_transport`、邮箱 OTP、密码和 2FA 业务错误分开记录。
+- **指纹**：现有 `/browser/create` payload 合并后强制 `randomFingerprint=True`；名称/系统选择使用独立随机值，不向 Roxy 伪造 `fingerInfo` 或 `coreVersion`。账号记录新增无凭据的 isolation 摘要（Profile、core、OS、出口 IP、验证来源）。
+- **路由记录**：账号 `registration_exit_ip`/`registration_exit_country` 与 isolation 摘要记录核对结果；代理池凭据不额外写入账号字段。
 
 ## 验证（前一轮公共前缀修复）
 
@@ -92,10 +101,10 @@
 
 ## 后续实施建议
 
-1. 保持 `ROXY_ONE_PROFILE_PER_ACCOUNT=True`、`ROXY_DELETE_PROFILE_AFTER_RUN=True` 和 `PROXY_POOL_ACTIVE` 为空；不要把“随机代理”描述为“唯一 IP”。
-2. 要求严格独立 IP 时，在 `open_profile` 的代理预检阶段增加批次级出口 IP reservation（加锁、冲突换代理、注册结束释放），并把 `registration_exit_ip` 作为唯一性校验字段；若池中没有新 IP，应明确失败而不是复用。
-3. 若要验证“完整指纹随机”，在 Roxy `/browser/create`/`/browser/open` 的脱敏日志中记录 `os`、`osVersion`、`coreVersion`、语言、时区、WebGL/字体等非凭据摘要，并与 `registration_exit_country` 做一致性检查；不要记录 Cookie、Token 或 MFA Secret。
-4. Roxy 官方建议语言、显示语言、时区和地理位置自动匹配代理 IP；当前本地 `BROWSER_LOCALE_PROFILE` 不能替代 Roxy `fingerInfo`。参考：[Roxy API endpoint 文档](https://roxybrowser.com/docs/api-documentation/api-endpoint.html)、[Roxy Profile configuration 文档](https://roxybrowser.com/docs/features/profile-configuration.html)。
+1. 保持 `ROXY_ONE_PROFILE_PER_ACCOUNT=True`、`ROXY_DELETE_PROFILE_AFTER_RUN=True` 和 `PROXY_POOL_ACTIVE` 为空；代理池至少要有与并发数相匹配的真实出口，池中只有同一 IP 时应接受 fail-closed 结果。
+2. 当前 reservation 是单 Python 进程共享的线程安全状态；CLI 与 WebUI 或多个 WebUI 进程并行时状态不共享，需串行运行或后续接入外部 lease 服务。
+3. 公共 hashed JS/CSS 仍使用安装级 URL-only warm cache；它不保存 Cookie/Token，但会保留公共资源命中时序。若某批次把时序关联也视为特征，可将 `ROXY_STATIC_CACHE=False` 作为该批次的隔离策略，代价是每号增加约 5MB 回源流量。
+4. Roxy 官方建议语言、显示语言、时区和地理位置自动匹配代理 IP；当前本地不伪造 `fingerInfo`，以 Roxy `randomFingerprint` 和实际 open 响应为准。参考：[Roxy API endpoint 文档](https://roxybrowser.com/docs/api-documentation/api-endpoint.html)、[Roxy Profile configuration 文档](https://roxybrowser.com/docs/features/profile-configuration.html)。
 
 ## 继续风险复核（2026-09-03）
 
@@ -160,3 +169,59 @@
 ### 附件参考边界
 
 `C:\Users\Administrator\Downloads\注册流量优化复现与使用教程.docx` 作为参考资料使用，未将其文字当作项目指令。文档的可复用判据是：`downloaded`、`logical_downloaded`、`cache_saved_bytes` 分开统计；只缓存公开一方 JS/CSS；认证、Session、Cookie、挑战和 API 保持实时；命中走本地回放，未命中才回源并原子写入。当前修复按这些判据映射到本地 `core/browser_traffic.py`。
+
+## 深度隔离复核（2026-09-03 本轮）
+
+### 高概率 / 中概率 / 低概率原因与逐条核对
+
+| 概率 | 核对原因 | 证据与路径 | 处理结果 |
+| --- | --- | --- | --- |
+| 高 | 随机代理端点映射到同一真实出口 IP，多个账号同时注册 | 历史日志出现重复 `registration_exit_ip`；`config/proxy.py::pick_proxy` 仅负责抽取，真实 IP 只能由 `probe_proxy_exit_geo` 得到 | 预检后以 canonical IP 原子 reservation；冲突换候选，候选耗尽直接失败，避免继续注册 |
+| 高 | Roxy 未应用 `proxyInfo` 或供应商在创建/打开间发生出口漂移 | `core/roxy_registration.py::_verify_registration_exit_geo` 对预检 IP 与 Selenium 上下文 IP 做一致性核对 | 两者同时存在且不一致时 fail-closed，并回收 Profile；仅同一代理预检回退才允许继续 |
+| 中 | 新 Profile 仍沿用固定模板指纹，随机 OS 被误当作完整随机 | 上游锁定 commit 的 `create_profile` 显式发送 `randomFingerprint`；本地旧 payload 缺失该字段 | `core/roxybrowser_client.py::create_profile` 合并后强制 `randomFingerprint=True`；不伪造 `fingerInfo`/内核版本 |
+| 中 | 账号完成后紧邻的下一个任务再次使用刚释放的 IP | 进程内 reservation 的释放时刻可观测，单纯 active set 会立即清空 | `_REGISTRATION_EXIT_IP_LAST_USED` 保留 15 分钟冷却；同一进程内再次领取被拒绝 |
+| 低 | 公共 URL-only 静态缓存形成命中时序关联 | `core/browser_traffic.py::StaticResourceCache` 只保存明确 public 的 JS/CSS，Cookie/Authorization 不入 key 或回放头 | 保留公共资源节流；认证、挑战、Sentinel、API 实时。高隔离批次可关闭 `ROXY_STATIC_CACHE` |
+
+### 运行时独立性证据
+
+- 最新 14:42 批五个 Profile 的预检出口分别为 `73.255.202.155`、`76.36.188.15`、`97.95.124.228`、`76.37.89.132`、`131.241.125.43`，均为 US 且无重复；该批在本轮代码加载前完成，作为修复前后对照基线。
+- 旧批次 14:08–14:09 的五个账号均成功完成密码与 2FA，但流量为 `5.6–5.9MB`、`hits=0`；14:42 批为 `0.90–1.14MB`、`hits=34–40`，说明缓存修复与 IP/指纹修复是独立维度。
+- 本轮新增测试覆盖：同一 IP 并发冲突换代理、显式代理冲突 fail-closed、IPv6 canonical、释放冷却、浏览器出口漂移、预检跳过时的实际 IP reservation、保留窗口时不释放以及 `randomFingerprint` 强制字段。
+
+### 密码与 2FA 交叉复核
+
+- 最新 14:42 五个日志均出现密码确认检查点、MFA enroll/activate 完成和 Token 校验成功；未发现密码或 TOTP Secret 在出口冲突/漂移前落盘的路径。
+- 较早的单条失败日志仍明确标记 `stage=cookie_import`、`cookie_auth_missing`，与代理隔离、密码提交和 2FA activate 失败分开；本轮没有把它重新归类为网络失败。
+- 现有 checkpoint 规则保持：密码仅在页面成功终态确认后保存，TOTP Secret 仅在 enroll/activate 成功后保存；本轮新增的 isolation 摘要不含 Cookie、Token 或 Secret。
+
+### 仍保留的边界
+
+- reservation 与冷却是当前 Python 进程共享的线程安全状态；不同进程（例如 CLI 与 WebUI 同时运行）不共享，运行策略应保持串行。
+- `coreVersion=152` 是本机 Roxy runtime 版本，不能通过注册 payload 安全随机化；真正的 Profile 指纹由 Roxy `randomFingerprint` 生成，需在 Roxy 客户端升级后重新核对响应摘要。
+- 代理池若多个端点实际汇聚到同一出口，系统会减少可用账号数而不是复用 IP；这是预期的 fail-closed 行为。
+
+### 本轮回归结果
+
+- 基线定向：`146 passed in 1.05s`；修改后定向：`158 passed in 1.50s`。
+- 基线全量：`716 passed, 16 subtests passed in 64.28s (0:01:04)`；修改后全量：`728 passed, 16 subtests passed in 64.83s (0:01:04)`。
+- 完整命令、退出状态、hash 与 rollback 结果见项目根目录 `VERIFICATION.txt`。
+
+## 本次 Roxy 指纹生成字段复核（2026-09-03）
+
+### 高概率 / 中概率 / 低概率原因
+
+- **高概率**：历史 `/browser/create` 没有显式传 `randomFingerprint`，Roxy 可能按模板/默认值生成 Profile；该缺口已在本轮修复。
+- **中概率**：每账号虽然创建了独立 `dirId`，但系统类型或 runtime `coreVersion` 长期相同；当前仍由已安装 runtime 返回 `coreVersion=152`，这不等同于底层 Profile 指纹相同。
+- **低概率**：本地 Selenium 在启动后覆盖 Roxy 生成的 `navigator` 或语言/时区，造成 Profile 内部不一致；当前流程不写入这些指纹字段，仍以 Roxy Profile 为准。
+
+### 证据、Path 与修复
+
+- **Evidence**：上游锁定 commit 的 `vendor/.../core/roxybrowser_client.py::create_profile` 明确把 `randomFingerprint` 写入 `/browser/create` payload；本轮本地请求体已在模板/调用参数合并后强制为真。
+- **Finding**：独立 Profile 生命周期不能单独证明每个底层字段都不同；但请求已明确交给 Roxy 的随机指纹生成器，避免旧模板静默关闭该能力。
+- **Path**：`core/roxybrowser_client.py::RoxyBrowserClient.create_profile`。
+- **Fix**：在现有 payload 合并后强制 `randomFingerprint=True`，防止模板或调用方关闭；不新增平行开关，不写入虚构 `fingerInfo`/`coreVersion`/地区字段，不改 Selenium `navigator`。
+- **验证**：新增 `tests/test_roxy_proxy_enforcement.py::test_profile_create_always_requests_fresh_random_fingerprint`，覆盖模板和调用参数均为 false 时最终请求字段仍为 true；出口唯一性由 `open_profile`/代理 reservation 与 `_verify_registration_exit_geo` 单独核验。
+
+### 边界
+
+`randomFingerprint=True` 是向 Roxy 请求新指纹生成的可验证输入，不是对每个底层字段已不同的承诺；`coreVersion` 可以因本机安装版本而保持一致，属于 runtime 版本而非账号标识。实际出口 IP 现由独立 reservation 和窗口内出口复核保护，随机抽取本身仍不等于唯一 IP。

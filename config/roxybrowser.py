@@ -114,7 +114,7 @@ ROXY_API_RETRY_DELAY: int = 1
 
 # 环境生命周期：
 #   True  = 一号一环境：每个账号强制创建新 Profile，用完关闭并删除，不允许复用 ROXY_PROFILE_ID
-#   False = 可复用 ROXY_PROFILE_ID 或只关闭不删除
+#   False = 仅供维护/调试流程复用；Roxy 注册入口会 fail-closed，拒绝复用
 ROXY_ONE_PROFILE_PER_ACCOUNT: bool = True
 
 # 一号一环境结束后是否删除 Profile。建议保持 True。
@@ -125,7 +125,8 @@ ROXY_DELETE_PATH: str = "/browser/delete"
 ROXY_DELETE_METHOD: str = "POST"
 
 # 创建 Roxy 环境时随机系统指纹；开启后每次 /browser/create 在 Windows / macOS 里随机选一个，
-# 避免固定 macOS 指纹。
+# 避免固定 macOS 指纹。core/roxybrowser_client.py 还会强制发送
+# randomFingerprint=True，要求 Roxy 为每个新 Profile 生成完整随机指纹。
 ROXY_RANDOM_OS_ON_CREATE: bool = True
 ROXY_RANDOM_OS_CHOICES: str = "Windows,macOS"
 
@@ -154,6 +155,8 @@ ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS: int = 3
 ROXY_PROXY_PREFLIGHT_RETRY_DELAY: float = 0.5
 
 # 窗口启动后再从 Selenium 上下文复核实际出口 IP；仍失败则终止注册。
+# 预检得到的真实出口 IP 会在进程内原子占用，并在释放后保留 15 分钟冷却，
+# 防止并发或紧邻的下一个账号复用同一出口；若窗口内 IP 与预检漂移则 fail-closed。
 ROXY_BROWSER_EXIT_IP_ATTEMPTS: int = 1
 ROXY_BROWSER_EXIT_IP_RETRY_DELAY: float = 0.5
 

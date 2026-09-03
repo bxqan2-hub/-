@@ -154,8 +154,8 @@
 - 上游锁定 commit 仍为 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；本次没有发现需要同步的上游注册协议变更。Roxy 官方字段和画像建议另以 [API endpoint 文档](https://roxybrowser.com/docs/api-documentation/api-endpoint.html) 与 [Profile configuration 文档](https://roxybrowser.com/docs/features/profile-configuration.html) 为准。
 - 证据：`core/browser_traffic.py` 使用共享目录 `data/browser_static_cache`，原请求分类器在无 Cookie 时仍会把 `/backend-api/`、`/sentinel/`、`/cdn-cgi/challenge-platform/` 和 `/unauth-mweb/scripts/` 脚本判为可缓存；现已收窄为仅 `/assets/`、`/cdn/assets/`、`/_next/static/`、`/unauth-mweb/assets/` 公共静态前缀，挑战、Sentinel、后端和未认证脚本必须走当前 Profile 的实时网络。
 - 现有缓存盘点为 2811 个 metadata/body 对，未发现 `set-cookie`、`authorization`、`cookie` 或 `proxy-authorization` 敏感头；旧的非公共条目保留在磁盘但在新分类器下不会再被写入或回放。
-- 代理证据：当前 `ROXY_CREATE_USE_PROXY_POOL=True`、`PROXY_API_ENABLED=False`、静态池 200 条、`PROXY_POOL_ACTIVE` 为空，选择路径是 `config/proxy.py::_pick_static_or_system_proxy` 的 `random.choice(available)`。随机只代表抽取随机，不代表出口 IP 唯一；最新四条成功日志中两条 Profile 实际复用了出口 IP `72.82.55.137`，因此当前没有“一号一独立出口 IP”保证。当前 200 条池条目均标记 `region-US`，所以本批随机的是 US 会话线路，不是随机国家。
-- Roxy 证据：`ROXY_ONE_PROFILE_PER_ACCOUNT=True` 且 `ROXY_DELETE_PROFILE_AFTER_RUN=True`，每次创建的 Profile ID 不同并在结束后删除；`ROXY_RANDOM_OS_ON_CREATE=True` 只在 `Windows,macOS` 中随机系统，`coreVersion` 未由本地 payload 指定，最新日志全部由已安装 Roxy runtime 返回 `152`，因此浏览器内核当前固定为 152 而非随机。`fingerInfo` 未在本地 `/browser/create` payload 中显式设置，语言/时区/地理联动不能仅凭 `BROWSER_LOCALE_PROFILE` 推断为 Roxy 可见指纹。
+- 代理证据：当前 `ROXY_CREATE_USE_PROXY_POOL=True`、`PROXY_API_ENABLED=False`、静态池 200 条、`PROXY_POOL_ACTIVE` 为空，候选仍由 `config/proxy.py::_pick_static_or_system_proxy` 的 `random.choice(available)` 抽取；历史重复 `72.82.55.137` 已由 `open_profile` 的真实出口 IP reservation 路径覆盖。预检冲突时会排除候选、轮换并在池耗尽时 fail-closed；释放后 15 分钟内仍拒绝同一 IP。当前 200 条池条目均标记 `region-US`，所以本批随机的是 US 会话线路，不是随机国家。
+- Roxy 证据：`ROXY_ONE_PROFILE_PER_ACCOUNT=True` 且 `ROXY_DELETE_PROFILE_AFTER_RUN=True`，每次创建的 Profile ID 不同并在结束后删除；`ROXY_RANDOM_OS_ON_CREATE=True` 只在 `Windows,macOS` 中随机系统，`coreVersion` 未由本地 payload 指定，最新日志全部由已安装 Roxy runtime 返回 `152`，因此浏览器内核当前固定为 152 而非随机。对照上游后，本地 `/browser/create` 现强制发送 `randomFingerprint=True`；`fingerInfo`/语言/时区仍不由本地伪造，以 Roxy 返回和窗口内出口复核为准。
 - 详细证据、Finding→Path、修复和验证记录见 `docs/2026-09-03_注册缓存与Roxy独立画像审计-report.md`。
 - 上游与本站缓存实现的逐项差异见 `docs/2026-09-03_上游与本站流量缓存机制对比-report.md`；本次继续优化已将本站跨 Profile miss 合并删除，认证凭据请求绕过共享缓存，公共路径 Cookie 请求仅复用明确 `public` 的已校验 body，并过滤边缘/时间响应头，当前冷启动回源行为与上游一致且回放头更窄。
 
@@ -168,9 +168,26 @@
 - 本地还绕过请求侧重新验证指令，拒绝除 `Accept-Encoding` 外的 `Vary`、非 200 读回条目和含 dot-segment/反斜杠路径，并合并检查重复响应头；新增 `cache_candidates`/`cache_writes` 指标，供日志和账号列表区分 0 候选与真实 0 命中。
 - 本地 refresh salt 改为 `secrets.token_bytes(16)`；最新 5MB/0 命中批次的证据与修复结果见 `docs/2026-09-03_注册缓存与Roxy独立画像审计-report.md` 和 `VERIFICATION.txt`。
 
+## 本次账号级出口/IP 与 Roxy 指纹隔离（2026-09-03）
+
+- 上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `create_profile` 明确提交 `randomFingerprint`；本地在模板和调用 payload 合并后强制为 `True`，并用 `secrets` 生成系统/环境名随机值。
+- `config/proxy.py` 新增 canonical IP reservation、owner 校验、15 分钟 reuse cooldown 和清理接口；`core/roxybrowser_client.py::open_profile` 在创建前预检并占用真实 IP，`core/roxy_registration.py::_verify_registration_exit_geo` 在 Selenium 上下文复核漂移/重复，`cleanup_profile` 在终态释放或保留现场时继续持有。
+- 出口冲突/漂移在 `core/roxy_registration.py` 中标记为 `stage=proxy_isolation`，与代理传输、邮箱 OTP、密码和 2FA 失败分开统计。
+- 账号 `extra_json.roxybrowser.isolation` 记录无凭据摘要（Profile、core、OS、出口 IP、验证来源）；本轮不新增代理凭据字段，也不记录 Cookie、Authorization、Token 或 TOTP Secret。
+- 同一 Python 进程线程池内已保证并发 IP 不重复；不同进程（CLI/多个 WebUI）尚未共享 reservation，需串行运行。详细高/中/低原因、证据和测试见 `docs/2026-09-03_注册缓存与Roxy独立画像审计-report.md`。
+- 验证：基线定向 `146 passed`、修改后定向 `158 passed`；基线全量 `716 passed, 16 subtests passed`、修改后全量 `728 passed, 16 subtests passed`。
+
 ## 本次 5MB / 0 命中回归复核（2026-09-03）
 
 - 最新 14:08–14:09 五个注册日志均为 `downloaded=5.60–5.89MB`、`cached=0`、`hits=0`、`misses=0`、`errors=0`；原因已定位为 Cookie 请求在候选缓存判断前被短路，非缓存目录损坏。
 - 对照附件 `C:\Users\Administrator\Downloads\注册流量优化复现与使用教程.docx` 的公开 JS/CSS 分层原则，本地现在允许严格公共路径的 Cookie 请求复用已验证公共 body；Cookie 仍不进入 key、metadata 或回放头。
 - 响应写入/读回要求 `Cache-Control: public`、status=200、无私有/画像变体指令；认证、挑战、Sentinel、API、Authorization 和 Proxy-Authorization 继续实时联网。
-- `cache_candidates` 与 `cache_writes` 已从 `core/browser_traffic.py` 传入注册摘要、Roxy 日志和账号列表，后续日志可直接区分候选为 0 与真实 0 命中；本次定向回归 68 项、全量回归 716 项。
+- `cache_candidates` 与 `cache_writes` 已从 `core/browser_traffic.py` 传入注册摘要、Roxy 日志和账号列表，后续日志可直接区分候选为 0 与真实 0 命中；前一轮缓存定向为 68 项、全量为 716 项，本轮 IP/指纹隔离回归结果见上方。
+
+## 本次 Roxy 指纹生成字段显式映射（2026-09-03）
+
+- 上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `core/roxybrowser_client.py::create_profile` 会在 `/browser/create` payload 中显式发送 `randomFingerprint`，默认值为真；该字段由 Roxy 负责生成整套 Profile 指纹，不应由本地 Selenium 再改写 `navigator`。
+- 本地原路径此前只随机 `os` 与 `windowName`，没有发送 `randomFingerprint`；因此“每账号新建 Profile”不等于已确认调用 Roxy 的新指纹生成器。
+- 本次直接在现有 `create_profile` 路径强制写入 `randomFingerprint=True`，覆盖旧模板或调用方误传的 false；未新增开关、未伪造 `fingerInfo`、`coreVersion`、语言或时区值。`coreVersion` 继续由已安装 Roxy runtime 返回并记录为观察值。
+- `ROXY_ONE_PROFILE_PER_ACCOUNT=True`、注册前代理出口预检和代理 reservation 共同决定账号级环境/出口隔离；随机抽取本身不代表 IP 唯一，IP 冲突由代理层单独处理。
+- 验证覆盖：`tests/test_roxy_proxy_enforcement.py::test_profile_create_always_requests_fresh_random_fingerprint`，并检查模板与调用 payload 传 false 时最终请求仍为 true；未记录 Cookie、Token、邮箱或 MFA Secret。

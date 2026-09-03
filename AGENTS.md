@@ -26,6 +26,7 @@
 - ChatGPT 注册、设置密码和 2FA 的实现必须先对照 `docs/UPSTREAM_PROJECT_INDEX.md` 锁定的 `Torin-x/GPT-utral-platform` commit，再保留本地安全边界（账号邮箱匹配、同一浏览器 Cookie/代理、Token 显式透传、enroll/activate 成功确认和脱敏日志）。
 - 密码只有在页面进入成功终态后写入 checkpoint；TOTP Secret 只有 enroll/activate 返回成功后保存；任何只读 Token 校验失败都必须与远端写操作失败分开记录。
 - 失败修复完成后必须同时复核密码与 2FA 流程的缺陷/越权/凭据泄露风险，并把证据、Finding、Path 和验证结果写入项目 `docs/` 报告。
+- Roxy 批量注册时每个账号必须创建独立 Profile 并请求独立随机指纹；代理只能先随机抽取候选，随后必须以真实出口 IP 预检、原子占用和窗口内复核确认，禁止在同一运行进程内复用已占用或刚释放的出口。代理冲突、漂移或无法核对时直接终止该账号，不以“请求失败”掩盖路由特征问题；多个 CLI/WebUI 进程需串行运行，直到接入共享 lease。
 
 ## Payment / extraction integrations
 

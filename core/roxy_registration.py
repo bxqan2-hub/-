@@ -62,6 +62,16 @@ def _is_proxy_transport_failure(value) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _is_proxy_isolation_failure(value) -> bool:
+    """Identify a verified-route collision or drift separately from transport."""
+    text = f"{type(value).__name__}: {value}"
+    return any(marker in text for marker in (
+        "出口 IP 与并发注册任务重复",
+        "注册出口 IP 已被其他并发任务占用",
+        "出口 IP 与创建前预检不一致",
+    ))
+
+
 def _ensure_local_proxy_bypass() -> None:
     """Keep Selenium/Roxy local control traffic out of Clash/system proxies."""
     values: list[str] = []
@@ -3481,17 +3491,76 @@ def _release_roxy_registration_email_failure(
     return "mailbox_failure" if mailbox_failure else "available"
 
 
-def _select_registration_exit_geo(browser_geo: dict | None, preflight_geo: dict | None, *, has_proxy: bool) -> dict:
-    """优先使用窗口实测；探测站临时无响应时保留同一代理的创建前预检结果。"""
-    selected = dict(browser_geo or {})
-    if selected.get("ip"):
-        selected["verification_source"] = "browser_context"
-        return selected
-    fallback = dict(preflight_geo or {})
-    if has_proxy and fallback.get("ip"):
-        fallback["verification_source"] = "same_proxy_preflight_fallback"
-        return fallback
-    return {}
+def _verify_registration_exit_geo(
+    client: RoxyBrowserClient,
+    opened: RoxyOpenResult,
+    browser_geo: dict | None,
+) -> dict:
+    """Verify that the live Roxy window kept the preflight exit route.
+
+    A proxy endpoint is only a candidate until the real public IP is observed.
+    The preflight reservation protects the create/open race; this second gate
+    prevents a proxy that rotated or was ignored by Roxy from silently being
+    used for registration.  When the browser probe is temporarily empty, the
+    already-reserved same-proxy preflight result remains the explicit fallback.
+    """
+    from config import proxy as _proxy_cfg
+
+    preflight = dict(getattr(opened, "preflight_exit_geo", None) or {})
+    browser = dict(browser_geo or {})
+    preflight_ip = _proxy_cfg.normalize_exit_ip(preflight.get("ip"))
+    browser_ip = _proxy_cfg.normalize_exit_ip(browser.get("ip"))
+
+    if browser_ip and preflight_ip and browser_ip != preflight_ip:
+        # Claim the actually observed address before aborting, so another
+        # worker cannot start on it during this profile's cleanup window.
+        if not client.reconcile_registration_exit_ip(browser_ip):
+            raise RuntimeError(
+                f"Roxy 浏览器实际出口 IP 与并发注册任务重复：ip={browser_ip}；"
+                "已终止注册并回收当前环境"
+            )
+        raise RuntimeError(
+            f"Roxy 浏览器出口 IP 与创建前预检不一致：preflight={preflight_ip} browser={browser_ip}；"
+            "疑似代理漂移或 proxyInfo 未生效，已终止注册"
+        )
+
+    selected = ({**preflight, **browser} if browser_ip else dict(preflight))
+    selected_ip = browser_ip or preflight_ip
+    if not selected_ip:
+        return {}
+    if not client.reconcile_registration_exit_ip(selected_ip):
+        raise RuntimeError(
+            f"Roxy 注册出口 IP 已被其他并发任务占用：ip={selected_ip}；已终止注册"
+        )
+    selected["ip"] = selected_ip
+    selected["verification_source"] = "browser_context" if browser_ip else "same_proxy_preflight_fallback"
+    return selected
+
+
+def _profile_isolation_summary(
+    client: RoxyBrowserClient,
+    opened: RoxyOpenResult,
+    exit_geo: dict,
+) -> dict:
+    """Build a credential-free audit summary for the account record/log."""
+    # ``RoxyOpenResult.raw`` reports the installed core; the create payload
+    # summary is kept on the same client so the requested random fingerprint
+    # and selected OS can be audited even when the open response omits them.
+    create_summary = dict(getattr(client, "_last_profile_create_summary", {}) or {})
+    raw = getattr(opened, "raw", None) or {}
+    data = raw.get("data") if isinstance(raw, dict) else {}
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "profile_id": str(getattr(opened, "profile_id", "") or ""),
+        "fingerprint_requested": bool(create_summary.get("fingerprint_requested", True)),
+        "os": str(create_summary.get("os") or data.get("os") or data.get("operatingSystem") or "") or None,
+        "os_version": str(create_summary.get("os_version") or data.get("osVersion") or data.get("os_version") or "") or None,
+        "core_version": str(data.get("coreVersion") or data.get("core_version") or "") or None,
+        "exit_ip": str(exit_geo.get("ip") or "") or None,
+        "exit_country": str(exit_geo.get("country") or "") or None,
+        "exit_verification_source": str(exit_geo.get("verification_source") or "") or None,
+    }
 
 
 def run_roxy_registration(
@@ -3504,6 +3573,22 @@ def run_roxy_registration(
     skip_proxy_preflight: bool = False,
 ) -> dict:
     """Roxy 指纹浏览器自动化注册入口。"""
+    if not bool(getattr(_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True)):
+        # Registration must never reuse a Profile that may contain another
+        # account's cookies, storage, or fingerprint state.  The generic
+        # client still supports reuse for non-registration maintenance flows;
+        # this entry point is intentionally fail-closed.
+        message = "Roxy 注册要求 ROXY_ONE_PROFILE_PER_ACCOUNT=True；已拒绝复用已有 Profile"
+        logger.error("[Roxy注册] %s", message)
+        return {
+            "success": False,
+            "email": email,
+            "account_id": None,
+            "access_token": None,
+            "totp_secret": None,
+            "security_ok": False,
+            "error": message,
+        }
     client = RoxyBrowserClient(profile_proxy=proxy)
     try:
         from core.registration_service import bind_roxy_profile
@@ -3521,6 +3606,7 @@ def run_roxy_registration(
     openai_password: str | None = None
     password_state: dict[str, str | None] = {"desired": None, "configured": None}
     registration_exit_geo: dict = {}
+    profile_isolation: dict = {}
     try:
         driver = _build_driver(opened)
         _center_browser_window(driver)
@@ -3539,10 +3625,20 @@ def run_roxy_registration(
             retry_delay=float(getattr(_cfg, "ROXY_BROWSER_EXIT_IP_RETRY_DELAY", 2) or 2),
             stop_check=_check_manual_stop,
         )
-        registration_exit_geo = _select_registration_exit_geo(
+        registration_exit_geo = _verify_registration_exit_geo(
+            client,
+            opened,
             registration_exit_geo,
-            getattr(opened, "preflight_exit_geo", None),
-            has_proxy=bool(getattr(client, "profile_proxy", None)),
+        )
+        profile_isolation = _profile_isolation_summary(client, opened, registration_exit_geo)
+        logger.info(
+            "[Roxy注册] 独立环境校验通过：profile=%s fingerprint_requested=%s exit_ip=%s source=%s coreVersion=%s os=%s",
+            profile_isolation.get("profile_id") or "-",
+            profile_isolation.get("fingerprint_requested"),
+            profile_isolation.get("exit_ip") or "-",
+            profile_isolation.get("exit_verification_source") or "-",
+            profile_isolation.get("core_version") or "-",
+            profile_isolation.get("os") or "-",
         )
         if registration_exit_geo.get("verification_source") == "same_proxy_preflight_fallback":
             logger.warning(
@@ -3981,7 +4077,11 @@ def run_roxy_registration(
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
                 "expires": (twofa_result.expires if twofa_result and twofa_result.expires else session_info.get("expires")),
-                "roxybrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
+                "roxybrowser": {
+                    "profile_id": opened.profile_id,
+                    "open_result": opened.raw,
+                    "isolation": profile_isolation,
+                },
                 "registration_password": (twofa_result.password if twofa_result and twofa_result.password else openai_password),
                 "codex": codex_result,
                 "registration_traffic": traffic_summary,
@@ -4025,7 +4125,10 @@ def run_roxy_registration(
             "error": result_error,
         }
     except Exception as exc:
-        if _is_proxy_transport_failure(exc):
+        if _is_proxy_isolation_failure(exc):
+            logger.warning("[Roxy注册][隔离] 当前 Profile 的真实出口未通过唯一性核对：%s", str(exc)[:260])
+            error_text = f"stage=proxy_isolation; {type(exc).__name__}: {str(exc)[:260]}"
+        elif _is_proxy_transport_failure(exc):
             # 当前入口由 registration_service 统一调度；这里保留稳定 stage，
             # 让任务重试按钮/邮箱状态处理能区分坏代理与页面业务拒绝。
             logger.warning("[Roxy注册][代理] 当前代理连接失败，记录为可轮换节点：%s", str(exc)[:240])
@@ -4057,10 +4160,12 @@ def run_roxy_registration(
     finally:
         if traffic_optimizer is not None:
             _finish_traffic_optimizer(traffic_optimizer)
-        if driver and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
+        if driver and not bool(getattr(opened, "keep_open", False)):
             try:
                 driver.quit()
             except Exception:
                 pass
-        if not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
-            client.cleanup_profile(opened)
+        # cleanup_profile uses the keep_open value captured at open time, so a
+        # hot config reload cannot skip closure/release for an already-opened
+        # registration Profile.
+        client.cleanup_profile(opened)

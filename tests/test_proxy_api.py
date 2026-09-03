@@ -15,6 +15,10 @@ class ProxyApiTests(unittest.TestCase):
         proxy_cfg._PROXY_API_CACHE["proxy"] = ""
         proxy_cfg._PROXY_API_CACHE["expires_at"] = 0.0
         proxy_cfg._PROXY_API_FLIGHTS.clear()
+        proxy_cfg.reset_registration_exit_ip_reservations(clear_history=True)
+
+    def tearDown(self):
+        proxy_cfg.reset_registration_exit_ip_reservations(clear_history=True)
 
     def test_normalizes_fullwidth_socks5_punctuation(self):
         self.assertEqual(
@@ -374,6 +378,25 @@ class ProxyApiTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "api down"):
                 proxy_cfg.pick_proxy()
         fallback.assert_not_called()
+
+    def test_pick_proxy_bypasses_api_cache_when_excluding_a_colliding_endpoint(self):
+        with (
+            patch.object(proxy_cfg, "PROXY_API_ENABLED", True),
+            patch.object(proxy_cfg, "fetch_proxy_from_api", return_value="socks5h://2.2.2.2:1080") as fetch,
+            patch.object(proxy_cfg, "_pick_static_or_system_proxy", return_value="") as fallback,
+        ):
+            value = proxy_cfg.pick_proxy(excluded={"socks5h://1.1.1.1:1080"})
+        self.assertEqual(value, "socks5h://2.2.2.2:1080")
+        fetch.assert_called_once_with(force=True)
+        fallback.assert_not_called()
+
+    def test_registration_exit_ip_reservation_is_canonical_and_owner_scoped(self):
+        self.assertEqual(proxy_cfg.normalize_exit_ip("[2001:0db8::7]"), "2001:db8::7")
+        self.assertTrue(proxy_cfg.reserve_registration_exit_ip("2001:0db8::7", "owner-a"))
+        self.assertTrue(proxy_cfg.reserve_registration_exit_ip("2001:db8:0:0:0:0:0:7", "owner-a"))
+        self.assertFalse(proxy_cfg.reserve_registration_exit_ip("2001:db8::7", "owner-b"))
+        self.assertFalse(proxy_cfg.release_registration_exit_ip("2001:db8::7", "owner-b"))
+        self.assertTrue(proxy_cfg.release_registration_exit_ip("2001:db8::7", "owner-a"))
 
     def test_strict_pick_proxy_uses_selected_static_entry(self):
         selected = "http://user:pass@proxy-two.example:8080"
