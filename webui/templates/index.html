@@ -23,7 +23,7 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       background: var(--bg); color: var(--text);
     }
-    body.modal-open { overflow: hidden; position: fixed; left: 0; right: 0; width: 100%; }
+    body.modal-open { overflow: hidden; }
     h1, h2, h3, p { margin: 0; }
     .stats {
       display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -4068,7 +4068,6 @@ async function refreshJobs() {
   } catch(e) {}
 }
 
-let modalScrollY = 0;
 function updateModalScrollLock() {
   const opened = !$('#logPanel').classList.contains('hidden')
     || !$('#retryLogPanel').classList.contains('hidden')
@@ -4084,15 +4083,11 @@ function updateModalScrollLock() {
     || !$('#detectionProxyImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
-    modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
-    document.body.style.top = `-${modalScrollY}px`;
     document.body.classList.add('modal-open');
     document.documentElement.style.overflow = 'hidden';
   } else if (!opened && locked) {
     document.body.classList.remove('modal-open');
-    document.body.style.top = '';
     document.documentElement.style.overflow = '';
-    window.scrollTo(0, modalScrollY || 0);
   }
 }
 function closeLogModal() {

@@ -121,6 +121,16 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn("bind('btnCopySelectedOutlookEmailsV2', () => copySelectionEmails({emails:selectedOutlookEmails()}))", html)
         self.assertIn("'btnCopySelectedOutlookEmailsV2',", html)
 
+    def test_modal_scroll_lock_does_not_fix_the_whole_page(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("body.modal-open { overflow: hidden; }", html)
+        self.assertNotIn("body.modal-open { overflow: hidden; position: fixed", html)
+        self.assertNotIn("document.body.style.top", html)
+        self.assertNotIn("modalScrollY", html)
+        self.assertIn("document.documentElement.style.overflow = 'hidden';", html)
+        self.assertIn("document.documentElement.style.overflow = '';", html)
+
     @patch("webui.app.db.get_account")
     def test_account_secret_single_and_bulk_routes_return_allowlisted_values(self, get_account):
         get_account.side_effect = lambda account_id: {
