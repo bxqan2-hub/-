@@ -33,6 +33,7 @@ def _float_setting(name: str, default: float, lower: float, upper: float) -> flo
 
 
 _MIN_WORKERS = 1
+_MAX_WORKERS = 64
 _DEFAULT_WORKERS = max(_MIN_WORKERS, int(getattr(proxy_cfg, "PLAN_CHECK_WORKERS", 10) or 10))
 _QUEUE_LIMIT = _int_setting("PLAN_CHECK_QUEUE_LIMIT", 500, _DEFAULT_WORKERS, 5000)
 _EXECUTOR_LOCK = threading.RLock()
@@ -55,7 +56,9 @@ def _normalize_workers(max_workers: int | None) -> int:
         value = int(max_workers)
     except (TypeError, ValueError):
         value = _DEFAULT_WORKERS
-    return max(_MIN_WORKERS, value)
+    # Keep API/UI supplied concurrency bounded so a malformed request cannot
+    # allocate an unbounded number of network workers.
+    return min(_MAX_WORKERS, max(_MIN_WORKERS, value))
 
 
 def get_executor(max_workers: int | None = None) -> ThreadPoolExecutor:

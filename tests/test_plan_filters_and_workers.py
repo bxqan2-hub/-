@@ -562,7 +562,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
 
     def test_worker_count_has_no_fixed_upper_bound(self):
         self.assertEqual(plan_check_service._normalize_workers(0), 1)
-        self.assertEqual(plan_check_service._normalize_workers(99), 99)
+        self.assertEqual(plan_check_service._normalize_workers(99), 64)
 
 
 class PlanCheckBulkApiTests(unittest.TestCase):

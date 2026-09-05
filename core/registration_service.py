@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # 全局线程池（WebUI 每次提交时可按最新 workers 重建）
 _DEFAULT_MAX_WORKERS = 10
 _MIN_MAX_WORKERS = 1
+_MAX_MAX_WORKERS = 64
 _executor: ThreadPoolExecutor | None = None
 _executor_workers = _DEFAULT_MAX_WORKERS
 _executor_generation = 0
@@ -281,7 +282,9 @@ def _normalize_workers(max_workers: int | None) -> int:
         value = int(max_workers)
     except (TypeError, ValueError):
         value = _DEFAULT_MAX_WORKERS
-    return max(_MIN_MAX_WORKERS, value)
+    # A client supplied worker count must not be able to create an unbounded
+    # number of browser/network threads and exhaust the host.
+    return min(_MAX_MAX_WORKERS, max(_MIN_MAX_WORKERS, value))
 
 
 def get_executor(max_workers: int | None = None) -> ThreadPoolExecutor:
