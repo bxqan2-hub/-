@@ -280,3 +280,7 @@
 - `core/db.py` 旧 SQLite 迁移按记录隔离异常，避免坏数据阻断整批导入。
 - `core/email_provider.py::release_email` 合并邮箱源释放分支，减少平行调用路径。
 - 验证：定向 `32 passed`、迁移冒烟通过；全量 `750 passed, 16 subtests passed`。
+
+## 第四批审计（2026-09-05）
+
+- `core/browser_traffic.py`、`core/browser_use_registration.py` 已完成调用链与测试覆盖复核，未发现可安全删除的堆积代码，因此保持实现不变。
