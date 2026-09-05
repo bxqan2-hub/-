@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import tempfile
+import importlib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -86,6 +87,22 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
                 self.assertEqual(env_loader.env_list("LIST_KEY", ["a"]), ["a"])
         finally:
             env_loader._LOADED = old_loaded
+
+    def test_email_otp_settle_seconds_is_hot_reloadable(self):
+        from config import email
+
+        old_loaded = env_loader._LOADED
+        try:
+            env_loader._LOADED = True
+            with patch.dict(os.environ, {"OTP_SETTLE_SECONDS": "9"}, clear=False):
+                importlib.reload(email)
+                self.assertEqual(email.OTP_SETTLE_SECONDS, 9)
+            with patch.dict(os.environ, {"OTP_SETTLE_SECONDS": "5"}, clear=False):
+                importlib.reload(email)
+                self.assertEqual(email.OTP_SETTLE_SECONDS, 5)
+        finally:
+            env_loader._LOADED = old_loaded
+            importlib.reload(email)
 
     def test_proxy_pool_blank_env_value_means_empty_list(self):
         old_loaded = env_loader._LOADED

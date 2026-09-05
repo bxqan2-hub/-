@@ -364,57 +364,25 @@ class _JobLogContext:
             logging.getLogger().removeHandler(self.handler)
 
 
-def _enqueue_checkout_kind_after_registration(
-    result: dict[str, Any],
-    *,
-    job_id: int,
-    log_logger: logging.Logger | None = None,
-) -> dict[str, Any] | None:
-    account_id = result.get("account_id")
-    access_token = str(result.get("access_token") or "").strip()
-    if account_id is None or not access_token:
-        return None
-    active_logger = log_logger or logger
-    try:
-        from core import checkout_kind_service
-
-        queued = checkout_kind_service.enqueue(
-            account_id=int(account_id),
-            access_token=access_token,
-            trigger="registration_success",
-        )
-        if queued.get("accepted"):
-            active_logger.info("[Job %s] AT 已落库，已自动开始 Checkout 类型查询", job_id)
-        else:
-            active_logger.warning("[Job %s] Checkout 类型自动查询未入队：%s", job_id, queued.get("error"))
-        return queued
-    except Exception:
-        active_logger.exception("[Job %s] 自动开始 Checkout 类型查询失败", job_id)
-        return None
-
-
 def _run_one_job(job_id: int, log_file: str) -> None:
     """单任务入口（线程池里跑这个）。"""
     log_logger = logging.getLogger(__name__)
-    _activate_job(job_id)
-
-    # 取消检查：用户可能在任务排队期间点了"取消排队"，把 status 改成了 cancelled。
-    # 因为 Future 已经 submit 进线程池无法撤回，只能在真正执行前自检一下，跳过 cancelled 的。
-    current = db.start_pending_job(job_id, started_at=datetime.now().isoformat(timespec="seconds"))
-    if current is None:
-        current = db.get_job(job_id)
-        if not current:
-            log_logger.info(f"[Job {job_id}] 任务记录已删除，跳过执行")
-        elif current.get("status") == "cancelled":
-            _release_unconsumed_job_email(current.get("email"), "排队任务已取消")
-            log_logger.info(f"[Job {job_id}] 已被用户取消，跳过执行")
-        else:
-            log_logger.info(f"[Job {job_id}] 当前状态为 {current.get('status')}，跳过重复执行")
-        _deactivate_job(job_id)
-        return
-
     email: str | None = None
     try:
+        _activate_job(job_id)
+        # Future 已入队，启动前核对取消/删除状态；所有退出共用 finally 清理。
+        current = db.start_pending_job(job_id, started_at=datetime.now().isoformat(timespec="seconds"))
+        if current is None:
+            current = db.get_job(job_id)
+            if not current:
+                log_logger.info(f"[Job {job_id}] 任务记录已删除，跳过执行")
+            elif current.get("status") == "cancelled":
+                _release_unconsumed_job_email(current.get("email"), "排队任务已取消")
+                log_logger.info(f"[Job {job_id}] 已被用户取消，跳过执行")
+            else:
+                log_logger.info(f"[Job {job_id}] 当前状态为 {current.get('status')}，跳过重复执行")
+            return
+
         with _JobLogContext(log_file):
             from main import run_registration
             log_logger.info(f"[Job {job_id}] 开始注册任务")
@@ -555,15 +523,19 @@ def _reconcile_finished_registration_future(job_id: int, future: Any) -> None:
 
 def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int) -> None:
     """把 Codex 补跑作为标准任务执行，并复用任务状态、日志和停止入口。"""
-    _activate_job(job_id)
-    current = db.get_job(job_id)
-    if not current or current.get("status") == "cancelled":
-        codex_retry_service.release(email)
-        _deactivate_job(job_id)
-        return
-
-    db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
     try:
+        try:
+            _activate_job(job_id)
+            current = db.get_job(job_id)
+            if not current or current.get("status") == "cancelled":
+                codex_retry_service.release(email)
+                return
+            db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
+        except BaseException:
+            # worker 尚未接管占位；启动失败由任务入口释放。
+            codex_retry_service.release(email)
+            raise
+
         result = codex_retry_service.run_worker(
             email,
             clear_log=False,
@@ -596,7 +568,6 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
             error=f"{type(exc).__name__}: {exc}"[:500],
             completed_at=datetime.now().isoformat(timespec="seconds"),
         )
-        codex_retry_service.release(email)
         logger.exception("[Job %s] Codex 补跑异常", job_id)
     finally:
         _deactivate_job(job_id)

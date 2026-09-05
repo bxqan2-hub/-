@@ -8,6 +8,53 @@ from core import registration_service
 
 
 class RegistrationEmailSourceTests(unittest.TestCase):
+    @patch.object(registration_service, "is_stop_requested", return_value=False)
+    @patch.object(registration_service.db, "update_job")
+    @patch.object(registration_service.db, "get_job", side_effect=[{"id": 17}, RuntimeError("db unavailable")])
+    @patch.object(registration_service.db, "start_pending_job", return_value=None)
+    def test_startup_skip_lookup_error_cleans_thread_context(
+        self, _start_pending_job, _get_job, _update_job, _is_stop_requested
+    ):
+        registration_service._run_one_job(17, "registration.log")
+
+        self.assertIsNone(registration_service.current_job_id())
+        self.assertNotIn(17, registration_service._ACTIVE_JOBS)
+        self.assertNotIn(17, registration_service._STOP_EVENTS)
+
+    @patch.object(registration_service.codex_retry_service, "release")
+    @patch.object(registration_service.db, "update_job")
+    @patch.object(registration_service.db, "get_job", side_effect=RuntimeError("db unavailable"))
+    def test_codex_retry_startup_database_error_releases_reservation_and_context(
+        self, _get_job, _update_job, release
+    ):
+        registration_service._run_codex_retry_job(17, "registration.log", "user@example.com", 3)
+
+        release.assert_called_once_with("user@example.com")
+        self.assertIsNone(registration_service.current_job_id())
+        self.assertNotIn(17, registration_service._ACTIVE_JOBS)
+        self.assertNotIn(17, registration_service._STOP_EVENTS)
+
+    @patch.object(registration_service.codex_retry_service, "release")
+    @patch.object(registration_service.codex_retry_service, "run_worker")
+    @patch.object(registration_service.db, "update_job", side_effect=[None, RuntimeError("write failed"), None])
+    @patch.object(registration_service.db, "get_job", return_value={"id": 17, "status": "pending"})
+    def test_codex_result_write_error_does_not_release_new_reservation(
+        self, _get_job, update_job, run_worker, release
+    ):
+        # Model run_worker handing off its reservation and a newer retry reserving
+        # the same email before result persistence fails.
+        def worker_side_effect(*args, **kwargs):
+            release("user@example.com")
+            return {"ok": True, "status": "success"}
+
+        run_worker.side_effect = worker_side_effect
+        registration_service._run_codex_retry_job(17, "registration.log", "user@example.com", 3)
+
+        release.assert_called_once_with("user@example.com")
+        self.assertIsNone(registration_service.current_job_id())
+        self.assertNotIn(17, registration_service._ACTIVE_JOBS)
+        self.assertNotIn(17, registration_service._STOP_EVENTS)
+
     @patch("config.proxy.pick_local_proxy", return_value="http://127.0.0.1:7890")
     def test_local_proxy_mode_uses_static_or_system_pool(self, pick_local_proxy):
         self.assertEqual(

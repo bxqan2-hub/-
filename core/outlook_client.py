@@ -40,7 +40,6 @@ from curl_cffi.requests import Session as CurlSession
 from config import (
     OUTLOOK_ACCOUNTS_FILE,
     OUTLOOK_API_BASE,
-    OTP_SETTLE_SECONDS,
     USER_AGENT,
     IMPERSONATE,
 )
@@ -961,7 +960,7 @@ def fetch_latest_otp(
 
     deadline = time.time() + (max_wait or _email_cfg.OTP_MAX_WAIT)
     interval = poll_interval or _email_cfg.OTP_POLL_INTERVAL
-    settle = settle_seconds if settle_seconds is not None else OTP_SETTLE_SECONDS
+    settle = settle_seconds if settle_seconds is not None else _email_cfg.OTP_SETTLE_SECONDS
     session = _http_session()
 
     logger.info(

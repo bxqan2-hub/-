@@ -261,3 +261,10 @@
 - 定向：`.\\venv\\Scripts\\python.exe -m pytest -q tests\\test_twofa_registration.py tests\\test_roxy_registration_session_recovery.py tests\\test_roxy_registration_otp_recovery.py` → `124 passed`，退出 0。
 - 全量：`.\\venv\\Scripts\\python.exe -m pytest -q` → `742 passed, 16 subtests passed`，退出 0。
 - 编译：`.\\venv\\Scripts\\python.exe -m compileall -q config core webui tests` → `COMPILEALL_OK`，退出 0。
+
+## 本次只改不堆首轮收缩（2026-09-05）
+
+- 对照锁定上游 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 后未覆盖上游实现；仅修改本地既有路径。
+- `core/registration_service.py` 在 `_run_one_job`、`_run_codex_retry_job` 的启动异常边界补齐 `_deactivate_job()`，并删除无调用点的 `_enqueue_checkout_kind_after_registration` 私有死代码。
+- `config/email.py` 将已有 `OTP_SETTLE_SECONDS` 纳入环境覆盖 schema；`core/outlook_client.py::fetch_latest_otp` 改为读取 `_email_cfg.OTP_SETTLE_SECONDS`，使 WebUI/热加载后的值真正生效。
+- 验证：定向 `25 passed`、`compileall` 为 `COMPILEALL_OK`；全量 `749 passed, 16 subtests passed`。
