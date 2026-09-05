@@ -2,6 +2,8 @@
 setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
+rem Prefer the system Node.js installation so npm is available in the runtime self-check.
+if exist "%ProgramFiles%\nodejs" set "PATH=%ProgramFiles%\nodejs;%PATH%"
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set PORT=%~1
