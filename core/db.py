@@ -68,6 +68,8 @@ _LEGACY_ACCOUNTS_JSON = _LEGACY_DATA_DIR / "registered_accounts.json"
 _LEGACY_JOBS_JSON = _LEGACY_DATA_DIR / "registration_jobs.json"
 _LOCK = threading.RLock()
 logger = logging.getLogger(__name__)
+# 迁移源文件未变化时，避免每次调用都重新扫描历史数据。
+_LEGACY_MIGRATION_SIGNATURE: tuple | None = None
 
 
 def _now() -> str:
@@ -4764,14 +4766,27 @@ def migrate_legacy_files() -> dict:
     把历史 SQLite、accounts/*.json、outlook_accounts.txt、outlook_accounts_used.json
     迁移到当前 JSON/TXT 文件存储。多次调用是幂等的。
     """
+    global _LEGACY_MIGRATION_SIGNATURE
     summary = {
         "accounts_imported": 0,
         "outlook_imported": 0,
         "outlook_skipped": 0,
     }
+    # 仅依赖源文件元数据，不写入标记文件，避免迁移优化改变用户数据布局。
+    sources = [_LEGACY_SQLITE, _PROJECT_ROOT / "outlook_accounts.txt",
+               _OUTLOOK_TXT, _PROJECT_ROOT / "outlook_accounts_used.json"]
+    accounts_dir = _PROJECT_ROOT / "accounts"
+    if accounts_dir.exists():
+        sources.extend(sorted(accounts_dir.glob("*.json")))
+    signature = tuple(
+        (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        for path in sources if path.is_file()
+    )
+    with _LOCK:
+        if signature == _LEGACY_MIGRATION_SIGNATURE:
+            return summary
     summary.update(_migrate_legacy_sqlite())
 
-    accounts_dir = _PROJECT_ROOT / "accounts"
     if accounts_dir.exists():
         for jf in accounts_dir.glob("*.json"):
             try:
@@ -4830,6 +4845,8 @@ def migrate_legacy_files() -> dict:
         except Exception:
             pass
 
+    with _LOCK:
+        _LEGACY_MIGRATION_SIGNATURE = signature
     return summary
 
 
