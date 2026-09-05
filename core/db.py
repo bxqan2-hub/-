@@ -68,8 +68,6 @@ _LEGACY_ACCOUNTS_JSON = _LEGACY_DATA_DIR / "registered_accounts.json"
 _LEGACY_JOBS_JSON = _LEGACY_DATA_DIR / "registration_jobs.json"
 _LOCK = threading.RLock()
 logger = logging.getLogger(__name__)
-# 迁移源文件未变化时，避免每次调用都重新扫描历史数据。
-_LEGACY_MIGRATION_SIGNATURE: tuple | None = None
 
 
 def _now() -> str:
@@ -4712,13 +4710,14 @@ def _migrate_legacy_sqlite() -> dict:
     summary = {"sqlite_accounts_imported": 0, "sqlite_accounts_skipped": 0, "sqlite_outlook_imported": 0, "sqlite_outlook_skipped": 0}
     if not _LEGACY_SQLITE.exists():
         return summary
+    conn = None
     try:
         conn = sqlite3.connect(str(_LEGACY_SQLITE))
         conn.row_factory = sqlite3.Row
         if _table_exists(conn, "outlook_pool"):
             records = []
             statuses = []
-            for row in conn.execute("SELECT * FROM outlook_pool").fetchall():
+            for row in conn.execute("SELECT * FROM outlook_pool"):
                 records.append({
                     "email": row["email"],
                     "password": row["password"],
@@ -4737,7 +4736,7 @@ def _migrate_legacy_sqlite() -> dict:
             summary["sqlite_outlook_imported"] += ins
             summary["sqlite_outlook_skipped"] += skip
         if _table_exists(conn, "registered_accounts"):
-            for row in conn.execute("SELECT * FROM registered_accounts").fetchall():
+            for row in conn.execute("SELECT * FROM registered_accounts"):
                 try:
                     extra_raw = row["extra_json"]
                     try:
@@ -4755,9 +4754,11 @@ def _migrate_legacy_sqlite() -> dict:
                     summary["sqlite_accounts_imported"] += 1
                 except Exception:
                     summary["sqlite_accounts_skipped"] += 1
-        conn.close()
     except Exception as exc:
         summary["sqlite_error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if conn is not None:
+            conn.close()
     return summary
 
 
@@ -4766,27 +4767,14 @@ def migrate_legacy_files() -> dict:
     把历史 SQLite、accounts/*.json、outlook_accounts.txt、outlook_accounts_used.json
     迁移到当前 JSON/TXT 文件存储。多次调用是幂等的。
     """
-    global _LEGACY_MIGRATION_SIGNATURE
     summary = {
         "accounts_imported": 0,
         "outlook_imported": 0,
         "outlook_skipped": 0,
     }
-    # 仅依赖源文件元数据，不写入标记文件，避免迁移优化改变用户数据布局。
-    sources = [_LEGACY_SQLITE, _PROJECT_ROOT / "outlook_accounts.txt",
-               _OUTLOOK_TXT, _PROJECT_ROOT / "outlook_accounts_used.json"]
-    accounts_dir = _PROJECT_ROOT / "accounts"
-    if accounts_dir.exists():
-        sources.extend(sorted(accounts_dir.glob("*.json")))
-    signature = tuple(
-        (str(path), path.stat().st_mtime_ns, path.stat().st_size)
-        for path in sources if path.is_file()
-    )
-    with _LOCK:
-        if signature == _LEGACY_MIGRATION_SIGNATURE:
-            return summary
     summary.update(_migrate_legacy_sqlite())
 
+    accounts_dir = _PROJECT_ROOT / "accounts"
     if accounts_dir.exists():
         for jf in accounts_dir.glob("*.json"):
             try:
@@ -4845,8 +4833,6 @@ def migrate_legacy_files() -> dict:
         except Exception:
             pass
 
-    with _LOCK:
-        _LEGACY_MIGRATION_SIGNATURE = signature
     return summary
 
 
