@@ -4707,7 +4707,7 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 
 def _migrate_legacy_sqlite() -> dict:
-    summary = {"sqlite_accounts_imported": 0, "sqlite_outlook_imported": 0, "sqlite_outlook_skipped": 0}
+    summary = {"sqlite_accounts_imported": 0, "sqlite_accounts_skipped": 0, "sqlite_outlook_imported": 0, "sqlite_outlook_skipped": 0}
     if not _LEGACY_SQLITE.exists():
         return summary
     try:
@@ -4736,20 +4736,23 @@ def _migrate_legacy_sqlite() -> dict:
             summary["sqlite_outlook_skipped"] += skip
         if _table_exists(conn, "registered_accounts"):
             for row in conn.execute("SELECT * FROM registered_accounts").fetchall():
-                insert_account(
-                    email=row["email"],
-                    access_token=row["access_token"],
-                    totp_secret=row["totp_secret"],
-                    user_id=row["user_id"],
-                    user_name=row["user_name"],
-                    plan_type=row["plan_type"],
-                    expires_at=row["expires_at"],
-                    device_id=row["device_id"],
-                    proxy_used=row["proxy_used"],
-                    email_source=row["email_source"],
-                    extra=json.loads(row["extra_json"]) if row["extra_json"] else None,
-                )
-                summary["sqlite_accounts_imported"] += 1
+                try:
+                    extra_raw = row["extra_json"]
+                    try:
+                        extra = json.loads(extra_raw) if extra_raw else None
+                    except (TypeError, ValueError):
+                        extra = None
+                    insert_account(
+                        email=row["email"], access_token=row["access_token"],
+                        totp_secret=row["totp_secret"], user_id=row["user_id"],
+                        user_name=row["user_name"], plan_type=row["plan_type"],
+                        expires_at=row["expires_at"], device_id=row["device_id"],
+                        proxy_used=row["proxy_used"], email_source=row["email_source"],
+                        extra=extra,
+                    )
+                    summary["sqlite_accounts_imported"] += 1
+                except Exception:
+                    summary["sqlite_accounts_skipped"] += 1
         conn.close()
     except Exception as exc:
         summary["sqlite_error"] = f"{type(exc).__name__}: {exc}"
