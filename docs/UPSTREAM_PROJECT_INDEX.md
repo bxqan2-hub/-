@@ -274,3 +274,9 @@
 - `core/roxy_registration.py::_safe_get` 修复 script timeout 恢复错误，保留真实 driver 设置，读取失败才使用配置回退。
 - `core/session.py` 改为动态读取 `config.browser` / `config.openai_protocol`，消除热加载后的旧常量滞留。
 - 验证：定向 `108 passed`；全量 `750 passed, 16 subtests passed`；`compileall` 通过。
+
+## 第三批只改不堆收缩（2026-09-05）
+
+- `core/db.py` 旧 SQLite 迁移按记录隔离异常，避免坏数据阻断整批导入。
+- `core/email_provider.py::release_email` 合并邮箱源释放分支，减少平行调用路径。
+- 验证：定向 `32 passed`、迁移冒烟通过；全量 `750 passed, 16 subtests passed`。
