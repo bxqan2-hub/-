@@ -82,6 +82,9 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="详细日志")
     args = parser.parse_args()
 
+    if not 1 <= args.port <= 65535:
+        parser.error("端口必须是 1 到 65535 之间的整数")
+
     _setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
 
