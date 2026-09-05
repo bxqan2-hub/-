@@ -869,6 +869,10 @@ def create_app(auth_code: str | None = None) -> Flask:
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     app.jinja_env.auto_reload = True
     _prepared_downloads: dict[str, dict] = {}
+    # 概览页由多个标签页定时轮询；短 TTL 可合并同一时刻的磁盘统计读取，
+    # 同时保留足够新鲜的状态。缓存限定在 app 实例内，避免跨实例共享数据。
+    _summary_cache: dict[str, object] = {"expires_at": 0.0, "payload": None}
+    _summary_cache_lock = threading.Lock()
     def _put_prepared_download(content: bytes, filename: str, mimetype: str = "application/zip") -> str:
         now = time.time()
         # 顺手清理 10 分钟前的临时下载，避免内存堆积。
@@ -1036,6 +1040,11 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     @app.get("/api/summary")
     def api_summary():
+        now = time.monotonic()
+        with _summary_cache_lock:
+            cached = _summary_cache.get("payload")
+            if cached is not None and now < float(_summary_cache.get("expires_at") or 0):
+                return jsonify(cached)
         from config import email as _email_cfg
         from core.email_provider import parse_email_sources
         pool = {"total": 0, "available": 0, "used": 0, "failed": 0}
@@ -1053,7 +1062,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             for k in pool:
                 pool[k] += int(one.get(k, 0) or 0)
         domain_pool = db.domain_email_pool_summary()
-        return jsonify({
+        payload = {
             "accounts": db.count_accounts(),
             "outlook_total": pool.get("total", 0),
             "outlook_available": pool.get("available", 0),
@@ -1063,7 +1072,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             "domain_available": domain_pool.get("available", 0),
             "domain_used": domain_pool.get("used", 0),
             "domain_failed": domain_pool.get("failed", 0),
-        })
+        }
+        with _summary_cache_lock:
+            _summary_cache["payload"] = payload
+            _summary_cache["expires_at"] = time.monotonic() + 0.75
+        return jsonify(payload)
 
     # ----------------------------------------------------------
     # 已注册账号
