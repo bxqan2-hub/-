@@ -3402,6 +3402,8 @@ const JOB_SELECTED = new Set();
 let activeLogJob = null, logTimer = null, jobsTimer = null;
 let ACCOUNT_OPERATION_CONTROLLER = new AbortController();
 let ACCOUNT_OPERATION_STOPPING = false;
+const GROUP_ACCOUNT_REFRESH_INTERVAL_MS = 10000;
+let lastGroupedAccountRefreshAt = 0;
 
 // ---------- 分页状态 ----------
 function savedPagerSize(id, fallback = 20) {
@@ -4494,10 +4496,11 @@ async function createAccountGroup() {
     const result = await api('/api/account-groups', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name}),
     });
-    ACTIVE_ACCOUNT_GROUP_ID = result.group?.id || '';
-    TARGET_ACCOUNT_GROUP_ID = ACTIVE_ACCOUNT_GROUP_ID;
+    // Keep the current view stable after creation.  The new group is selected
+    // as the move target, but creating a group must not unexpectedly reload
+    // the account list or navigate away from the user's current group.
+    TARGET_ACCOUNT_GROUP_ID = result.group?.id || '';
     await loadAccountGroups();
-    applyAccountGroup(ACTIVE_ACCOUNT_GROUP_ID);
     showToast('分组已新建');
   } catch (error) { showToast('新建分组失败: ' + error.message); }
 }
@@ -4897,7 +4900,13 @@ async function pollAccountPlanStatuses() {
   if (planStatusLoading || accountsLoading) return;
   if (document.activeElement?.id?.startsWith('pagerSizeInput-')) return;
   if (ACCOUNT_CHECKOUT_KIND_FILTER || ACCOUNT_GCASH_FILTER || ACCOUNT_QUALIFICATION_FILTER) { await loadAccounts(); return; }
-  if (ACCOUNT_EMAIL_FILTER.length || ACTIVE_ACCOUNT_GROUP_ID !== 'default') { await loadAccounts(); return; }
+  if (ACCOUNT_EMAIL_FILTER.length || ACTIVE_ACCOUNT_GROUP_ID !== 'default') {
+    const now = Date.now();
+    if (now - lastGroupedAccountRefreshAt < GROUP_ACCOUNT_REFRESH_INTERVAL_MS) return;
+    lastGroupedAccountRefreshAt = now;
+    await loadAccounts();
+    return;
+  }
   planStatusLoading = true;
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';

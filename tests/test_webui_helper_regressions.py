@@ -367,6 +367,18 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertIn('id="showArchivedAccountsV2"', html)
         self.assertIn('>归档分组</button>', html)
 
+    def test_account_group_creation_keeps_current_view_and_throttles_heavy_refresh(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        create_start = html.index("async function createAccountGroup()")
+        create_end = html.index("async function deleteActiveAccountGroup()", create_start)
+        create_body = html[create_start:create_end]
+        self.assertNotIn("ACTIVE_ACCOUNT_GROUP_ID = result.group?.id", create_body)
+        self.assertNotIn("applyAccountGroup(ACTIVE_ACCOUNT_GROUP_ID)", create_body)
+        self.assertIn("TARGET_ACCOUNT_GROUP_ID = result.group?.id || '';", create_body)
+        self.assertIn("const GROUP_ACCOUNT_REFRESH_INTERVAL_MS = 10000", html)
+        self.assertIn("if (now - lastGroupedAccountRefreshAt < GROUP_ACCOUNT_REFRESH_INTERVAL_MS) return;", html)
+
     def test_accounts_ui_has_at_validity_schedule_and_problem_filter(self):
         html = self.client.get("/").get_data(as_text=True)
 
