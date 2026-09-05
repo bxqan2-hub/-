@@ -18,12 +18,8 @@ import base64
 import hashlib
 from datetime import datetime, timezone, timedelta
 
-from config import (
-    USER_AGENT, SENTINEL_SV, NAVIGATOR_LANGUAGE, NAVIGATOR_LANGUAGES,
-    TIMEZONE_OFFSET_MINUTES, TIMEZONE_NAME, SCREEN_WIDTH, SCREEN_HEIGHT,
-    HARDWARE_CONCURRENCY, JS_HEAP_SIZE_LIMIT, NAVIGATOR_PROTO_SAMPLES,
-    DOCUMENT_KEY_SAMPLES, WINDOW_KEY_SAMPLES, WINDOW_FEATURE_FLAGS,
-)
+from config import browser as browser_cfg
+from config import openai_protocol as protocol_cfg
 
 
 def generate_fingerprint_data(device_id: str, attempt: int = 1, elapsed_ms: float = 0, profile: dict | None = None) -> str:
@@ -66,19 +62,19 @@ def generate_fingerprint_data(device_id: str, attempt: int = 1, elapsed_ms: floa
         elapsed_ms: PoW耗时毫秒数（用于替换 [9]）
     """
     profile = profile or {}
-    screen_width = int(profile.get("screen_width", SCREEN_WIDTH))
-    screen_height = int(profile.get("screen_height", SCREEN_HEIGHT))
-    js_heap_size_limit = int(profile.get("js_heap_size_limit", JS_HEAP_SIZE_LIMIT))
-    hardware_concurrency = int(profile.get("hardware_concurrency", HARDWARE_CONCURRENCY))
-    navigator_language = str(profile.get("navigator_language", NAVIGATOR_LANGUAGE))
-    navigator_languages = list(profile.get("navigator_languages", NAVIGATOR_LANGUAGES))
-    user_agent = str(profile.get("user_agent", USER_AGENT))
+    screen_width = int(profile.get("screen_width", browser_cfg.SCREEN_WIDTH))
+    screen_height = int(profile.get("screen_height", browser_cfg.SCREEN_HEIGHT))
+    js_heap_size_limit = int(profile.get("js_heap_size_limit", browser_cfg.JS_HEAP_SIZE_LIMIT))
+    hardware_concurrency = int(profile.get("hardware_concurrency", browser_cfg.HARDWARE_CONCURRENCY))
+    navigator_language = str(profile.get("navigator_language", browser_cfg.NAVIGATOR_LANGUAGE))
+    navigator_languages = list(profile.get("navigator_languages", browser_cfg.NAVIGATOR_LANGUAGES))
+    user_agent = str(profile.get("user_agent", browser_cfg.USER_AGENT))
     build_id = profile.get("build_id")
     react_listening_key = str(profile.get("react_listening_key") or ("_reactListening" + "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=11))))
     react_container_key = str(profile.get("react_container_key") or ("__reactContainer$" + "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=11))))
     react_resources_key = str(profile.get("react_resources_key") or react_container_key.replace("__reactContainer$", "__reactResources$", 1))
-    tz_offset = int(profile.get("timezone_offset_minutes", TIMEZONE_OFFSET_MINUTES))
-    tz_name = str(profile.get("timezone_name", TIMEZONE_NAME))
+    tz_offset = int(profile.get("timezone_offset_minutes", browser_cfg.TIMEZONE_OFFSET_MINUTES))
+    tz_name = str(profile.get("timezone_name", browser_cfg.TIMEZONE_NAME))
 
     # 模拟 Chrome 浏览器环境；Date.toString 与配置的时区保持一致。
     tz = timezone(timedelta(minutes=tz_offset))
@@ -98,12 +94,12 @@ def generate_fingerprint_data(device_id: str, attempt: int = 1, elapsed_ms: floa
 
     # 与 sentinel-runner.js 的 JS VM 环境共用同一组候选键；
     # SDK 每次会随机抽样，抽样值可以变，但候选集合必须真实存在。
-    navigator_props = list(profile.get("navigator_proto_samples") or NAVIGATOR_PROTO_SAMPLES)
-    document_keys = list(profile.get("document_key_samples") or DOCUMENT_KEY_SAMPLES)
-    window_keys = list(profile.get("window_key_samples") or WINDOW_KEY_SAMPLES)
-    window_flags = dict(WINDOW_FEATURE_FLAGS)
+    navigator_props = list(profile.get("navigator_proto_samples") or browser_cfg.NAVIGATOR_PROTO_SAMPLES)
+    document_keys = list(profile.get("document_key_samples") or browser_cfg.DOCUMENT_KEY_SAMPLES)
+    window_keys = list(profile.get("window_key_samples") or browser_cfg.WINDOW_KEY_SAMPLES)
+    window_flags = dict(browser_cfg.WINDOW_FEATURE_FLAGS)
     window_flags.update(profile.get("window_feature_flags") or {})
-    script_src_samples = list(profile.get("script_src_samples") or [f"https://sentinel.openai.com/sentinel/{SENTINEL_SV}/sdk.js"])
+    script_src_samples = list(profile.get("script_src_samples") or [f"https://sentinel.openai.com/sentinel/{protocol_cfg.SENTINEL_SV}/sdk.js"])
 
     config = [
         screen_width + screen_height,       # [0] screen.width + screen.height
