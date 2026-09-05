@@ -20,9 +20,20 @@ class AccountLivenessProfileRepairTests(unittest.TestCase):
 
         self.assertEqual(session_factory.call_count, 2)
         sleep.assert_called_once_with(2)
-        # The final failed preflight attempt is not returned to the caller;
-        # it must still release its curl connection pool.
+        sessions[0].close.assert_called_once_with()
         sessions[1].close.assert_called_once_with()
+
+    def test_stop_during_retry_delay_does_not_leak_preflight_session(self):
+        session = MagicMock()
+        with patch.object(account_liveness, "BrowserSession", return_value=session), \
+             patch.object(account_liveness, "get_providers", side_effect=RuntimeError("timeout")), \
+             patch.object(account_liveness.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "已停止"):
+                account_liveness._network_preflight_with_retry(
+                    "stop@example.test", None, max_attempts=2,
+                    should_stop=MagicMock(side_effect=[False, True]),
+                )
+        session.close.assert_called_once_with()
 
     def test_normal_liveness_does_not_complete_about_you(self):
         session = MagicMock()

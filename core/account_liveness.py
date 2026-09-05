@@ -62,11 +62,6 @@ def _network_preflight_with_retry(
     for attempt in range(1, max_attempts + 1):
         if callable(should_stop) and should_stop():
             raise RuntimeError("查活/AT 恢复已停止")
-        if session is not None:
-            try:
-                session.session.close()
-            except Exception:
-                pass
         session = BrowserSession(proxy=proxy if proxy else None)
         logger.info(
             "[查活] 会话创建完成：proxy=%s device_id=%s（网络预检第 %s/%s 次）",
@@ -79,14 +74,11 @@ def _network_preflight_with_retry(
             return session, authorize_url
         except Exception as exc:
             last_exc = exc
+            try:
+                session.close()
+            except Exception:
+                pass
             if attempt >= max_attempts or not _is_retryable_network_error(exc):
-                # A preflight session is never returned on terminal failure;
-                # close it here so repeated liveness checks do not leak curl
-                # connection pools when the final attempt fails.
-                try:
-                    session.close()
-                except Exception:
-                    pass
                 raise
             logger.warning(
                 "[查活] 网络预检失败（%s/%s），换新 IP 重试：%s",

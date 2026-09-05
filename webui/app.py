@@ -873,6 +873,14 @@ def create_app(auth_code: str | None = None) -> Flask:
     # 同时保留足够新鲜的状态。缓存限定在 app 实例内，避免跨实例共享数据。
     _summary_cache: dict[str, object] = {"expires_at": 0.0, "payload": None}
     _summary_cache_lock = threading.Lock()
+
+    @app.after_request
+    def invalidate_summary_after_write(response):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            with _summary_cache_lock:
+                _summary_cache["payload"] = None
+        return response
+
     def _put_prepared_download(content: bytes, filename: str, mimetype: str = "application/zip") -> str:
         now = time.time()
         # 顺手清理 10 分钟前的临时下载，避免内存堆积。
@@ -1040,41 +1048,42 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     @app.get("/api/summary")
     def api_summary():
-        now = time.monotonic()
-        with _summary_cache_lock:
-            cached = _summary_cache.get("payload")
-            if cached is not None and now < float(_summary_cache.get("expires_at") or 0):
-                return jsonify(cached)
         from config import email as _email_cfg
         from core.email_provider import parse_email_sources
-        pool = {"total": 0, "available": 0, "used": 0, "failed": 0}
-        for src in parse_email_sources(_email_cfg.EMAIL_SOURCE):
-            # GPTMail/MailNest/CloudMail 地址按需生成，不属于本地邮箱池。
-            if src in ("gptmail", "mailnest", "cloudmail", "cloudflare"):
-                continue
-            one = (
-                db.generic_api_email_pool_summary(provider="generic_api") if src == "generic_api"
-                else db.generic_api_email_pool_summary(provider="domain_api") if src == "domain_api"
-                else db.generic_api_email_pool_summary(provider="inbox_mate") if src == "inbox_mate"
-                else db.domain_email_pool_summary() if src == "cloudflare_domain"
-                else db.outlook_pool_summary()
-            )
-            for k in pool:
-                pool[k] += int(one.get(k, 0) or 0)
-        domain_pool = db.domain_email_pool_summary()
-        payload = {
-            "accounts": db.count_accounts(),
-            "outlook_total": pool.get("total", 0),
-            "outlook_available": pool.get("available", 0),
-            "outlook_used": pool.get("used", 0),
-            "outlook_failed": pool.get("failed", 0),
-            "domain_total": domain_pool.get("total", 0),
-            "domain_available": domain_pool.get("available", 0),
-            "domain_used": domain_pool.get("used", 0),
-            "domain_failed": domain_pool.get("failed", 0),
-        }
         with _summary_cache_lock:
+            source = _email_cfg.EMAIL_SOURCE
+            cached = _summary_cache.get("payload")
+            if (cached is not None and _summary_cache.get("source") == source
+                    and time.monotonic() < _summary_cache["expires_at"]):
+                return jsonify(cached)
+            pool = {"total": 0, "available": 0, "used": 0, "failed": 0}
+            domain_pool = db.domain_email_pool_summary()
+            for src in parse_email_sources(source):
+                # These providers generate addresses on demand, without a local pool.
+                if src in ("gptmail", "mailnest", "cloudmail", "cloudflare"):
+                    continue
+                one = (
+                    db.generic_api_email_pool_summary(provider="generic_api") if src == "generic_api"
+                    else db.generic_api_email_pool_summary(provider="domain_api") if src == "domain_api"
+                    else db.generic_api_email_pool_summary(provider="inbox_mate") if src == "inbox_mate"
+                    else domain_pool if src == "cloudflare_domain"
+                    else db.outlook_pool_summary()
+                )
+                for k in pool:
+                    pool[k] += int(one.get(k, 0) or 0)
+            payload = {
+                "accounts": db.count_accounts(),
+                "outlook_total": pool.get("total", 0),
+                "outlook_available": pool.get("available", 0),
+                "outlook_used": pool.get("used", 0),
+                "outlook_failed": pool.get("failed", 0),
+                "domain_total": domain_pool.get("total", 0),
+                "domain_available": domain_pool.get("available", 0),
+                "domain_used": domain_pool.get("used", 0),
+                "domain_failed": domain_pool.get("failed", 0),
+            }
             _summary_cache["payload"] = payload
+            _summary_cache["source"] = source
             _summary_cache["expires_at"] = time.monotonic() + 0.75
         return jsonify(payload)
 
