@@ -18,30 +18,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from config import (
-    USER_AGENT,
-    CHROME_MAJOR,
-    CHROME_FULL_VERSION,
-    SEC_CH_UA,
-    SEC_CH_UA_PLATFORM,
-    SEC_CH_UA_FULL_VERSION_LIST,
-    SEC_CH_UA_PLATFORM_VERSION,
-    SEC_CH_UA_ARCH,
-    SEC_CH_UA_BITNESS,
-    SEC_CH_UA_MODEL,
-    TIMEZONE_IANA,
-    TIMEZONE_NAME,
-    TIMEZONE_OFFSET_MINUTES,
-    NAVIGATOR_LANGUAGE,
-    NAVIGATOR_LANGUAGES,
-    SCREEN_WIDTH,
-    SCREEN_HEIGHT,
-    HARDWARE_CONCURRENCY,
-    JS_HEAP_SIZE_LIMIT,
-    DEVICE_MEMORY,
-    SENTINEL_SV,
-    OPENAI_BUILD_ID,
-)
+from config import browser as browser_cfg
+from config import openai_protocol as protocol_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -122,34 +100,34 @@ def generate_sentinel_token(
     profile = browser_profile or {}
     browser_family = str(profile.get("browser_family") or "chrome")
     request_idle_callback = int((profile.get("window_feature_flags") or {}).get("requestIdleCallback", 0))
-    ua = user_agent or str(profile.get("user_agent") or USER_AGENT)
-    screen_width = int(profile.get("screen_width", SCREEN_WIDTH))
-    screen_height = int(profile.get("screen_height", SCREEN_HEIGHT))
-    hardware_concurrency = int(profile.get("hardware_concurrency", HARDWARE_CONCURRENCY))
-    js_heap_size_limit = int(profile.get("js_heap_size_limit", JS_HEAP_SIZE_LIMIT))
-    device_memory = int(profile.get("device_memory", DEVICE_MEMORY))
+    ua = user_agent or str(profile.get("user_agent") or browser_cfg.USER_AGENT)
+    screen_width = int(profile.get("screen_width", browser_cfg.SCREEN_WIDTH))
+    screen_height = int(profile.get("screen_height", browser_cfg.SCREEN_HEIGHT))
+    hardware_concurrency = int(profile.get("hardware_concurrency", browser_cfg.HARDWARE_CONCURRENCY))
+    js_heap_size_limit = int(profile.get("js_heap_size_limit", browser_cfg.JS_HEAP_SIZE_LIMIT))
+    device_memory = int(profile.get("device_memory", browser_cfg.DEVICE_MEMORY))
     device_pixel_ratio = float(profile.get("device_pixel_ratio", 2))
-    navigator_language = str(profile.get("navigator_language", NAVIGATOR_LANGUAGE))
-    navigator_languages = list(profile.get("navigator_languages", NAVIGATOR_LANGUAGES))
-    chrome_major = str(profile.get("chrome_major", CHROME_MAJOR))
-    chrome_full_version = str(profile.get("chrome_full_version", CHROME_FULL_VERSION))
-    sec_ch_ua = str(profile.get("sec_ch_ua", SEC_CH_UA))
-    sec_ch_ua_platform = str(profile.get("sec_ch_ua_platform", SEC_CH_UA_PLATFORM))
+    navigator_language = str(profile.get("navigator_language", browser_cfg.NAVIGATOR_LANGUAGE))
+    navigator_languages = list(profile.get("navigator_languages", browser_cfg.NAVIGATOR_LANGUAGES))
+    chrome_major = str(profile.get("chrome_major", browser_cfg.CHROME_MAJOR))
+    chrome_full_version = str(profile.get("chrome_full_version", browser_cfg.CHROME_FULL_VERSION))
+    sec_ch_ua = str(profile.get("sec_ch_ua", browser_cfg.SEC_CH_UA))
+    sec_ch_ua_platform = str(profile.get("sec_ch_ua_platform", browser_cfg.SEC_CH_UA_PLATFORM))
     navigator_platform = str(profile.get("navigator_platform", "MacIntel"))
     navigator_vendor = str(profile.get("navigator_vendor", "Google Inc."))
     user_agent_data_platform = str(profile.get("user_agent_data_platform", sec_ch_ua_platform.strip('\"') or "macOS"))
-    sec_ch_ua_full_version_list = str(profile.get("sec_ch_ua_full_version_list", SEC_CH_UA_FULL_VERSION_LIST))
-    sec_ch_ua_platform_version = str(profile.get("sec_ch_ua_platform_version", SEC_CH_UA_PLATFORM_VERSION))
-    sec_ch_ua_arch = str(profile.get("sec_ch_ua_arch", SEC_CH_UA_ARCH))
-    sec_ch_ua_bitness = str(profile.get("sec_ch_ua_bitness", SEC_CH_UA_BITNESS))
-    sec_ch_ua_model = str(profile.get("sec_ch_ua_model", SEC_CH_UA_MODEL))
-    build_id = str(profile.get("build_id", OPENAI_BUILD_ID))
+    sec_ch_ua_full_version_list = str(profile.get("sec_ch_ua_full_version_list", browser_cfg.SEC_CH_UA_FULL_VERSION_LIST))
+    sec_ch_ua_platform_version = str(profile.get("sec_ch_ua_platform_version", browser_cfg.SEC_CH_UA_PLATFORM_VERSION))
+    sec_ch_ua_arch = str(profile.get("sec_ch_ua_arch", browser_cfg.SEC_CH_UA_ARCH))
+    sec_ch_ua_bitness = str(profile.get("sec_ch_ua_bitness", browser_cfg.SEC_CH_UA_BITNESS))
+    sec_ch_ua_model = str(profile.get("sec_ch_ua_model", browser_cfg.SEC_CH_UA_MODEL))
+    build_id = str(profile.get("build_id", protocol_cfg.OPENAI_BUILD_ID))
     # Auth 页面 Sentinel token 的 documentElement 通常没有 data-build；
     # ChatGPT 页面 prepare/finalize 的 p 才带前端 build。
     runner_build_id = "" if page_url is None and flow in {"authorize_continue", "oauth_create_account", "username_password_create"} else build_id
-    timezone_iana = str(profile.get("timezone_iana", TIMEZONE_IANA))
-    timezone_name = str(profile.get("timezone_name", TIMEZONE_NAME))
-    timezone_offset_minutes = int(profile.get("timezone_offset_minutes", TIMEZONE_OFFSET_MINUTES))
+    timezone_iana = str(profile.get("timezone_iana", browser_cfg.TIMEZONE_IANA))
+    timezone_name = str(profile.get("timezone_name", browser_cfg.TIMEZONE_NAME))
+    timezone_offset_minutes = int(profile.get("timezone_offset_minutes", browser_cfg.TIMEZONE_OFFSET_MINUTES))
     runner_cookie = cookie or f"oai-did={device_id}"
 
     page = page_url or _FLOW_PAGE_URL.get(
@@ -187,7 +165,7 @@ def generate_sentinel_token(
             "--user-agent-data-platform", user_agent_data_platform,
             "--request-idle-callback", "1" if request_idle_callback else "0",
             "--sdk", str(_SDK_PATH),
-            "--script-src", f"https://sentinel.openai.com/sentinel/{SENTINEL_SV}/sdk.js",
+            "--script-src", f"https://sentinel.openai.com/sentinel/{protocol_cfg.SENTINEL_SV}/sdk.js",
             "--build-id", runner_build_id,
             # 与 config.browser / core.sentinel.py 中的指纹默认值保持一致
             "--width", str(screen_width),
@@ -214,7 +192,7 @@ def generate_sentinel_token(
         ]
 
         logger.info(f"[SentinelRunner] 调用 Node 生成 token, flow={flow}")
-        logger.debug(f"[SentinelRunner] 命令: {' '.join(cmd)}")
+        logger.debug("[SentinelRunner] Node 参数数量: %s", len(cmd))
 
         # 关键：禁用 sentinel.config.json 自动发现（避免外部配置干扰）
         env = os.environ.copy()
@@ -243,18 +221,15 @@ def generate_sentinel_token(
             ) from exc
 
         if proc.returncode != 0:
-            stderr = (proc.stderr or "").strip()
-            stdout = (proc.stdout or "").strip()
             raise RuntimeError(
-                f"sentinel-runner.js 退出码 {proc.returncode}\n"
-                f"stderr: {stderr}\n"
-                f"stdout: {stdout}"
+                f"sentinel-runner.js 退出码 {proc.returncode}, flow={flow}, "
+                f"stderr_bytes={len(proc.stderr or '')}, stdout_bytes={len(proc.stdout or '')}"
             )
 
         token_text = (proc.stdout or "").strip()
         if not token_text:
             raise RuntimeError(
-                f"sentinel-runner.js 输出为空, stderr: {(proc.stderr or '').strip()}"
+                f"sentinel-runner.js 输出为空, flow={flow}"
             )
 
         # 简单合法性校验：必须是合法 JSON 且包含关键字段
@@ -262,13 +237,16 @@ def generate_sentinel_token(
             parsed = json.loads(token_text)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
-                f"runner 输出不是合法 JSON: {token_text[:200]}"
-            ) from exc
+                "runner 输出不是合法 JSON"
+            ) from None
+
+        if not isinstance(parsed, dict):
+            raise RuntimeError("runner 输出必须是 JSON 对象")
 
         for required_key in ("p", "c", "id", "flow"):
             if required_key not in parsed:
                 raise RuntimeError(
-                    f"runner 输出缺少字段 {required_key}: {token_text[:200]}"
+                    f"runner 输出缺少字段 {required_key}"
                 )
 
         # 详细诊断：打印输出 JSON 的所有顶层字段名 + 值长度

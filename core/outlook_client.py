@@ -37,12 +37,7 @@ from pathlib import Path
 
 from curl_cffi.requests import Session as CurlSession
 
-from config import (
-    OUTLOOK_ACCOUNTS_FILE,
-    OUTLOOK_API_BASE,
-    USER_AGENT,
-    IMPERSONATE,
-)
+from config import browser as _browser_cfg
 # OTP_POLL_INTERVAL / OTP_MAX_WAIT 是 WebUI 可热改的，从模块读
 from config import email as _email_cfg
 from core.otp_utils import looks_like_openai_email, extract_otp
@@ -55,7 +50,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONTEXT_CACHE: dict[str, "OutlookAccount"] = {}
 
 # 远端 mail.chatai.codes 被禁用时，本进程内直接跳过远端，走 Microsoft Graph 直连。
-_REMOTE_DISABLED = False
+_REMOTE_DISABLED_BASE = ""
 _MS_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 _MS_TOKEN_FATAL_CACHE: dict[str, tuple[str, float]] = {}
 
@@ -75,11 +70,11 @@ class OutlookClientError(RuntimeError):
 
 
 def _http_session() -> CurlSession:
-    s = CurlSession(impersonate=IMPERSONATE)
+    s = CurlSession(impersonate=_browser_cfg.IMPERSONATE)
     s.headers.update({
-        "User-Agent": USER_AGENT,
-        "Origin": OUTLOOK_API_BASE.rstrip("/"),
-        "Referer": OUTLOOK_API_BASE.rstrip("/") + "/",
+        "User-Agent": _browser_cfg.USER_AGENT,
+        "Origin": _email_cfg.OUTLOOK_API_BASE.rstrip("/"),
+        "Referer": _email_cfg.OUTLOOK_API_BASE.rstrip("/") + "/",
         "Accept": "*/*",
     })
     s.timeout = 30
@@ -130,12 +125,14 @@ _sec_session_lock = threading.Lock()
 def _get_security_session(http: CurlSession) -> dict:
     """获取或刷新安全会话（有效期内复用，过期自动续期）。"""
     global _sec_session
+    base = http.headers.get("Origin", _email_cfg.OUTLOOK_API_BASE).rstrip("/")
     now_ms = int(time.time() * 1000)
     with _sec_session_lock:
-        if _sec_session and _sec_session["expiresAtMs"] - now_ms > 60_000:
+        if (_sec_session and _sec_session.get("baseUrl") == base
+                and _sec_session["expiresAtMs"] - now_ms > 60_000):
             return _sec_session
         resp = http.post(
-            f"{OUTLOOK_API_BASE.rstrip('/')}/api/security-session",
+            f"{base}/api/security-session",
             headers={"Content-Type": "application/json"},
             data="{}",
         )
@@ -153,6 +150,7 @@ def _get_security_session(http: CurlSession) -> dict:
             ).timestamp() * 1000
         )
         _sec_session = {
+            "baseUrl": base,
             "sessionId":    data["sessionId"],
             "sessionToken": data["sessionToken"],
             "sessionKey":   data["sessionKey"],
@@ -205,7 +203,8 @@ def _secure_post(http: CurlSession, url: str, payload: dict, retry: int = 0) -> 
     if resp.status_code in (401, 403) and retry < 1:
         logger.warning(f"[Outlook] {resp.status_code}，刷新安全会话后重试...")
         with _sec_session_lock:
-            _sec_session = None
+            if _sec_session is session:
+                _sec_session = None
         return _secure_post(http, url, payload, retry + 1)
 
     if resp.status_code != 200:
@@ -257,14 +256,14 @@ def pick_account() -> OutlookAccount:
 
     inserted, skipped = import_outlook_from_file()
     if inserted:
-        logger.info(f"[Outlook] 已自动从 {OUTLOOK_ACCOUNTS_FILE} 导入 {inserted} 个新账号（跳过 {skipped} 个）")
+        logger.info(f"[Outlook] 已自动从 {_email_cfg.OUTLOOK_ACCOUNTS_FILE} 导入 {inserted} 个新账号（跳过 {skipped} 个）")
 
     row = claim_next_outlook()
     if row is None:
         summary = outlook_pool_summary()
         raise OutlookClientError(
             f"Outlook 账号池没有可用账号: {summary}. "
-            f"请把新邮箱写入 {OUTLOOK_ACCOUNTS_FILE}，程序会在下次注册前自动导入。"
+            f"请把新邮箱写入 {_email_cfg.OUTLOOK_ACCOUNTS_FILE}，程序会在下次注册前自动导入。"
         )
 
     account = OutlookAccount(
@@ -306,7 +305,7 @@ def release_account(email: str, status: str = "available", note: str | None = No
 def import_outlook_from_file(path: str | Path | None = None) -> tuple[int, int]:
     """读取一份账号文本文件，全量导入 DB，返回 (新增, 已存在跳过)。"""
     from core.db import import_outlook_accounts
-    p = Path(path or OUTLOOK_ACCOUNTS_FILE)
+    p = Path(path or _email_cfg.OUTLOOK_ACCOUNTS_FILE)
     if not p.is_absolute():
         p = _PROJECT_ROOT / p
     accounts = _parse_accounts_file(p)
@@ -351,9 +350,9 @@ def _is_remote_disabled_error(exc: Exception | str) -> bool:
 
 
 def _ms_http() -> CurlSession:
-    s = CurlSession(impersonate=IMPERSONATE)
+    s = CurlSession(impersonate=_browser_cfg.IMPERSONATE)
     s.headers.update({
-        "User-Agent": USER_AGENT,
+        "User-Agent": _browser_cfg.USER_AGENT,
         "Accept": "application/json",
     })
     s.timeout = 30
@@ -658,7 +657,7 @@ def _fetch_graph_messages(http: CurlSession, token: str) -> list[dict]:
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        "User-Agent": USER_AGENT,
+        "User-Agent": http.headers.get("User-Agent", _browser_cfg.USER_AGENT),
         "Prefer": 'outlook.body-content-type="html"',
     }
     url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
@@ -685,7 +684,7 @@ def _fetch_outlook_rest_messages(http: CurlSession, token: str) -> list[dict]:
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        "User-Agent": USER_AGENT,
+        "User-Agent": http.headers.get("User-Agent", _browser_cfg.USER_AGENT),
     }
     url = "https://outlook.office.com/api/v2.0/me/mailfolders/inbox/messages"
     attempts = [
@@ -847,8 +846,9 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
     - direct: Microsoft Graph 直连
     - auto: 远端可用时用远端；远端 402/DEPLOYMENT_DISABLED 后自动直连 Graph
     """
-    global _REMOTE_DISABLED
+    global _REMOTE_DISABLED_BASE
     mode = _outlook_fetch_mode()
+    base = session.headers.get("Origin", _email_cfg.OUTLOOK_API_BASE).rstrip("/")
 
     if mode in ("direct", "graph", "graph_direct", "msgraph"):
         if protocol == "graph":
@@ -857,14 +857,14 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
             return _fetch_imap_direct_messages(account)
         return []
 
-    if mode == "auto" and _REMOTE_DISABLED:
+    if mode == "auto" and _REMOTE_DISABLED_BASE == base:
         if protocol == "graph":
             return _fetch_via_graph_direct(account)
         if protocol == "imap":
             return _fetch_imap_direct_messages(account)
         return []
 
-    url = f"{OUTLOOK_API_BASE.rstrip('/')}/api/fetch-{protocol}"
+    url = f"{base}/api/fetch-{protocol}"
     payload = {
         "email":        account.email,
         "clientId":     account.client_id,
@@ -878,7 +878,7 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
     except OutlookClientError as exc:
         logger.warning(f"[Outlook] {protocol} 请求失败: {exc}")
         if mode == "auto" and _is_remote_disabled_error(exc):
-            _REMOTE_DISABLED = True
+            _REMOTE_DISABLED_BASE = base
             logger.warning("[Outlook] 远端取件服务已禁用，自动切换为 Microsoft Graph 直连模式")
             if protocol == "graph":
                 return _fetch_via_graph_direct(account)

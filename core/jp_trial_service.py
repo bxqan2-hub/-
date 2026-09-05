@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Any
 
 from config import proxy as proxy_cfg
-from config import USER_AGENT
 from config import browser as browser_cfg
 from core import db
 from core.chatgpt_plan import normalize_token
@@ -128,7 +127,7 @@ def _inspect_proxy_exit(proxy: str) -> dict:
     try:
         env = BrowserSession(proxy=proxy, detect_exit_geo=False)
         timeout = max(1.0, float(getattr(browser_cfg, "IP_GEO_TIMEOUT", 6) or 6))
-        headers = {"user-agent": USER_AGENT, "accept": "application/json"}
+        headers = {"user-agent": browser_cfg.USER_AGENT, "accept": "application/json"}
         for endpoint in list(getattr(browser_cfg, "IP_GEO_ENDPOINTS", []) or []):
             try:
                 response = env.session.get(endpoint, headers=headers, timeout=timeout)

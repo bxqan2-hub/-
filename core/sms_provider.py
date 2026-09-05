@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 
 from curl_cffi.requests import Session as CurlSession
 
-from config import IMPERSONATE
+from config import browser as _browser_cfg
 from config import codex as _cfg
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ class SmsCodeTimeout(SmsProviderError):
 
 
 def _http() -> CurlSession:
-    session = CurlSession(impersonate=IMPERSONATE)
+    session = CurlSession(impersonate=_browser_cfg.IMPERSONATE)
     local_proxy = str(getattr(_cfg, "CODEX_LOCAL_PROXY", "") or "").strip()
     if local_proxy:
         session.proxies = {"http": local_proxy, "https": local_proxy}

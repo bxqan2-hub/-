@@ -9,7 +9,7 @@ import logging
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from config import REGISTER_EMAIL, REGISTER_NAME  # 这两个一般不在 WebUI 改
+from config import register as _register_cfg
 # 可热改的，按模块属性方式读
 from config import twofa as _twofa_cfg
 from config import email as _email_cfg
@@ -55,8 +55,8 @@ def generate_display_name() -> str:
 
 def prepare_registration_inputs() -> tuple[str, str, str]:
     """按 CLI 规则准备一次注册所需的邮箱、显示名和生日。"""
-    email = REGISTER_EMAIL
-    name = REGISTER_NAME
+    email = _register_cfg.REGISTER_EMAIL
+    name = _register_cfg.REGISTER_NAME
     birthday = generate_random_birthday()
 
     # 邮箱：留空 + USE_EMAIL_SERVICE=True 时从 Outlook 池领取
@@ -213,7 +213,7 @@ def main():
         logger.error("并发线程数必须大于 0")
         sys.exit(1)
 
-    if args.count > 1 and REGISTER_EMAIL:
+    if args.count > 1 and _register_cfg.REGISTER_EMAIL:
         logger.error("config.REGISTER_EMAIL 已固定邮箱，不适合批量注册；请留空后再使用 --count")
         sys.exit(1)
 
