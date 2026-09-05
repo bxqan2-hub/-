@@ -243,25 +243,21 @@ def release_email(email: str, status: str = "available", note: str | None = None
     source = resolve_email_source(email)
     if source == "gptmail":
         from core.gptmail_client import release_account
-        release_account(email, status=status, note=note)
     elif source == "cloudflare":
         from core.cf_temp_mail_client import release_account
-        release_account(email, status=status, note=note)
     elif source == "cloudflare_domain":
         from core.qqmail_client import release_domain_email
         release_domain_email(email, status=status, note=note)
+        return source
     elif source in ("generic_api", "domain_api", "inbox_mate"):
         from core.generic_api_mail_client import release_account
-        release_account(email, status=status, note=note)
     elif source == "mailnest":
         from core.mailnest_client import release_account
-        release_account(email, status=status, note=note)
     elif source == "cloudmail":
         from core.cloudmail_client import release_account
-        release_account(email, status=status, note=note)
     else:
         from core.outlook_client import release_account
-        release_account(email, status=status, note=note)
+    release_account(email, status=status, note=note)
     return source
 
 
