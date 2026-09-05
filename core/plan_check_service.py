@@ -34,7 +34,7 @@ def _float_setting(name: str, default: float, lower: float, upper: float) -> flo
 
 _MIN_WORKERS = 1
 _MAX_WORKERS = 64
-_DEFAULT_WORKERS = max(_MIN_WORKERS, int(getattr(proxy_cfg, "PLAN_CHECK_WORKERS", 10) or 10))
+_DEFAULT_WORKERS = _int_setting("PLAN_CHECK_WORKERS", 10, _MIN_WORKERS, _MAX_WORKERS)
 _QUEUE_LIMIT = _int_setting("PLAN_CHECK_QUEUE_LIMIT", 500, _DEFAULT_WORKERS, 5000)
 _EXECUTOR_LOCK = threading.RLock()
 _EXECUTOR_WORKERS = _DEFAULT_WORKERS
@@ -249,7 +249,12 @@ def enqueue_account_plan_check(
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "queue_full": True, "error": "套餐查询队列已满，请稍后重试"}
 
-    if not db.claim_account_plan_check(acc_id=account_id, trigger=trigger):
+    try:
+        claimed = db.claim_account_plan_check(acc_id=account_id, trigger=trigger)
+    except Exception:
+        _QUEUE_SLOTS.release()
+        raise
+    if not claimed:
         _QUEUE_SLOTS.release()
         return {"accepted": False, "busy": True, "error": "该账号正在查询套餐"}
 

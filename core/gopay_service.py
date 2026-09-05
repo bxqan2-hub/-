@@ -175,7 +175,12 @@ def enqueue(
         return {"accepted": False, "busy": False, "error": "GoPay 检测没有可用的 ID 代理"}
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "GoPay 检测队列已满"}
-    if not db.claim_account_gopay(account_id, trigger=trigger):
+    try:
+        claimed = db.claim_account_gopay(account_id, trigger=trigger)
+    except Exception:
+        _QUEUE_SLOTS.release()
+        raise
+    if not claimed:
         _QUEUE_SLOTS.release()
         return {"accepted": False, "busy": True, "error": "该账号正在检测 GoPay 资格"}
     try:

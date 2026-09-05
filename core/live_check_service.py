@@ -135,7 +135,12 @@ def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "m
     operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "queue_full": True, "error": "查活队列已满，请稍后重试"}
-    if not db.claim_account_live_check(acc_id=account_id, trigger=trigger):
+    try:
+        claimed = db.claim_account_live_check(acc_id=account_id, trigger=trigger)
+    except Exception:
+        _QUEUE_SLOTS.release()
+        raise
+    if not claimed:
         _QUEUE_SLOTS.release()
         return {"accepted": False, "busy": True, "error": "该账号正在查活"}
 

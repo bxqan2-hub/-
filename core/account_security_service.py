@@ -445,7 +445,12 @@ def enqueue_account_security_setup(
         return {"accepted": False, "busy": False, "error": "账号邮箱为空"}
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "queue_full": True, "error": "安全设置队列已满"}
-    if not db.claim_account_security_setup(account_id, trigger=trigger):
+    try:
+        claimed = db.claim_account_security_setup(account_id, trigger=trigger)
+    except Exception:
+        _QUEUE_SLOTS.release()
+        raise
+    if not claimed:
         _QUEUE_SLOTS.release()
         return {"accepted": False, "busy": True, "error": "该账号正在执行补密码/2FA"}
     _append_log(email, f"[安全扩展] 已入队 account_id={account_id} mode={normalized_mode}", clear=True)

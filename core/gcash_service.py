@@ -335,7 +335,12 @@ def enqueue(
     operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "GCash 检测队列已满"}
-    if not db.claim_account_gcash(account_id, trigger=trigger):
+    try:
+        claimed = db.claim_account_gcash(account_id, trigger=trigger)
+    except Exception:
+        _QUEUE_SLOTS.release()
+        raise
+    if not claimed:
         _QUEUE_SLOTS.release()
         return {"accepted": False, "busy": True, "error": "该账号正在检测 GCash 资格"}
     proxy_candidates = [p for p in (proxies or []) if p]

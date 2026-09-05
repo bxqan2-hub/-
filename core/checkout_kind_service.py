@@ -134,7 +134,12 @@ def enqueue(
     operation_generation = account_operation_control.snapshot()
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "Checkout 类型检测队列已满"}
-    if not db.claim_account_checkout_kind(account_id, trigger=trigger):
+    try:
+        claimed = db.claim_account_checkout_kind(account_id, trigger=trigger)
+    except Exception:
+        _QUEUE_SLOTS.release()
+        raise
+    if not claimed:
         _QUEUE_SLOTS.release()
         return {"accepted": False, "busy": True, "error": "该账号正在检测 Checkout 类型"}
     try:

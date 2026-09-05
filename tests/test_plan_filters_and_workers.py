@@ -560,7 +560,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
 
         mailbox_fallback.assert_not_called()
 
-    def test_worker_count_has_no_fixed_upper_bound(self):
+    def test_worker_count_is_bounded(self):
         self.assertEqual(plan_check_service._normalize_workers(0), 1)
         self.assertEqual(plan_check_service._normalize_workers(99), 64)
 

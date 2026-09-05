@@ -42,7 +42,10 @@ _UPSTREAM_HEADER_EXCLUDES = {
 
 def _positive_worker_count(value, default: int = 10) -> int:
     raw = default if value in (None, "") else value
-    workers = int(raw)
+    try:
+        workers = int(raw)
+    except OverflowError as exc:
+        raise ValueError("workers 必须是正整数") from exc
     if workers < 1:
         raise ValueError("workers 必须是正整数")
     return workers
@@ -1267,10 +1270,10 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         check_plan = bool(data.get("check_plan", True))
         try:
-            workers = _positive_worker_count(
+            workers = plan_check_service._normalize_workers(_positive_worker_count(
                 data.get("workers"),
                 plan_check_service.get_executor_workers(),
-            ) if check_plan else 0
+            )) if check_plan else 0
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
         operation_generation = account_operation_control.snapshot()
@@ -1922,7 +1925,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         # 与单账号查询保持一致：每个任务从当前国家静态代理池独立取一条。
         timezone_offset_min = str(data.get("timezone_offset_min") or "-")
         try:
-            workers = _positive_worker_count(data.get("workers"), plan_check_service.get_executor_workers())
+            workers = plan_check_service._normalize_workers(_positive_worker_count(data.get("workers"), plan_check_service.get_executor_workers()))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
         # 本批固定使用同一个线程池，避免并发请求切换 workers 时把同一批拆到不同池。
@@ -4151,7 +4154,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         # workers 控制本次新提交任务使用的线程池；若和上次不同，服务层会为新任务切换到新池。
         try:
-            workers = _positive_worker_count(data.get("workers"), 1)
+            workers = svc._normalize_workers(_positive_worker_count(data.get("workers"), 1))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
 
@@ -4427,7 +4430,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         """重试失败/停止/取消任务；服务端自动判断完整注册或 Codex 补跑。"""
         data = request.get_json(silent=True) or {}
         try:
-            workers = _positive_worker_count(data.get("workers"), svc.get_executor_workers())
+            workers = svc._normalize_workers(_positive_worker_count(data.get("workers"), svc.get_executor_workers()))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
         result = svc.retry_job(job_id, workers=workers)
@@ -4445,7 +4448,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         if len(job_ids) > 500:
             return jsonify({"ok": False, "error": "单次最多重试 500 个任务"}), 400
         try:
-            workers = _positive_worker_count(data.get("workers"), svc.get_executor_workers())
+            workers = svc._normalize_workers(_positive_worker_count(data.get("workers"), svc.get_executor_workers()))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
 
