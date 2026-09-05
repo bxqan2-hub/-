@@ -80,6 +80,13 @@ def _network_preflight_with_retry(
         except Exception as exc:
             last_exc = exc
             if attempt >= max_attempts or not _is_retryable_network_error(exc):
+                # A preflight session is never returned on terminal failure;
+                # close it here so repeated liveness checks do not leak curl
+                # connection pools when the final attempt fails.
+                try:
+                    session.close()
+                except Exception:
+                    pass
                 raise
             logger.warning(
                 "[查活] 网络预检失败（%s/%s），换新 IP 重试：%s",
@@ -234,6 +241,7 @@ def check_account_liveness(
         path.write_text("", encoding="utf-8")
 
     fh: logging.FileHandler | None = None
+    session: BrowserSession | None = None
     root_logger = logging.getLogger()
     thread_name = threading.current_thread().name
     with _RUNNING_LOCK:
@@ -311,5 +319,10 @@ def check_account_liveness(
                 root_logger.removeHandler(fh)
                 fh.close()
         finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    logger.debug("[查活] 关闭会话失败：%s", email, exc_info=True)
             with _RUNNING_LOCK:
                 _RUNNING.discard(key)

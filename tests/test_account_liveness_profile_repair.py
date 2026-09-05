@@ -20,6 +20,9 @@ class AccountLivenessProfileRepairTests(unittest.TestCase):
 
         self.assertEqual(session_factory.call_count, 2)
         sleep.assert_called_once_with(2)
+        # The final failed preflight attempt is not returned to the caller;
+        # it must still release its curl connection pool.
+        sessions[1].close.assert_called_once_with()
 
     def test_normal_liveness_does_not_complete_about_you(self):
         session = MagicMock()
@@ -29,6 +32,23 @@ class AccountLivenessProfileRepairTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(RuntimeError, "不是完整已注册账号"):
             account_liveness._resolve_oauth_continue_url(session, result)
+
+    def test_liveness_closes_session_when_post_preflight_step_fails(self):
+        session = MagicMock()
+        with patch(
+            "core.account_liveness._network_preflight_with_retry",
+            return_value=(session, "https://auth.openai.com/authorize"),
+        ), patch(
+            "core.account_liveness.follow_authorize",
+            side_effect=RuntimeError("authorize transport failed"),
+        ):
+            result = account_liveness.check_account_liveness(
+                "cleanup@example.test",
+                clear_log=False,
+            )
+
+        self.assertEqual(result["status"], "failed")
+        session.close.assert_called_once_with()
 
     def test_registration_recovery_completes_about_you(self):
         session = MagicMock()
