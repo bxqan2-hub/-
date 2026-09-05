@@ -268,3 +268,9 @@
 - `core/registration_service.py` 在 `_run_one_job`、`_run_codex_retry_job` 的启动异常边界补齐 `_deactivate_job()`，并删除无调用点的 `_enqueue_checkout_kind_after_registration` 私有死代码。
 - `config/email.py` 将已有 `OTP_SETTLE_SECONDS` 纳入环境覆盖 schema；`core/outlook_client.py::fetch_latest_otp` 改为读取 `_email_cfg.OTP_SETTLE_SECONDS`，使 WebUI/热加载后的值真正生效。
 - 验证：定向 `25 passed`、`compileall` 为 `COMPILEALL_OK`；全量 `749 passed, 16 subtests passed`。
+
+## 第二批只改不堆收缩（2026-09-05）
+
+- `core/roxy_registration.py::_safe_get` 修复 script timeout 恢复错误，保留真实 driver 设置，读取失败才使用配置回退。
+- `core/session.py` 改为动态读取 `config.browser` / `config.openai_protocol`，消除热加载后的旧常量滞留。
+- 验证：定向 `108 passed`；全量 `750 passed, 16 subtests passed`；`compileall` 通过。

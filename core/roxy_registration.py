@@ -317,7 +317,15 @@ def _safe_get(driver, url: str, *, timeout: int = 45, attempts: int = 2, accept_
 
     last_exc: Exception | None = None
     old_timeout = int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)
-    old_script_timeout = old_timeout
+    try:
+        configured_script_timeout = getattr(getattr(driver, "timeouts", None), "script", None)
+        old_script_timeout = (
+            float(configured_script_timeout)
+            if isinstance(configured_script_timeout, (int, float))
+            else old_timeout
+        )
+    except Exception:
+        old_script_timeout = old_timeout
     hosts = tuple(h.lower() for h in (accept_hosts or ()))
     for attempt in range(1, max(1, attempts) + 1):
         try:

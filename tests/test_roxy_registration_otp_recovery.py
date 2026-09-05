@@ -29,6 +29,26 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(page_timeouts, [45, 90])
         self.assertEqual(script_timeouts, [8, 90])
 
+    def test_safe_get_restores_existing_script_timeout(self):
+        driver = MagicMock()
+        driver.current_url = "https://chatgpt.com/auth/login"
+        driver.timeouts.script = 17
+        page_timeouts = []
+        script_timeouts = []
+        driver.set_page_load_timeout.side_effect = page_timeouts.append
+        driver.set_script_timeout.side_effect = script_timeouts.append
+
+        roxy_registration._safe_get(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=45,
+            attempts=1,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+
+        self.assertEqual(page_timeouts, [45, 90])
+        self.assertEqual(script_timeouts, [8, 17.0])
+
     def test_generic_mail_failure_is_counted_before_service_can_requeue_it(self):
         class GenericApiMailError(Exception):
             pass

@@ -12,13 +12,8 @@ from urllib.parse import urlparse
 from curl_cffi.const import CurlOpt
 from curl_cffi.requests import Session
 
-from config import (
-    USER_AGENT, SEC_CH_UA, SEC_CH_UA_PLATFORM, SEC_CH_UA_MOBILE,
-    SEC_CH_UA_FULL_VERSION_LIST, SEC_CH_UA_PLATFORM_VERSION, SEC_CH_UA_ARCH,
-    SEC_CH_UA_BITNESS, SEC_CH_UA_MODEL, SEND_HIGH_ENTROPY_CLIENT_HINTS,
-    ACCEPT_LANGUAGE, IMPERSONATE, OAI_CLIENT_BUILD_NUMBER, OAI_CLIENT_VERSION,
-    REQUEST_TIMEOUT, pick_proxy, pick_browser_profile, validate_browser_profile,
-)
+from config import browser as _browser_cfg, openai_protocol as _protocol_cfg, pick_proxy, pick_browser_profile, validate_browser_profile
+
 
 
 logger = logging.getLogger(__name__)
@@ -87,7 +82,7 @@ class BrowserSession:
         # 先创建会话唯一画像，再用画像中的 impersonate 和 UA 完成出口探测。
         # 地区画像会在探测后刷新，但 TLS/UA/OS 字段在整个初始化和注册链路中保持不变。
         self.browser_profile = pick_browser_profile({})
-        self.impersonate = str(self.browser_profile.get("impersonate") or IMPERSONATE)
+        self.impersonate = str(self.browser_profile.get("impersonate") or _browser_cfg.IMPERSONATE)
         self._validate_fingerprint_alignment()
 
         # 生成设备ID（oai-did），整个注册流程复用
@@ -133,7 +128,7 @@ class BrowserSession:
         self.session = self._new_transport()
 
         # 设置超时
-        self.session.timeout = REQUEST_TIMEOUT
+        self.session.timeout = _browser_cfg.REQUEST_TIMEOUT
 
         # 会话级熔断：收到 403/429 后停止继续打后续接口，避免异常状态下扩大误伤。
         self.blocked_until = 0.0
@@ -157,7 +152,7 @@ class BrowserSession:
 
     def _new_transport(self) -> Session:
         transport = Session(**dict(self._session_kwargs))
-        transport.timeout = REQUEST_TIMEOUT
+        transport.timeout = _browser_cfg.REQUEST_TIMEOUT
         return transport
 
     def close(self) -> None:
@@ -352,7 +347,7 @@ class BrowserSession:
                 if cached is not None:
                     return dict(cached)
 
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        headers = {"User-Agent": _browser_cfg.USER_AGENT, "Accept": "application/json"}
         for url in endpoints:
             try:
                 resp = self.session.get(url, headers=headers, timeout=timeout)
@@ -399,26 +394,26 @@ class BrowserSession:
         """获取通用请求头，优先使用本 BrowserSession 的稳定画像。"""
         profile = getattr(self, "browser_profile", {}) or {}
         headers = {
-            "User-Agent": str(profile.get("user_agent") or USER_AGENT),
-            "accept-language": str(profile.get("accept_language") or ACCEPT_LANGUAGE),
+            "User-Agent": str(profile.get("user_agent") or _browser_cfg.USER_AGENT),
+            "accept-language": str(profile.get("accept_language") or _browser_cfg.ACCEPT_LANGUAGE),
         }
 
         # Safari 不发送 Chromium Client Hints；Chrome/Chromium 画像才补 sec-ch-*。
-        send_client_hints = bool(profile.get("send_client_hints", bool(SEC_CH_UA)))
+        send_client_hints = bool(profile.get("send_client_hints", bool(_browser_cfg.SEC_CH_UA)))
         if send_client_hints:
-            if profile.get("sec_ch_ua") or SEC_CH_UA:
-                headers["sec-ch-ua"] = str(profile.get("sec_ch_ua") or SEC_CH_UA)
-            if profile.get("sec_ch_ua_mobile") or SEC_CH_UA_MOBILE:
-                headers["sec-ch-ua-mobile"] = str(profile.get("sec_ch_ua_mobile") or SEC_CH_UA_MOBILE)
-            if profile.get("sec_ch_ua_platform") or SEC_CH_UA_PLATFORM:
-                headers["sec-ch-ua-platform"] = str(profile.get("sec_ch_ua_platform") or SEC_CH_UA_PLATFORM)
-            if SEND_HIGH_ENTROPY_CLIENT_HINTS:
+            if profile.get("sec_ch_ua") or _browser_cfg.SEC_CH_UA:
+                headers["sec-ch-ua"] = str(profile.get("sec_ch_ua") or _browser_cfg.SEC_CH_UA)
+            if profile.get("sec_ch_ua_mobile") or _browser_cfg.SEC_CH_UA_MOBILE:
+                headers["sec-ch-ua-mobile"] = str(profile.get("sec_ch_ua_mobile") or _browser_cfg.SEC_CH_UA_MOBILE)
+            if profile.get("sec_ch_ua_platform") or _browser_cfg.SEC_CH_UA_PLATFORM:
+                headers["sec-ch-ua-platform"] = str(profile.get("sec_ch_ua_platform") or _browser_cfg.SEC_CH_UA_PLATFORM)
+            if _browser_cfg.SEND_HIGH_ENTROPY_CLIENT_HINTS:
                 headers.update({
-                    "sec-ch-ua-full-version-list": str(profile.get("sec_ch_ua_full_version_list") or SEC_CH_UA_FULL_VERSION_LIST),
-                    "sec-ch-ua-platform-version": str(profile.get("sec_ch_ua_platform_version") or SEC_CH_UA_PLATFORM_VERSION),
-                    "sec-ch-ua-arch": str(profile.get("sec_ch_ua_arch") or SEC_CH_UA_ARCH),
-                    "sec-ch-ua-bitness": str(profile.get("sec_ch_ua_bitness") or SEC_CH_UA_BITNESS),
-                    "sec-ch-ua-model": str(profile.get("sec_ch_ua_model") or SEC_CH_UA_MODEL),
+                    "sec-ch-ua-full-version-list": str(profile.get("sec_ch_ua_full_version_list") or _browser_cfg.SEC_CH_UA_FULL_VERSION_LIST),
+                    "sec-ch-ua-platform-version": str(profile.get("sec_ch_ua_platform_version") or _browser_cfg.SEC_CH_UA_PLATFORM_VERSION),
+                    "sec-ch-ua-arch": str(profile.get("sec_ch_ua_arch") or _browser_cfg.SEC_CH_UA_ARCH),
+                    "sec-ch-ua-bitness": str(profile.get("sec_ch_ua_bitness") or _browser_cfg.SEC_CH_UA_BITNESS),
+                    "sec-ch-ua-model": str(profile.get("sec_ch_ua_model") or _browser_cfg.SEC_CH_UA_MODEL),
                 })
         return headers
 
@@ -504,8 +499,8 @@ class BrowserSession:
 
     def _attach_oai_context_headers(self, headers: dict) -> dict:
         """补齐同一设备上下文头，和 oai-did Cookie / OAuth ext-oai-did 保持一致。"""
-        headers["oai-client-build-number"] = OAI_CLIENT_BUILD_NUMBER
-        headers["oai-client-version"] = OAI_CLIENT_VERSION
+        headers["oai-client-build-number"] = _protocol_cfg.OAI_CLIENT_BUILD_NUMBER
+        headers["oai-client-version"] = _protocol_cfg.OAI_CLIENT_VERSION
         headers["oai-device-id"] = self.device_id
         headers["oai-language"] = self.navigator_language()
         headers["oai-session-id"] = self.oai_session_id
