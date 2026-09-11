@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
@@ -71,6 +72,7 @@ def _is_proxy_isolation_failure(value) -> bool:
         "注册出口 IP 已被其他并发任务占用",
         "注册出口 IP 已被其他任务占用或处于冷却",
         "出口 IP 与创建前预检不一致",
+        "窗口内出口 IP 复核失败",
     ))
 
 
@@ -1308,7 +1310,16 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         # input 清空，却没有真正发起 OpenAI authorize 跳转。重复点击同一个
         # React 表单通常只会复现该状态，因此只做一次浏览器上下文内的
         # NextAuth signin 兜底；它仍复用当前 Roxy profile 的 cookie/指纹。
-        if state_name in ("email_cleared", "email_page") and not nextauth_fallback_used:
+        current_url = urlsplit(str(getattr(driver, "current_url", "") or ""))
+        stalled_login_shell = (
+            state_name == "unknown"
+            and current_url.scheme == "https"
+            and current_url.netloc.lower() == "chatgpt.com"
+            and current_url.path == "/auth/login"
+            and [value.strip().lower() for value in parse_qs(current_url.query).get("email", [])]
+            == [email.strip().lower()]
+        )
+        if (state_name in ("email_cleared", "email_page") or stalled_login_shell) and not nextauth_fallback_used:
             nextauth_fallback_used = True
             fallback = _submit_email_via_browser_nextauth(driver, email)
             logger.info("%s 邮箱 UI 提交停滞，尝试一次 NextAuth 跳转兜底：%s", _log_prefix(driver), fallback)
@@ -1322,42 +1333,50 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
                 logger.info("%s NextAuth 兜底后已进入下一步：%s", _log_prefix(driver), fallback_state)
                 return fallback_state
             state_name = fallback_state
-        logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, _email_input_value_state(driver))
-        time.sleep(1.0)
-    raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
+        last_state = _email_input_value_state(driver)
+        logger.warning(
+            "%s 邮箱提交后仍未进入下一步：%s，%s state=%s",
+            _log_prefix(driver), state_name,
+            "准备重填重试" if attempt < attempts else "已用完提交次数",
+            redact_otp_text(last_state),
+        )
+        if attempt < attempts:
+            time.sleep(1.0)
+    raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={redact_otp_text(last_state)}")
 
 
 def _wait_for_otp_input(driver, timeout: int = 30) -> str | None:
     """Wait for the live OTP DOM control after a resend/navigation redraw."""
     end = time.time() + max(1, int(timeout))
-    while time.time() < end:
-        state = {}
-        try:
-            if _is_email_verification_page(driver):
-                state = _email_otp_page_state(driver)
-                if _email_otp_verified_success(state):
-                    logger.info("%s[OTP] 检测到 Email verified 确认页，不再等待验证码输入框", _log_prefix(driver))
-                    return "email_verified"
-                if state.get("inputs"):
-                    return
-        except Exception:
-            pass
+    while True:
+        state = _email_otp_page_state(driver)
         terminal_error = _email_otp_terminal_error(state)
         if terminal_error:
             raise RuntimeError(
                 f"OpenAI 返回 {terminal_error}：该邮箱对应的账号已删除或停用，禁止继续注册"
             )
+        if _email_otp_verified_success(state):
+            logger.info("%s[OTP] 检测到 Email verified 确认页，不再等待验证码输入框", _log_prefix(driver))
+            return "email_verified"
+        if _is_email_verification_page(driver):
+            if any(
+                not item.get("disabled") and not item.get("readOnly")
+                and re.search(
+                    r"one-time|otp|code|numeric|tel",
+                    " ".join(str(item.get(key) or "") for key in ("type", "name", "id", "autocomplete", "inputmode")),
+                    flags=re.IGNORECASE,
+                )
+                for item in (state.get("inputs") or [])
+            ):
+                return
+        else:
+            advanced = _otp_flow_advanced_state(driver)
+            if advanced in ("profile", "logged_in", "email_verified"):
+                return advanced
+        if time.time() >= end:
+            break
         time.sleep(0.8)
-    state = _email_otp_page_state(driver)
-    if _email_otp_verified_success(state):
-        logger.info("%s[OTP] 超时检查发现 Email verified 确认页，按已验证处理", _log_prefix(driver))
-        return "email_verified"
-    terminal_error = _email_otp_terminal_error(state)
-    if terminal_error:
-        raise RuntimeError(
-            f"OpenAI 返回 {terminal_error}：该邮箱对应的账号已删除或停用，禁止继续注册"
-        )
-    raise RuntimeError(f"等待 OTP 输入框超时: url={state.get('url')}; inputs={state.get('inputs')}")
+    raise RuntimeError(f"等待 OTP 输入框超时: stage=otp_dom_ready; state={redact_otp_text(state)}")
 
 
 def _is_browser_navigation_error(driver) -> bool:
@@ -1607,7 +1626,8 @@ def _email_otp_page_state(driver) -> dict:
         const inputs = [...document.querySelectorAll('input')].filter(visible).map(el => ({
           type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
           autocomplete: el.getAttribute('autocomplete') || '', inputmode: el.getAttribute('inputmode') || '',
-          ariaInvalid: el.getAttribute('aria-invalid') || '', value: el.value || ''
+          ariaInvalid: el.getAttribute('aria-invalid') || '', value: el.value || '',
+          disabled: !!el.disabled, readOnly: !!el.readOnly
         }));
         const buttons = [...document.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]')].filter(visible).map(el => ({
           tag: el.tagName, type: el.getAttribute('type') || '', value: el.getAttribute('value') || '',
@@ -1752,7 +1772,7 @@ def _reload_stuck_otp_page(driver, *, timeout: int = 30) -> str:
     )
     _page_warmup(driver, reason="otp_resend_stuck_recovery")
     wait_state = _wait_for_otp_input(driver, timeout=20)
-    return "email_verified" if wait_state == "email_verified" else "otp"
+    return wait_state if wait_state in ("email_verified", "profile", "logged_in") else "otp"
 
 
 def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
@@ -1967,12 +1987,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
     """提交 OTP 后等待页面状态，并区分成功前进与退回邮箱登录页。"""
     end = time.time() + timeout
     last = {}
-    while time.time() < end:
-        time.sleep(0.5)
-        if not _is_email_verification_page(driver):
-            if _is_email_login_page_still_present(driver):
-                return 'email_login'
-            return 'accepted'
+    while True:
         last = _email_otp_page_state(driver)
         terminal_error = _email_otp_terminal_error(last)
         if terminal_error:
@@ -1984,39 +1999,48 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
             return terminal_error
         if _email_otp_verified_success(last):
             return 'email_verified'
-        invalid = any(str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or []))
-        if invalid or (last.get('errors') or []):
-            return 'invalid'
-    if _is_email_verification_page(driver):
-        last = _email_otp_page_state(driver)
-        if _email_otp_verified_success(last):
-            return 'email_verified'
-        logger.info(
-            "%s[OTP] 提交后仍在验证码页且没有明确错误，保持 pending 状态 snapshot=%s",
-            _log_prefix(driver),
-            redact_otp_text(last),
-        )
-        return 'pending'
-    if _is_email_login_page_still_present(driver):
-        return 'email_login'
-    return 'accepted'
+        if _is_email_verification_page(driver):
+            invalid = any(str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or []))
+            if invalid or (last.get('errors') or []):
+                return 'invalid'
+        else:
+            advanced = _otp_flow_advanced_state(driver)
+            if advanced in ('profile', 'logged_in'):
+                return 'accepted'
+            if advanced in ('email_login', 'email_verified'):
+                return advanced
+        if time.time() >= end:
+            logger.info(
+                "%s[OTP] 提交后未确认资料页/Session/Email verified，保持 pending 状态 snapshot=%s",
+                _log_prefix(driver), redact_otp_text(last),
+            )
+            return 'pending'
+        time.sleep(0.5)
 
 
 def _require_confirmed_otp_submit(outcome: str, observed_seconds: int) -> str:
     """Never convert an unchanged verification form into a successful OTP submit."""
     if outcome == "pending":
         raise RuntimeError(
-            f"OTP submit stayed on the verification page for {max(0, int(observed_seconds))}s "
+            f"OTP submit stage=otp_submit observed {max(0, int(observed_seconds))}s "
             "without an acceptance signal; profile progression was stopped"
         )
     return outcome
 
 
-def _reload_and_resubmit_otp_once(driver, otp: str, *, timeout: int = 6) -> str:
-    """参考 FlowPilot 的 unchanged-form 恢复：刷新、重填、再提交一次。"""
+def _reload_and_resubmit_otp_once(driver, otp: str, *, timeout: int = 30) -> str:
+    """Only retry an idle OTP form, preserving navigation and verified states."""
+    outcome = _wait_after_email_otp_submit(driver, timeout=0)
+    if outcome != "pending":
+        return outcome
     current_url = str(getattr(driver, "current_url", "") or "")
     if "email-verification" not in current_url.lower():
-        return "accepted"
+        return "pending"
+    state = _email_otp_page_state(driver)
+    if not state.get("inputs") or any(
+        item.get("disabled") or item.get("readOnly") for item in state.get("inputs", [])
+    ):
+        return "pending"
     logger.warning("%s[OTP] Continue 后表单未变化，刷新验证页并复用同一验证码重试一次", _log_prefix(driver))
     try:
         driver.refresh()
@@ -2028,12 +2052,24 @@ def _reload_and_resubmit_otp_once(driver, otp: str, *, timeout: int = 6) -> str:
             attempts=1,
             accept_hosts=("chatgpt.com", "auth.openai.com"),
         )
-    ready = _wait_for_otp_input(driver, timeout=max(2, min(6, int(timeout))))
+    ready = _wait_for_otp_input(driver, timeout=max(30, int(timeout)))
     if ready == "email_verified":
         return "email_verified"
+    if ready in ("profile", "logged_in"):
+        return "accepted"
+    outcome = _wait_after_email_otp_submit(driver, timeout=0)
+    if outcome != "pending":
+        return outcome
     _clear_otp_inputs(driver)
     _type_otp(driver, otp)
-    _click_continue(driver)
+    if _is_email_verification_page(driver):
+        state = _email_otp_page_state(driver)
+        if _email_otp_verified_success(state):
+            return "email_verified"
+        if state.get("inputs") and not any(
+            item.get("disabled") or item.get("readOnly") for item in state.get("inputs", [])
+        ):
+            _click_continue(driver)
     logger.info("%s[OTP] 刷新后已重新填写并提交验证码", _log_prefix(driver))
     return "submitted"
 
@@ -3340,6 +3376,8 @@ def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None)
         wait_state = _wait_for_otp_input(driver, timeout=30)
         if wait_state == "email_verified":
             state = _resume_chatgpt_login_callback(driver, email=email)
+        elif wait_state in ("profile", "logged_in"):
+            state = wait_state
         else:
             state = "otp"
     if state == "otp":
@@ -3516,8 +3554,8 @@ def _verify_registration_exit_geo(
     A proxy endpoint is only a candidate until the real public IP is observed.
     The preflight reservation protects the create/open race; this second gate
     prevents a proxy that rotated or was ignored by Roxy from silently being
-    used for registration.  When the browser probe is temporarily empty, the
-    already-reserved same-proxy preflight result remains the explicit fallback.
+    used for registration.  A preflight reservation does not establish the
+    actual route used by the browser; an empty live probe stops registration.
     """
     from config import proxy as _proxy_cfg
 
@@ -3525,6 +3563,8 @@ def _verify_registration_exit_geo(
     browser = dict(browser_geo or {})
     preflight_ip = _proxy_cfg.normalize_exit_ip(preflight.get("ip"))
     browser_ip = _proxy_cfg.normalize_exit_ip(browser.get("ip"))
+    if not browser_ip:
+        raise RuntimeError("Roxy 窗口内出口 IP 复核失败：未返回有效实测地址；已终止注册")
 
     if browser_ip and preflight_ip and browser_ip != preflight_ip:
         # Claim the actually observed address before aborting, so another
@@ -3539,16 +3579,13 @@ def _verify_registration_exit_geo(
             "疑似代理漂移或 proxyInfo 未生效，已终止注册"
         )
 
-    selected = ({**preflight, **browser} if browser_ip else dict(preflight))
-    selected_ip = browser_ip or preflight_ip
-    if not selected_ip:
-        return {}
-    if not client.reconcile_registration_exit_ip(selected_ip):
+    selected = {**preflight, **browser}
+    if not client.reconcile_registration_exit_ip(browser_ip):
         raise RuntimeError(
-            f"Roxy 注册出口 IP 已被其他任务占用或处于冷却：ip={selected_ip}；已终止注册"
+            f"Roxy 注册出口 IP 已被其他任务占用或处于冷却：ip={browser_ip}；已终止注册"
         )
-    selected["ip"] = selected_ip
-    selected["verification_source"] = "browser_context" if browser_ip else "same_proxy_preflight_fallback"
+    selected["ip"] = browser_ip
+    selected["verification_source"] = "browser_context"
     return selected
 
 
@@ -3655,14 +3692,6 @@ def run_roxy_registration(
             profile_isolation.get("core_version") or "-",
             profile_isolation.get("os") or "-",
         )
-        if registration_exit_geo.get("verification_source") == "same_proxy_preflight_fallback":
-            logger.warning(
-                "[Roxy注册] 窗口内出口探测服务本轮无响应；复用创建环境前同一粘性代理的已验证出口：ip=%s country=%s",
-                registration_exit_geo.get("ip"),
-                registration_exit_geo.get("country") or "?",
-            )
-        if not registration_exit_geo.get("ip"):
-            raise RuntimeError("Roxy 窗口已启动但未能复核实际出口 IP，且没有同一代理的预检结果，已终止注册")
         logger.info("[Roxy注册] 开始：%s，profile=%s", email, opened.profile_id)
         traffic_optimizer = _start_traffic_optimizer(driver)
 
@@ -3818,6 +3847,9 @@ def run_roxy_registration(
                     continue
             logger.info("[Roxy注册][OTP] 收到验证码：%s", mask_otp(current_otp))
             otp_ready = _wait_for_otp_input(driver, timeout=30)
+            if otp_ready in ("profile", "logged_in"):
+                logger.info("[Roxy注册][OTP] 页面已完成验证并进入 %s，跳过重复输入", otp_ready)
+                break
             if otp_ready == "email_verified":
                 logger.info("[Roxy][OTP] Email verified page appeared before OTP input; resuming ChatGPT callback")
                 callback_state = _resume_chatgpt_login_callback(driver, email=email)
@@ -3838,7 +3870,7 @@ def run_roxy_registration(
             if _is_email_verification_page(driver):
                 state_before_submit = _email_otp_page_state(driver)
                 has_otp_input = any(
-                    re.search(
+                    not item.get("disabled") and not item.get("readOnly") and re.search(
                         r"one-time|otp|code|numeric|tel",
                         " ".join(str(item.get(k) or "") for k in ("type", "name", "id", "autocomplete", "inputmode")),
                         flags=re.IGNORECASE,
@@ -3865,34 +3897,24 @@ def run_roxy_registration(
                 min(2, int(getattr(_cfg, "ROXY_OTP_SUBMIT_ATTEMPTS", 2) or 2)),
             )
             pending_grace = max(0, int(getattr(_cfg, "ROXY_OTP_PENDING_GRACE", 10) or 0))
-            first_observe = otp_submit_timeout
-            if otp_submit_attempts > 1:
-                first_observe = max(5, otp_submit_timeout // 2)
-            outcome = _wait_after_email_otp_submit(driver, timeout=first_observe)
-            observed_seconds = first_observe
+            # Let the original submit and callback finish before destroying the DOM.
+            outcome = _wait_after_email_otp_submit(driver, timeout=otp_submit_timeout)
+            observed_seconds = otp_submit_timeout
+            if outcome == 'pending' and pending_grace:
+                logger.info("[Roxy][OTP] No explicit error; waiting %s more seconds before page recovery", pending_grace)
+                outcome = _wait_after_email_otp_submit(driver, timeout=pending_grace)
+                observed_seconds += pending_grace
             if outcome == 'pending' and otp_submit_attempts > 1:
-                retry_state = _reload_and_resubmit_otp_once(
+                outcome = _reload_and_resubmit_otp_once(
                     driver,
                     current_otp,
-                    timeout=max(3, otp_submit_timeout - first_observe),
+                    timeout=30,
                 )
-                if retry_state == "email_verified":
-                    outcome = "email_verified"
-                elif retry_state == "accepted":
-                    outcome = "accepted"
-                else:
-                    retry_observe = max(4, otp_submit_timeout - first_observe)
-                    outcome = _wait_after_email_otp_submit(driver, timeout=retry_observe)
-                    observed_seconds += retry_observe
+                if outcome in ('submitted', 'pending'):
+                    outcome = _wait_after_email_otp_submit(driver, timeout=otp_submit_timeout)
+                    observed_seconds += otp_submit_timeout
             if outcome == 'pending':
-                if pending_grace:
-                    logger.info("[Roxy][OTP] No explicit error; waiting %s more seconds before any resend", pending_grace)
-                    outcome = _wait_after_email_otp_submit(driver, timeout=pending_grace)
-                    observed_seconds += pending_grace
-                if outcome == 'pending':
-                    logger.info(
-                        "[Roxy][OTP] 等待预算结束仍无接受信号；停止误进入资料页"
-                    )
+                logger.info("[Roxy][OTP] 等待预算结束仍无接受信号；停止误进入资料页")
             outcome = _require_confirmed_otp_submit(
                 outcome,
                 observed_seconds,
@@ -4046,6 +4068,13 @@ def run_roxy_registration(
                 )
             finally:
                 if twofa_session is not None:
+                    refreshed_access_token = getattr(twofa_session, "_twofa_refreshed_access_token", None)
+                    if isinstance(refreshed_access_token, str) and refreshed_access_token.strip():
+                        access_token = refreshed_access_token.strip()
+                        session_info["accessToken"] = access_token
+                        refreshed_expires = getattr(twofa_session, "_twofa_session_expires", None)
+                        if isinstance(refreshed_expires, str) and refreshed_expires.strip():
+                            session_info["expires"] = refreshed_expires.strip()
                     twofa_session.close()
 
         codex_result = {

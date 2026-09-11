@@ -1,11 +1,87 @@
 # -*- coding: utf-8 -*-
 import unittest
+from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 from core import roxy_registration
+from core.roxybrowser_client import RoxyOpenResult
 
 
 class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
+    def test_registration_saves_refreshed_session_even_when_mfa_returns_failure_or_raises(self):
+        for outcome in ("failure_return", "exception", "success", "absent"):
+            with self.subTest(outcome=outcome), ExitStack() as stack:
+                client = MagicMock()
+                client.profile_proxy = "http://proxy.example:8080"
+                client.open_profile.return_value = RoxyOpenResult(
+                    "profile-fixture", {}, preflight_exit_geo={"ip": "198.51.100.7"},
+                )
+                client.reconcile_registration_exit_ip.return_value = True
+                session = SimpleNamespace(close=MagicMock())
+                setup_result = SimpleNamespace(
+                    secret="fixture-secret", access_token="result-at", expires="fresh-expires",
+                    password="confirmed-password", password_configured=True, security_ok=True,
+                )
+
+                def setup(*args, **kwargs):
+                    if outcome != "absent":
+                        session._twofa_refreshed_access_token = "refreshed-at"
+                        session._twofa_session_expires = "fresh-expires"
+                    if outcome == "exception":
+                        raise RuntimeError("fixture MFA failure")
+                    return setup_result if outcome == "success" else None
+
+                mocked = {
+                    "RoxyBrowserClient": client,
+                    "_build_driver": MagicMock(),
+                    "_center_browser_window": None,
+                    "probe_selenium_driver_exit_geo": {"ip": "198.51.100.7"},
+                    "_start_traffic_optimizer": None,
+                    "_safe_get": None,
+                    "human_delay": None,
+                    "_page_warmup": None,
+                    "_maybe_accept": None,
+                    "_check_manual_stop": None,
+                    "_submit_email_and_wait_next": "otp",
+                    "registration_password_required": False,
+                    "_fill_password_page_if_present": "confirmed-password",
+                    "_wait_for_otp_input": "profile",
+                    "_complete_profile_page": True,
+                    "_fetch_or_recover_chatgpt_session": {
+                        "accessToken": "registration-at", "expires": "old-expires",
+                        "user": {"email": "mail@example.test"},
+                    },
+                    "resolve_twofa_proxy": "http://proxy.example:8080",
+                    "build_twofa_session": session,
+                    "_finish_traffic_optimizer": {},
+                    "resolve_email_source": "generic_api",
+                }
+                for name, result in mocked.items():
+                    stack.enter_context(patch.object(roxy_registration, name, return_value=result))
+                stack.enter_context(patch.object(roxy_registration._cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
+                stack.enter_context(patch.object(roxy_registration._twofa_cfg, "ENABLE_2FA", True))
+                stack.enter_context(patch("config.codex.ENABLE_CODEX_AUTO", False))
+                setup_mock = stack.enter_context(patch("core.account_export.maybe_setup_2fa_result", side_effect=setup))
+                save = stack.enter_context(patch.object(roxy_registration, "save_account_data", return_value=706))
+                log = stack.enter_context(patch.object(roxy_registration, "logger"))
+
+                result = roxy_registration.run_roxy_registration(
+                    "mail@example.test", "Test User", "1990-01-01", otp_code="123456",
+                )
+
+                expected_token = "registration-at" if outcome == "absent" else "refreshed-at"
+                expected_expires = "old-expires" if outcome == "absent" else "fresh-expires"
+                save.assert_called_once()
+                self.assertEqual(save.call_args.kwargs["access_token"], expected_token)
+                self.assertEqual(save.call_args.kwargs["extra"]["expires"], expected_expires)
+                self.assertEqual(result["access_token"], expected_token)
+                self.assertEqual(result["success"], outcome == "success")
+                self.assertEqual(bool(save.call_args.kwargs["totp_secret"]), outcome == "success")
+                self.assertEqual(setup_mock.call_args.kwargs["access_token"], "registration-at")
+                session.close.assert_called_once()
+                self.assertNotIn("refreshed-at", repr(log.mock_calls))
+
     def test_proxy_transport_failure_is_classified(self):
         self.assertTrue(
             roxy_registration._is_proxy_transport_failure(
@@ -117,6 +193,18 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
         result = roxy_registration._read_chatgpt_session_once(driver)
 
         self.assertTrue(result["_session_expired"])
+
+    def test_visible_recovery_does_not_request_otp_after_wait_finds_session(self):
+        with patch.object(roxy_registration, "_snapshot_current_email_otp", return_value=None), \
+             patch.object(roxy_registration, "_resume_chatgpt_login_callback", return_value="otp"), \
+             patch.object(roxy_registration, "_wait_for_otp_input", return_value="logged_in"), \
+             patch.object(roxy_registration, "wait_for_otp") as wait_otp, \
+             patch.object(roxy_registration, "_type_otp") as type_otp, \
+             patch.object(roxy_registration, "_fetch_chatgpt_session", return_value={"accessToken": "settled-at"}):
+            result = roxy_registration._recover_chatgpt_session_in_browser(MagicMock(), "mail@example.test")
+        self.assertEqual(result["accessToken"], "settled-at")
+        wait_otp.assert_not_called()
+        type_otp.assert_not_called()
 
     @patch.object(roxy_registration, "_recover_chatgpt_session_in_browser")
     @patch("core.account_liveness.check_account_liveness")

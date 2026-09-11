@@ -12,11 +12,12 @@ from core import account_export
 @pytest.fixture(autouse=True)
 def _disable_real_security_checkpoint_writes(monkeypatch):
     """本模块使用伪账号验证状态机，禁止测试凭据写进工作区运行时文件。"""
-    from core import registration_password
+    from core import db, registration_password
     from config import twofa
 
     monkeypatch.setattr(twofa, "ENABLE_2FA", False)
     monkeypatch.setattr(account_export, "_persist_activated_totp_checkpoint", lambda *args: True)
+    monkeypatch.setattr(db, "save_security_checkpoint", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         registration_password,
         "persist_confirmed_registration_password",
@@ -48,37 +49,344 @@ def test_browser_post_preserves_renderer_transport_detail() -> None:
     assert "renderer disconnected" in str(exc_info.value)
 
 
-def test_browser_totp_activate_retries_same_enrollment_after_transport_failure(monkeypatch) -> None:
-    driver = SimpleNamespace(current_url="https://chatgpt.com/")
-    calls = []
-    responses = [
-        {"body": {"secret": "JBSWY3DPEHPK3PXP", "session_id": "sid"}, "access_token": "token", "expires": None},
-        account_export.TwoFASetupError("totp_activate", "totp_browser_activate_failed", "transport", http_status=None),
-        {"body": {"success": True}, "access_token": "token", "expires": None},
-    ]
+@pytest.mark.parametrize("failure_kind", ["exception", "http"])
+def test_browser_mfa_redacts_long_credentials_before_truncating(failure_kind, monkeypatch):
+    token = "sensitive-token-prefix-" + "A" * 220
+    secret = "JBSWY3DPEHPK3PXP"
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: None)
+    enrollment = "sensitive-enrollment-" + "B" * 200
+    detail = f"failed token={token} enrollment={enrollment} secret={secret} OTP=123456"
+    if failure_kind == "exception":
+        execute = Mock(side_effect=RuntimeError(detail))
+    else:
+        execute = Mock(return_value={"status": 403, "body": {"error": detail}})
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._browser_authenticated_json_post(
+            SimpleNamespace(execute_async_script=execute),
+            "/backend-api/accounts/mfa/user/activate_enrollment", {"session_id": enrollment},
+            access_token=token, totp_secret=secret, stage="totp_activate", code="totp_browser_activate_failed",
+            message="MFA request failed",
+        )
+    assert "sensitive-token-prefix" not in str(exc_info.value)
+    assert "sensitive-enrollment" not in str(exc_info.value)
+    assert secret not in str(exc_info.value)
+    assert "123456" not in str(exc_info.value)
+    assert "[redacted]" in str(exc_info.value)
+    import traceback
+    trace = "".join(traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__))
+    for sensitive in (token, secret, enrollment, "123456", "sensitive-token-prefix", "sensitive-enrollment"):
+        assert sensitive not in trace
+    assert execute.call_count == 1
 
-    def fake_post(_driver, path, payload, **kwargs):
-        calls.append((path, payload, kwargs))
-        response = responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
 
-    waits = []
-    monkeypatch.setattr(account_export, "_browser_authenticated_json_post", fake_post)
-    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda min_remaining=4.0: waits.append(min_remaining))
+@pytest.fixture
+def browser_mfa_replay(monkeypatch):
+    replay = SimpleNamespace(responses=[], calls=[], sleeps=[], waits=[])
 
-    secret, token, _expires = account_export._setup_totp_with_driver(
-        driver,
-        "user@example.test",
-        authenticated_email="user@example.test",
-        access_token="token",
+    def post(script, path, payload, access_token, expected_email):
+        replay.calls.append((path, dict(payload), access_token, expected_email))
+        result = replay.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    replay.driver = SimpleNamespace(
+        current_url="https://chatgpt.com/", execute_async_script=Mock(side_effect=post),
     )
-    assert secret == "JBSWY3DPEHPK3PXP"
-    assert token == "token"
-    assert len(calls) == 3  # one enroll + two activate attempts
-    assert waits == [4.0, 8.0]
-    assert all(call[0].endswith("activate_enrollment") for call in calls[1:])
+    monkeypatch.setattr(account_export.time, "sleep", replay.sleeps.append)
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda: replay.waits.append(True))
+    replay.enroll = {
+        "status": 200, "stage": "request", "json": True, "email": "user@example.test",
+        "accessToken": "browser-token-private",
+        "body": {"secret": "JBSWY3DPEHPK3PXP", "session_id": "enrollment-private"},
+    }
+    replay.activate = {"status": 200, "stage": "request", "json": True, "body": {"success": True}}
+    replay.temporary = {"status": 503, "stage": "request", "body": {}, "accessToken": "browser-token-private"}
+    return replay
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_browser_totp_enroll_recovers_temporary_http_with_same_token(browser_mfa_replay, caplog, status):
+    replay = browser_mfa_replay
+    first = dict(replay.temporary, status=status, email="user@example.test", expires="2026-09-12T00:00:00Z")
+    replay.responses = [first, dict(replay.enroll, email=""), replay.activate]
+    with caplog.at_level("INFO"):
+        result = account_export._setup_totp_with_driver(
+            replay.driver, "user@example.test", authenticated_email="user@example.test",
+        )
+    assert result == ("JBSWY3DPEHPK3PXP", "browser-token-private", "2026-09-12T00:00:00Z")
+    assert [call[2] for call in replay.calls] == ["", "browser-token-private", "browser-token-private"]
+    assert [call[3] for call in replay.calls] == ["user@example.test"] * 3
+    assert [call[0].rsplit("/", 1)[-1] for call in replay.calls] == ["enroll", "enroll", "activate_enrollment"]
+    assert replay.sleeps == [2]
+    assert "stage=totp_enroll" in caplog.text and "attempt=2/3" in caplog.text
+    for sensitive in ("browser-token-private", "enrollment-private", "JBSWY3DPEHPK3PXP"):
+        assert sensitive not in caplog.text
+
+
+@pytest.mark.parametrize("phase", ["enroll", "activate"])
+def test_browser_totp_temporary_http_exhaustion_is_bounded(browser_mfa_replay, phase):
+    replay = browser_mfa_replay
+    replay.responses = ([replay.enroll] if phase == "activate" else []) + [replay.temporary] * 3
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._setup_totp_with_driver(replay.driver, "user@example.test", access_token="browser-token-private")
+    assert exc_info.value.stage == f"totp_{phase}"
+    assert exc_info.value.http_status == 503
+    assert "attempt=3/3" in str(exc_info.value)
+    assert len(replay.calls) == (4 if phase == "activate" else 3)
+    assert replay.sleeps == [2, 4]
+    if phase == "activate":
+        assert [call[1]["session_id"] for call in replay.calls[1:]] == ["enrollment-private"] * 3
+
+
+@pytest.mark.parametrize("phase", ["enroll", "activate"])
+@pytest.mark.parametrize("failure", [
+    {"status": 401, "body": {"error": "token_revoked"}},
+    {"status": 403, "body": {"error": "permission_denied"}},
+    {"status": 408, "body": {}},
+    {"status": 425, "body": {}},
+    {"status": 500, "body": {}},
+    {"status": 502, "body": {}},
+    {"status": 504, "body": {}},
+    {"status": 503, "body": {"error": {"code": "account_rejected"}}},
+    {"status": 503, "body": {"session_id": "already-created"}},
+    {"status": 503, "body": {"success": True}},
+    {"status": 0, "stage": "exception", "error": "fetch failed", "body": {}},
+    RuntimeError("renderer disconnected browser-token-private enrollment-private 123456"),
+])
+def test_browser_totp_does_not_replay_business_or_ambiguous_writes(browser_mfa_replay, phase, failure):
+    replay = browser_mfa_replay
+    replay.responses = ([replay.enroll] if phase == "activate" else []) + [failure]
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._setup_totp_with_driver(replay.driver, "user@example.test", access_token="browser-token-private")
+    assert exc_info.value.stage == f"totp_{phase}"
+    assert len(replay.calls) == (2 if phase == "activate" else 1)
+    assert replay.sleeps == []
+    assert "browser-token-private" not in str(exc_info.value)
+    assert "123456" not in str(exc_info.value)
+    if phase == "activate":
+        assert "enrollment-private" not in str(exc_info.value)
+    if isinstance(failure, dict) and failure.get("status") == 401:
+        assert "token_revoked" in str(exc_info.value)
+
+
+def test_browser_totp_failed_enroll_retains_matched_refreshed_token_after_password(browser_mfa_replay, monkeypatch):
+    from config import twofa
+    from core import db, registration_password
+
+    replay = browser_mfa_replay
+    replay.responses = [dict(replay.temporary, email="user@example.test", expires="2026-09-12T00:00:00Z")] * 3
+    checkpoints = []
+    secret_checkpoints = []
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(account_export, "import_browser_cookies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(registration_password, "persist_confirmed_registration_password", lambda *args: checkpoints.append(("password", args)) or True)
+    monkeypatch.setattr(db, "save_security_checkpoint", lambda *args, **kwargs: checkpoints.append(("token", args, kwargs)) or {})
+    monkeypatch.setattr(account_export, "_persist_activated_totp_checkpoint", lambda *args: secret_checkpoints.append(args))
+    session = SimpleNamespace(_twofa_refreshed_access_token="old-context-token")
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export.setup_2fa_result(
+            session, "user@example.test", driver=replay.driver,
+            authenticated_email="user@example.test", access_token="revoked-registration-token",
+            desired_password="Stable-pass-1!",
+        )
+    assert exc_info.value.stage == "totp_enroll" and exc_info.value.http_status == 503
+    assert session._twofa_refreshed_access_token == "browser-token-private"
+    assert session._twofa_session_expires == "2026-09-12T00:00:00Z"
+    assert checkpoints == [
+        ("password", ("user@example.test", "Stable-pass-1!")),
+        ("token", ("user@example.test",), {"access_token": "browser-token-private"}),
+    ]
+    assert secret_checkpoints == []
+    assert "browser-token-private" not in str(session._twofa_last_error)
+    assert [call[2] for call in replay.calls] == ["", "browser-token-private", "browser-token-private"]
+
+
+def test_browser_totp_password_failure_clears_previous_refreshed_token(browser_mfa_replay, monkeypatch):
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", lambda **kwargs: {
+        "ok": False, "stage": "password_email", "code": "password_email_code_wait_failed",
+    })
+    session = SimpleNamespace(_twofa_refreshed_access_token="previous-operation-token")
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export.setup_2fa_result(
+            session, "user@example.test", driver=browser_mfa_replay.driver,
+            authenticated_email="user@example.test", desired_password="Stable-pass-1!",
+        )
+    assert exc_info.value.stage == "password_email"
+    assert session._twofa_refreshed_access_token == ""
+    assert browser_mfa_replay.calls == []
+
+
+@pytest.mark.parametrize("failure_mode", ["mismatch", "explicit_token", "checkpoint_write"])
+def test_browser_totp_refreshed_token_checkpoint_boundaries(browser_mfa_replay, monkeypatch, caplog, failure_mode):
+    from core import db
+
+    replay = browser_mfa_replay
+    first = dict(replay.temporary, email="other@example.test" if failure_mode == "mismatch" else "user@example.test")
+    replay.responses = [first] if failure_mode == "mismatch" else [first] * 3
+    writes = []
+
+    def checkpoint(*args, **kwargs):
+        writes.append((args, kwargs))
+        if failure_mode == "checkpoint_write":
+            raise OSError("failure with browser-token-private")
+        return {}
+
+    monkeypatch.setattr(db, "save_security_checkpoint", checkpoint)
+    context = SimpleNamespace(_twofa_refreshed_access_token="")
+    with pytest.raises(account_export.TwoFASetupError):
+        account_export._setup_totp_with_driver(
+            replay.driver, "user@example.test", session_context=context,
+            access_token="browser-token-private" if failure_mode == "explicit_token" else "",
+        )
+    if failure_mode == "checkpoint_write":
+        assert context._twofa_refreshed_access_token == "browser-token-private"
+        assert writes == [(("user@example.test",), {"access_token": "browser-token-private"})]
+        assert "OSError" in caplog.text
+    else:
+        assert context._twofa_refreshed_access_token == ""
+        assert writes == []
+    assert "browser-token-private" not in caplog.text
+
+
+def test_browser_totp_retry_stops_on_token_drift(browser_mfa_replay):
+    replay = browser_mfa_replay
+    replay.responses = [replay.temporary, dict(replay.enroll, accessToken="different-token")]
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._setup_totp_with_driver(replay.driver, "user@example.test", access_token="browser-token-private")
+    assert exc_info.value.code == "totp_session_refresh_failed"
+    assert len(replay.calls) == 2 and replay.sleeps == [2]
+    assert all(call[2] == "browser-token-private" for call in replay.calls)
+
+
+def test_browser_totp_activate_retry_refreshes_code_without_reenroll(browser_mfa_replay, monkeypatch):
+    replay = browser_mfa_replay
+    replay.responses = [replay.enroll, replay.temporary, replay.activate]
+    codes = Mock(side_effect=["123456", "654321"])
+    monkeypatch.setattr(account_export.pyotp, "TOTP", lambda secret: SimpleNamespace(now=codes))
+    secret, token, _expires = account_export._setup_totp_with_driver(
+        replay.driver, "user@example.test", access_token="browser-token-private",
+    )
+    assert secret == "JBSWY3DPEHPK3PXP" and token == "browser-token-private"
+    assert [call[0].rsplit("/", 1)[-1] for call in replay.calls] == ["enroll", "activate_enrollment", "activate_enrollment"]
+    assert [call[1]["session_id"] for call in replay.calls[1:]] == ["enrollment-private"] * 2
+    assert [call[1]["code"] for call in replay.calls[1:]] == ["123456", "654321"]
+    assert replay.waits == [True, True]
+
+
+@pytest.mark.parametrize("activation_body", [{"success": True}, {"success": False}, {"success": "true"}, {}])
+def test_browser_totp_checkpoint_requires_confirmed_activation(browser_mfa_replay, monkeypatch, activation_body):
+    from config import twofa
+
+    replay = browser_mfa_replay
+    replay.responses = [replay.enroll, replay.temporary, dict(replay.activate, body=activation_body)]
+    checkpoints = []
+    validations = []
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(account_export, "_persist_activated_totp_checkpoint", lambda *args: checkpoints.append((len(replay.calls), args)) or True)
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: validations.append(args) or 200)
+    kwargs = dict(driver=replay.driver, existing_password="Stable-pass-1!", authenticated_email="user@example.test")
+    if activation_body.get("success") is True:
+        result = account_export.setup_2fa_result(SimpleNamespace(), "user@example.test", **kwargs)
+        assert result.security_ok is True and result.totp_checkpoint_persisted is True
+        assert checkpoints == [(3, ("user@example.test", "JBSWY3DPEHPK3PXP", "browser-token-private"))]
+        assert len(validations) == 1
+    else:
+        with pytest.raises(account_export.TwoFASetupError) as exc_info:
+            account_export.setup_2fa_result(SimpleNamespace(), "user@example.test", **kwargs)
+        assert exc_info.value.code == "totp_activate_failed"
+        assert checkpoints == [] and validations == []
+    assert len(replay.calls) == 3
+
+
+@pytest.mark.parametrize("runtime", ["selenium", "playwright"])
+@pytest.mark.parametrize("session, expected_error", [
+    ({"user": {"email": "user@example.test"}}, "missing_access_token"),
+    ({"accessToken": "token", "user": {"email": "other@example.test"}}, "session_account_mismatch"),
+    ({"accessToken": "token", "user": {}}, "missing_session_email"),
+    ({"accessToken": "matched-session-token", "user": {"email": "user@example.test"},
+      "expires": "2026-09-12T00:00:00Z"}, "fixture fetch failed matched-session-token"),
+])
+def test_browser_mfa_javascript_preserves_session_boundary_on_fetch_failure(runtime, session, expected_error, monkeypatch):
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required to execute the browser script fixture")
+    source = account_export._TOTP_BROWSER_POST_SELENIUM_JS if runtime == "selenium" else account_export._TOTP_BROWSER_POST_JS
+    script = """
+const {source, runtime, session} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const calls = [];
+global.fetch = async (url, options = {}) => {
+  calls.push({url, method: options.method || 'GET'});
+  if (url !== '/api/auth/session') throw `fixture fetch failed ${session.accessToken}`;
+  return {ok:true, status:200, json:async () => session};
+};
+const request = {path:'/backend-api/accounts/mfa/enroll', payload:{factor_type:'totp'},
+  accessToken:'', expectedEmail:'user@example.test'};
+const run = runtime === 'selenium'
+  ? new Promise(resolve => new Function(source)(request.path, request.payload, '', request.expectedEmail, resolve))
+  : eval(`(${source})`)(request);
+run.then(result => process.stdout.write(JSON.stringify({result, calls})));
+"""
+    completed = subprocess.run(
+        [node, "-e", script], input=json.dumps({"source": source, "runtime": runtime, "session": session}),
+        text=True, capture_output=True, timeout=10, check=True,
+    )
+    outcome = json.loads(completed.stdout)
+    transport_failed = expected_error.startswith("fixture fetch failed")
+    assert outcome["result"]["stage"] == ("exception" if transport_failed else "session")
+    assert outcome["result"]["error"] == expected_error
+    expected_calls = [{"url": "/api/auth/session", "method": "GET"}]
+    if transport_failed:
+        expected_calls.append({"url": "/backend-api/accounts/mfa/enroll", "method": "POST"})
+    assert outcome["calls"] == expected_calls
+
+    from core import db
+    writes = []
+    monkeypatch.setattr(db, "save_security_checkpoint", lambda *args, **kwargs: writes.append((args, kwargs)) or {})
+    execute = Mock(return_value=outcome["result"])
+    driver = SimpleNamespace(current_url="https://chatgpt.com/")
+    if runtime == "selenium":
+        driver.execute_async_script = execute
+    else:
+        driver.evaluate = execute
+        driver.locator = Mock()
+    context = SimpleNamespace(_twofa_refreshed_access_token="")
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._setup_totp_with_driver(driver, "user@example.test", session_context=context)
+    assert execute.call_count == 1
+    if transport_failed:
+        assert exc_info.value.stage == "totp_enroll" and exc_info.value.http_status is None
+        assert context._twofa_refreshed_access_token == "matched-session-token"
+        assert context._twofa_session_expires == "2026-09-12T00:00:00Z"
+        assert writes == [(("user@example.test",), {"access_token": "matched-session-token"})]
+        assert "matched-session-token" not in str(exc_info.value)
+    else:
+        assert exc_info.value.stage == "totp_session"
+        assert context._twofa_refreshed_access_token == ""
+        assert writes == []
+
+
+@pytest.mark.parametrize("failure, expected_code", [
+    ({"status": 200, "stage": "session", "error": "missing_access_token", "body": {}}, "totp_session_refresh_failed"),
+    ({"status": 503, "stage": "session", "body": {}}, "totp_session_refresh_failed"),
+    ({"status": 200, "stage": "session", "error": "session_account_mismatch", "body": {}}, "totp_session_account_mismatch"),
+    ({"status": 503, "stage": "request", "email": "other@example.test", "accessToken": "other-token", "body": {}}, "totp_session_account_mismatch"),
+])
+def test_browser_mfa_session_errors_stop_before_retry(browser_mfa_replay, failure, expected_code):
+    replay = browser_mfa_replay
+    replay.responses = [failure]
+    with pytest.raises(account_export.TwoFASetupError) as exc_info:
+        account_export._setup_totp_with_driver(replay.driver, "user@example.test")
+    assert exc_info.value.code == expected_code
+    assert len(replay.calls) == 1 and replay.sleeps == []
 
 
 def test_twofa_rejects_authenticated_account_mismatch_before_writes(monkeypatch) -> None:
@@ -565,7 +873,7 @@ def test_setup_2fa_prefers_live_browser_mfa_and_skips_csrf_reauth(monkeypatch) -
     calls = []
 
     class Driver:
-        def execute_async_script(self, script, path, payload, access_token):
+        def execute_async_script(self, script, path, payload, access_token, expected_email):
             calls.append((script, path, payload, access_token))
             if path.endswith("/enroll"):
                 return {
@@ -628,7 +936,7 @@ def test_setup_2fa_refreshes_token_after_browser_password_reauth(monkeypatch) ->
     calls = []
 
     class Driver:
-        def execute_async_script(self, script, path, payload, access_token):
+        def execute_async_script(self, script, path, payload, access_token, expected_email):
             calls.append((path, access_token))
             if path.endswith("/enroll"):
                 return {
@@ -673,7 +981,7 @@ def test_browser_mfa_http_failure_keeps_stage_and_status(monkeypatch) -> None:
 
     class Driver:
         @staticmethod
-        def execute_async_script(_script, _path, _payload, _access_token):
+        def execute_async_script(_script, _path, _payload, _access_token, _expected_email):
             return {"status": 403, "json": False, "body": {}}
 
     with pytest.raises(account_export.TwoFASetupError) as exc_info:

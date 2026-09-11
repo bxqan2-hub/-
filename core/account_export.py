@@ -748,12 +748,13 @@ def _is_playwright_page(driver) -> bool:
 
 _TOTP_BROWSER_POST_JS = r"""
 async request => {
+  let accessToken = String(request?.accessToken || '');
+  let email = '';
+  let expires = '';
   try {
     const path = String(request?.path || '');
     const payload = request?.payload || {};
-    let accessToken = String(request?.accessToken || '');
-    let email = '';
-    let expires = '';
+    const expectedEmail = String(request?.expectedEmail || '').trim().toLowerCase();
     if (!accessToken) {
       const sessionResponse = await fetch('/api/auth/session', {
         cache: 'no-store', credentials: 'include',
@@ -763,9 +764,14 @@ async request => {
       accessToken = String(session?.accessToken || '');
       email = String(session?.user?.email || '');
       expires = String(session?.expires || '');
-      if (!sessionResponse.ok || !accessToken) {
+      if (!sessionResponse.ok || !accessToken || !email) {
         return {status:sessionResponse.status, stage:'session', email, expires,
-          accessToken:'', body:{}, json:true};
+          accessToken:'', error: !email ? 'missing_session_email' : 'missing_access_token',
+          body:{}, json:true};
+      }
+      if (expectedEmail && email.trim().toLowerCase() !== expectedEmail) {
+        return {status:sessionResponse.status, stage:'session',
+          error:'session_account_mismatch', body:{}, json:true};
       }
     }
     const response = await fetch(path, {
@@ -785,7 +791,8 @@ async request => {
     return {status:response.status, stage:'request', contentType, email, expires,
       accessToken, body, json};
   } catch (error) {
-    return {status:0, stage:'exception', error:String(error || ''), body:{}, json:false};
+    return {status:0, stage:'exception', error:String(error || ''), email, expires,
+      accessToken, body:{}, json:false};
   }
 }
 """
@@ -795,12 +802,13 @@ _TOTP_BROWSER_POST_SELENIUM_JS = r"""
 const path = String(arguments[0] || '');
 const payload = arguments[1] || {};
 const suppliedAccessToken = String(arguments[2] || '');
+const expectedEmail = String(arguments[3] || '').trim().toLowerCase();
 const done = arguments[arguments.length - 1];
 (async () => {
+  let accessToken = suppliedAccessToken;
+  let email = '';
+  let expires = '';
   try {
-    let accessToken = suppliedAccessToken;
-    let email = '';
-    let expires = '';
     if (!accessToken) {
       const sessionResponse = await fetch('/api/auth/session', {
         cache:'no-store', credentials:'include',
@@ -810,9 +818,15 @@ const done = arguments[arguments.length - 1];
       accessToken = String(session?.accessToken || '');
       email = String(session?.user?.email || '');
       expires = String(session?.expires || '');
-      if (!sessionResponse.ok || !accessToken) {
+      if (!sessionResponse.ok || !accessToken || !email) {
         done({status:sessionResponse.status, stage:'session', email, expires,
-          accessToken:'', body:{}, json:true});
+          accessToken:'', error: !email ? 'missing_session_email' : 'missing_access_token',
+          body:{}, json:true});
+        return;
+      }
+      if (expectedEmail && email.trim().toLowerCase() !== expectedEmail) {
+        done({status:sessionResponse.status, stage:'session',
+          error:'session_account_mismatch', body:{}, json:true});
         return;
       }
     }
@@ -833,7 +847,8 @@ const done = arguments[arguments.length - 1];
     done({status:response.status, stage:'request', contentType, email, expires,
       accessToken, body, json});
   } catch (error) {
-    done({status:0, stage:'exception', error:String(error || ''), body:{}, json:false});
+    done({status:0, stage:'exception', error:String(error || ''), email, expires,
+      accessToken, body:{}, json:false});
   }
 })();
 """
@@ -855,63 +870,140 @@ def _browser_authenticated_json_post(
     payload: dict,
     *,
     access_token: str = "",
+    expected_email: str = "",
+    totp_secret: str = "",
+    session_context=None,
     stage: str,
     code: str,
     message: str,
 ) -> dict:
-    """在当前已登录浏览器网络栈内发送 MFA 请求，避免协议会话被 CF 单独挑战。"""
-    try:
-        if _is_playwright_page(driver):
-            result = driver.evaluate(
-                _TOTP_BROWSER_POST_JS,
-                {"path": path, "payload": payload, "accessToken": access_token},
-            )
-        else:
-            result = driver.execute_async_script(
-                _TOTP_BROWSER_POST_SELENIUM_JS,
-                path,
-                payload,
-                access_token,
-            )
-    except Exception as exc:
-        # Preserve a short, redacted transport diagnostic.  Previously a
-        # Selenium execute_async_script timeout/renderer disconnect was
-        # collapsed to the generic message, making activate failures
-        # indistinguishable from HTTP rejection.
-        detail = redact_otp_text(f"{type(exc).__name__}: {str(exc)[:160]}")
-        suffix = f" stage=exception detail={detail}" if detail else " stage=exception"
-        raise TwoFASetupError(stage, code, f"{message}{suffix}") from exc
+    """同窗发送 MFA 请求；仅对明确暂时 HTTP 拒绝做有界重试。"""
+    response_email = ""
+    expires = None
+    for attempt in (1, 2, 3):
+        request_payload = dict(payload)
+        if totp_secret:
+            _wait_for_totp_window()
+            request_payload["code"] = pyotp.TOTP(totp_secret).now()
+        try:
+            if _is_playwright_page(driver):
+                result = driver.evaluate(
+                    _TOTP_BROWSER_POST_JS,
+                    {"path": path, "payload": request_payload, "accessToken": access_token,
+                     "expectedEmail": expected_email},
+                )
+            else:
+                result = driver.execute_async_script(
+                    _TOTP_BROWSER_POST_SELENIUM_JS,
+                    path,
+                    request_payload,
+                    access_token,
+                    expected_email,
+                )
+        except Exception as exc:
+            # A renderer/fetch timeout has an unknown write outcome: preserve
+            # the diagnostic, but never replay enroll or activate on that basis.
+            detail = f"{type(exc).__name__}: {str(exc)}"
+            for sensitive in (access_token, totp_secret, str(payload.get("session_id") or "")):
+                if sensitive:
+                    detail = detail.replace(sensitive, "[redacted]")
+            detail = redact_otp_text(detail)[:160]
+            raise TwoFASetupError(
+                stage, code, f"{message} stage=exception attempt={attempt}/3 detail={detail}",
+            ) from None
 
-    if not isinstance(result, dict):
-        raise TwoFASetupError(stage, code, message)
-    status = int(result.get("status") or 0)
-    if status != 200:
-        # Keep the stable error code for callers, but include the browser
-        # response stage/status so the registration log explains whether the
-        # failure was a missing session, a rejected token, or a transport error.
-        detail = str(result.get("error") or "").strip()
-        if not detail and isinstance(result.get("body"), dict):
-            body = result.get("body") or {}
-            for key in ("error_code", "error", "code", "message", "detail"):
-                value = str(body.get(key) or "").strip()
-                if value:
-                    detail = value
-                    break
-        suffix = f" stage={result.get('stage') or 'request'}"
-        if detail:
-            suffix += f" detail={redact_otp_text(detail[:180])}"
-        raise TwoFASetupError(stage, code, f"{message} HTTP {status or 0}{suffix}", http_status=status or None)
-    if not bool(result.get("json", True)):
-        raise TwoFASetupError(stage, code, f"{message}（响应不是 JSON）", http_status=status)
-    body = result.get("body")
-    if not isinstance(body, dict):
-        raise TwoFASetupError(stage, code, f"{message}（响应结构异常）", http_status=status)
-    return {
-        "body": body,
-        "email": str(result.get("email") or "").strip(),
-        "access_token": str(result.get("accessToken") or access_token or "").strip(),
-        "expires": str(result.get("expires") or "").strip() or None,
-    }
+        if not isinstance(result, dict):
+            raise TwoFASetupError(stage, code, f"{message} stage=exception attempt={attempt}/3")
+        status = int(result.get("status") or 0)
+        request_stage = str(result.get("stage") or "request")
+        current_email = str(result.get("email") or "").strip()
+        if result.get("error") == "session_account_mismatch" or (
+            expected_email and current_email and current_email.casefold() != expected_email.strip().casefold()
+        ):
+            raise TwoFASetupError(
+                "totp_session", "totp_session_account_mismatch",
+                "浏览器登录账号与待设置 2FA 的邮箱不一致", http_status=status,
+            )
+        if request_stage == "session":
+            raise TwoFASetupError(
+                "totp_session", "totp_session_refresh_failed",
+                f"浏览器 Session 未返回有效 Token/邮箱 HTTP {status} stage=session attempt={attempt}/3",
+                http_status=status,
+            )
+        response_email = current_email or response_email
+        expires = str(result.get("expires") or expires or "").strip() or None
+        # Freeze the token resolved by the first same-window Session read;
+        # transient responses must not re-read Session or replace the Profile.
+        returned_token = str(result.get("accessToken") or "").strip()
+        if (
+            session_context is not None and attempt == 1 and not access_token
+            and returned_token and expected_email
+            and current_email.casefold() == expected_email.strip().casefold()
+        ):
+            # A matched same-window Session read is independent of MFA writes.
+            # Keep the refreshed AT even when enroll/activate later fails; never
+            # expose it through the error payload or persist an unactivated Secret.
+            setattr(session_context, "_twofa_refreshed_access_token", returned_token)
+            setattr(session_context, "_twofa_session_expires", expires)
+            try:
+                from core import db
+                db.save_security_checkpoint(expected_email, access_token=returned_token)
+            except Exception as exc:
+                logger.warning("[2FA] 已匹配 Session Token 检查点写入失败：%s", type(exc).__name__)
+        if attempt > 1 and returned_token and returned_token != access_token:
+            raise TwoFASetupError(
+                "totp_session", "totp_session_refresh_failed",
+                "浏览器 MFA 重试期间 Token 发生变化，停止当前 enrollment", http_status=status,
+            )
+        access_token = returned_token or access_token
+        body = result.get("body")
+        if status != 200:
+            retryable = (
+                request_stage == "request"
+                and status in {429, 503}
+                and bool(access_token)
+                and not result.get("error")
+                and isinstance(body, dict)
+                and not body
+            )
+            if retryable and attempt < 3:
+                logger.warning(
+                    "[2FA] 浏览器 MFA 暂时响应 stage=%s http=%s attempt=%s/3 retry_in=%ss",
+                    stage, status, attempt, attempt * 2,
+                )
+                time.sleep(attempt * 2)
+                continue
+            detail = str(result.get("error") or "").strip()
+            if not detail and isinstance(body, dict):
+                for key in ("error_code", "error", "code", "message", "detail"):
+                    value = body.get(key)
+                    if isinstance(value, dict):
+                        value = value.get("code") or value.get("type") or value.get("message")
+                    if value:
+                        detail = str(value)
+                        break
+            sensitive_values = [access_token, totp_secret, str(payload.get("session_id") or "")]
+            if isinstance(body, dict):
+                sensitive_values.extend(str(body.get(key) or "") for key in ("secret", "session_id", "access_token", "accessToken"))
+            for sensitive in sensitive_values:
+                if sensitive:
+                    detail = detail.replace(sensitive, "[redacted]")
+            suffix = f" stage={request_stage if request_stage in {'request', 'exception'} else 'request'} attempt={attempt}/3"
+            if detail:
+                suffix += f" detail={redact_otp_text(detail)[:180]}"
+            raise TwoFASetupError(stage, code, f"{message} HTTP {status or 0}{suffix}", http_status=status or None)
+        if not bool(result.get("json", True)):
+            raise TwoFASetupError(stage, code, f"{message}（响应不是 JSON）", http_status=status)
+        if not isinstance(body, dict):
+            raise TwoFASetupError(stage, code, f"{message}（响应结构异常）", http_status=status)
+        if attempt > 1:
+            logger.info("[2FA] 浏览器 MFA 已恢复 stage=%s http=%s attempt=%s/3", stage, status, attempt)
+        return {
+            "body": body,
+            "email": response_email,
+            "access_token": access_token,
+            "expires": expires,
+        }
 
 
 def _setup_totp_with_driver(
@@ -920,6 +1012,7 @@ def _setup_totp_with_driver(
     *,
     authenticated_email: str = "",
     access_token: str = "",
+    session_context=None,
 ) -> tuple[str, str, str | None]:
     """按参考项目的实时浏览器方案直接 enroll/activate TOTP。"""
     _assert_authenticated_account(email, authenticated_email)
@@ -947,6 +1040,8 @@ def _setup_totp_with_driver(
         "/backend-api/accounts/mfa/enroll",
         {"factor_type": "totp"},
         access_token=access_token,
+        expected_email=email,
+        session_context=session_context,
         stage="totp_enroll",
         code="totp_browser_enroll_failed",
         message="浏览器 MFA enroll 请求失败",
@@ -978,59 +1073,19 @@ def _setup_totp_with_driver(
             http_status=200,
         )
 
-    activation = None
-    activation_error: TwoFASetupError | None = None
-    # A browser renderer/network interruption or a boundary-time TOTP code
-    # can fail the activate POST even though enroll succeeded. Retry once in
-    # the same browser session with a fresh 30-second code; never re-enroll,
-    # switch proxy, or persist the Secret before success=true.
-    for activate_attempt in (1, 2):
-        if activate_attempt == 1:
-            _wait_for_totp_window()
-        else:
-            try:
-                _wait_for_totp_window(min_remaining=8.0)
-            except TypeError as exc:
-                # Keep compatibility with test/integration adapters that
-                # expose the historical zero-argument wait hook.
-                if "min_remaining" not in str(exc):
-                    raise
-                _wait_for_totp_window()
-        try:
-            logger.info("[2FA] 浏览器 MFA activate attempt=%s/2", activate_attempt)
-            activation = _browser_authenticated_json_post(
-                driver,
-                "/backend-api/accounts/mfa/user/activate_enrollment",
-                {
-                    "code": pyotp.TOTP(secret).now(),
-                    "factor_type": "totp",
-                    "session_id": session_id,
-                },
-                access_token=access_token,
-                stage="totp_activate",
-                code="totp_browser_activate_failed",
-                message="浏览器 MFA activate 请求失败",
-            )["body"]
-            activation_error = None
-            break
-        except TwoFASetupError as exc:
-            activation_error = exc
-            retryable = (
-                exc.http_status is None
-                or exc.http_status in {408, 425, 429}
-                or exc.http_status >= 500
-                or (exc.http_status == 200 and exc.code == "totp_activate_failed")
-            )
-            if activate_attempt == 1 and retryable:
-                logger.warning(
-                    "[2FA] 浏览器 MFA activate 可重试失败，等待下一 TOTP 窗口：status=%s code=%s",
-                    exc.http_status or "-",
-                    exc.code,
-                )
-                continue
-            raise
-    if activation is None and activation_error is not None:
-        raise activation_error
+    # The POST helper owns the bounded HTTP retry budget.  Reuse this exact
+    # enrollment, refreshing only its TOTP code; ambiguous writes are not replayed.
+    activation = _browser_authenticated_json_post(
+        driver,
+        "/backend-api/accounts/mfa/user/activate_enrollment",
+        {"factor_type": "totp", "session_id": session_id},
+        access_token=access_token,
+        expected_email=email,
+        totp_secret=secret,
+        stage="totp_activate",
+        code="totp_browser_activate_failed",
+        message="浏览器 MFA activate 请求失败",
+    )["body"]
     if activation.get("success") is not True:
         raise TwoFASetupError(
             "totp_activate",
@@ -1843,6 +1898,8 @@ def _setup_2fa_result(
     logger.info("=" * 60)
     logger.info("开始设置 2FA")
     logger.info("=" * 60)
+    if _driver_supports_authenticated_fetch(driver):
+        setattr(session, "_twofa_refreshed_access_token", "")
     _assert_authenticated_account(email, authenticated_email)
 
     # 阶段一：开启安全设置后必须先确认密码，再进行 MFA 重认证。
@@ -1942,6 +1999,7 @@ def _setup_2fa_result(
             email,
             authenticated_email=authenticated_email,
             access_token="" if password_reauth_refreshed else access_token,
+            session_context=session,
         )
         setattr(session, "_twofa_session_expires", browser_expires)
         totp_checkpoint_persisted = _persist_activated_totp_checkpoint(email, secret, new_token)

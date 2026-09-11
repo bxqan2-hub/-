@@ -298,3 +298,11 @@
 - `core/registration_service.py` 的安全失败任务优先调用已有账号安全队列，而非补跑 Codex；`webui/app.py` / `webui/templates/index.html` 复用现有字段展示错误和正确的重试操作。
 - `core/account_security_service.py` 补密码后不再透传旧 Token，重新读取同一浏览器 Session、匹配邮箱并同步 Cookie。已有 TOTP 且密码已确认时，只读刷新失败只附注，不将两项已完成凭据误标为激活失败；账号错配仍停止。
 - 证据、Finding→Path、验证与未完成事项见 `docs/2026-09-11_注册密码与2FA重认证修复-report.md`。不自动注册、不自动补设历史账号，实际新批次由用户验证。
+
+## 本次最新失败实查与五邮箱回归（2026-09-11）
+
+- 再次读取锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `vendor/turb_gpt_free_register/core/account_export.py` 和 `core/roxy_registration.py`；锁定版本不变。上游没有本地刷新重输 OTP 的封装，也没有本次 HTTP 瞬态重试；只对照其同窗、身份匹配、显式 Token 与 enroll/activate 成功顺序，不整体覆盖。
+- 新批次 10 条中 6 成功、4 失败：1 条登录中转停滞，2 条已收邮件但刷新后 DOM 等待过短，1 条密码已确认后 MFA enroll HTTP 503。实查 Job 16/20 远端邮箱，邮件存在且邮件 ID 与取码日志相符；Job 13 当前邮箱为空，注册尚未进入发码阶段。
+- 修改本地既有邮箱提交与 OTP 状态观察，完整等待后才做一次恢复；明确资料页/Session/Email verified 后不重输已用码。按原代理隔离规则删除预检结果替代窗口实测的回退，独立记录 `proxy_isolation`。
+- MFA 只对 503/429 且空业务响应做最多 3 次同窗重试；删除模糊写结果的 activate 外层重放。Session 重读在 POST 前匹配目标邮箱，新 Token 通过原 checkpoint 与内部 session 透传给 Roxy finally，即使 MFA 失败也不重新保存旧注册 Token；Secret 仍等待 `success is True`。
+- 邮箱接口阶段/预算/日志脱敏与时区、历史消息 ID 修复沿现有适配器；不增加配置或第二套注册执行器。统一回归及用户要求的五新邮箱现场验证，见 `docs/2026-09-11_最新注册失败与邮箱实查修复-report.md`。

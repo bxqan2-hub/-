@@ -51,6 +51,10 @@ _YANGYANG_OPENAI_SUBJECT_HINTS = (
 class GenericApiMailError(RuntimeError):
     """通用 API 取码邮箱错误。"""
 
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
 
 class GenericApiTransportError(GenericApiMailError):
     """取码端点经主请求+短重试后仍不可达，上层应停止盲目重发 OTP。"""
@@ -332,13 +336,12 @@ def _fetch_flysms_otp(
     try:
         resp = session.get(api_url, headers=req_headers, timeout=timeout, verify=False)
     except Exception as exc:
-        logger.debug("[GenericAPI] flysms 取码请求失败: %s: %s", type(exc).__name__, redact_otp_text(exc))
+        logger.debug("[GenericAPI] flysms 取码请求失败: type=%s", type(exc).__name__)
         return None
     if resp.status_code != 200:
         logger.debug(
-            "[GenericAPI] flysms 取码 HTTP %s: %s",
+            "[GenericAPI] flysms 取码 HTTP %s",
             resp.status_code,
-            redact_otp_text((resp.text or "")[:160]),
         )
         return None
     try:
@@ -387,7 +390,7 @@ def _fetch_flysms_otp(
                 item.get("mail_id"),
                 item.get("received_at"),
                 time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
-                item.get("subject") or "",
+                redact_otp_text(item.get("subject") or ""),
             )
             continue
         subject = str(item.get("subject") or "")
@@ -404,7 +407,7 @@ def _fetch_flysms_otp(
                 mask_otp(code),
                 item.get("mail_id"),
                 item.get("received_at"),
-                subject[:80],
+                redact_otp_text(subject)[:80],
             )
             return code, {
                 "mail_id": item.get("mail_id"),
@@ -417,15 +420,7 @@ def _fetch_flysms_otp(
 
 
 def _parse_yangyang_ts(value: str | None) -> float | None:
-    if not value:
-        return None
-    raw = str(value).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"):
-        try:
-            return datetime.strptime(raw[:19], fmt).timestamp()
-        except Exception:
-            pass
-    return None
+    return _parse_generic_api_ts(value)
 
 
 def _parse_generic_api_ts(value) -> float | None:
@@ -591,7 +586,7 @@ def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tu
             mask_otp(code),
             ts_raw,
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
-            str(data.get("subject") or "")[:80],
+            redact_otp_text(str(data.get("subject") or ""))[:80],
         )
         return None
 
@@ -620,36 +615,66 @@ def _fetch_yangyang_otp(
     token_q = quote(token, safe="")
     email_q = quote(email, safe="@._+-")
     api_url = f"{origin}/api/messages/{token_q}/{email_q}"
-    timeout = max(1.0, min(20.0, float(request_timeout if request_timeout is not None else 20.0)))
+    timeout = min(20.0, float(request_timeout if request_timeout is not None else 20.0))
+    if timeout <= 0:
+        raise GenericApiMailError("stage=mail_list type=deadline_exhausted", retryable=True)
+    deadline = time.monotonic() + timeout
+    excluded_ids = {str(value) for value in (exclude_message_ids or set()) if str(value)}
+
+    def remaining_timeout(stage: str) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GenericApiMailError(f"stage={stage} type=deadline_exhausted", retryable=True)
+        return min(timeout, remaining)
+
+    def read_json(url: str, stage: str):
+        try:
+            resp = session.get(
+                url,
+                headers={**headers, "Accept": "application/json"},
+                timeout=remaining_timeout(stage),
+                verify=False,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise GenericApiMailError(
+                f"stage={stage} type={type(exc).__name__}",
+                retryable=isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)),
+            ) from None
+        if stage == "mail_list" and resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise GenericApiMailError(
+                f"stage={stage} http_status={resp.status_code} type=http_error",
+                retryable=resp.status_code in {408, 425, 429} or resp.status_code >= 500,
+            )
+        try:
+            data = resp.json()
+        except (TypeError, ValueError):
+            raise GenericApiMailError(f"stage={stage} http_status=200 type=invalid_json", retryable=True) from None
+        if not isinstance(data, dict):
+            raise GenericApiMailError(f"stage={stage} http_status=200 type=invalid_schema", retryable=True)
+        return data
 
     items: list[dict] = []
     cursor: str | None = None
     # 一般第一页足够；保守支持最多翻 5 页。
     for _ in range(5):
         url = api_url if not cursor else f"{api_url}?cursor={quote(str(cursor), safe='')}"
-        resp = session.get(url, headers={**headers, "Accept": "application/json"}, timeout=timeout, verify=False)
-        if resp.status_code != 200:
-            if resp.status_code == 404:
-                # 兼容 mail.ai1998.xyz 这类同样是 /messages/{token}/{email}，
-                # 但没有 /api/messages，邮件直接内嵌在 HTML 页面中的实现。
-                return _fetch_inline_messages_page_otp(
-                    session=session,
-                    code_url=code_url,
-                    headers=headers,
-                    after_ts=after_ts,
-                    request_timeout=timeout,
-                    exclude_message_ids=exclude_message_ids,
-                )
-            logger.debug(
-                "[GenericAPI] yangyang 邮件列表 HTTP %s: %s",
-                resp.status_code,
-                redact_otp_text((resp.text or "")[:160]),
+        data = read_json(url, "mail_list")
+        if data is None:
+            # 兼容没有列表 API、邮件直接内嵌在 HTML 页面的实现。
+            return _fetch_inline_messages_page_otp(
+                session=session,
+                code_url=code_url,
+                headers=headers,
+                after_ts=after_ts,
+                request_timeout=remaining_timeout("mail_inline"),
+                exclude_message_ids=exclude_message_ids,
             )
-            return None
-        data = resp.json()
-        page_items = data.get("items") or []
-        if isinstance(page_items, list):
-            items.extend([x for x in page_items if isinstance(x, dict)])
+        page_items = data.get("items")
+        if not isinstance(page_items, list):
+            raise GenericApiMailError("stage=mail_list http_status=200 type=invalid_schema", retryable=True)
+        items.extend([x for x in page_items if isinstance(x, dict)])
         if not data.get("has_more") or not data.get("next_cursor"):
             break
         cursor = str(data.get("next_cursor"))
@@ -657,52 +682,36 @@ def _fetch_yangyang_otp(
     # API 默认新邮件在前；再次按时间倒序，尽量取最新验证码。
     items.sort(key=lambda x: _parse_yangyang_ts(x.get("received_at") or x.get("receivedAt")) or 0, reverse=True)
     for item in items:
+        msg_id = item.get("id")
+        if not msg_id or str(msg_id) in excluded_ids:
+            continue
         msg_ts_raw = item.get("received_at") or item.get("receivedAt")
         msg_ts = _parse_yangyang_ts(msg_ts_raw)
         if after_ts and msg_ts and msg_ts + 2 < after_ts:
             logger.debug(
                 "[GenericAPI] yangyang 跳过旧邮件: id=%s ts=%s after=%s subject=%r",
                 item.get("id"), msg_ts_raw, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
-                item.get("subject") or "",
+                redact_otp_text(item.get("subject") or ""),
             )
-            continue
-        msg_id = item.get("id")
-        if not msg_id:
             continue
         detail_url = f"{origin}/message/{quote(str(msg_id), safe='')}/{token_q}/{email_q}"
-        try:
-            detail_resp = session.get(detail_url, headers={**headers, "Accept": "application/json"}, timeout=timeout, verify=False)
-            if detail_resp.status_code != 200:
-                continue
-            detail = detail_resp.json()
-        except Exception as exc:
-            logger.debug(
-                "[GenericAPI] yangyang 邮件详情读取失败: %s: %s",
-                type(exc).__name__,
-                redact_otp_text(exc),
-            )
-            continue
+        detail = read_json(detail_url, "mail_detail")
 
         raw_body = str(detail.get("body") or "")
         body = _decode_data_uri(raw_body)
         subject = str(detail.get("subject") or item.get("subject") or "")
-        text = "\n".join([
-            subject,
-            str(detail.get("fromAddress") or item.get("from_address") or ""),
-            str(detail.get("receivedAt") or item.get("received_at") or ""),
-            body,
-        ])
         code = _extract_yangyang_openai_code(subject, body)
         if code:
             logger.info(
                 f"[GenericAPI] yangyang 页面提取到 OTP={mask_otp(code)}, "
-                f"mail_id={msg_id}, ts={detail.get('receivedAt') or item.get('received_at')}, subject={subject[:80]!r}"
+                f"mail_id={msg_id}, ts={detail.get('receivedAt') or item.get('received_at')}, subject={redact_otp_text(subject)[:80]!r}"
             )
             return code, {
                 "mail_id": msg_id,
                 "received_at": detail.get("receivedAt") or item.get("received_at"),
                 "subject": subject,
                 "msg_ts": msg_ts,
+                "mail_id_stable": True,
             }
     return None
 
@@ -867,7 +876,7 @@ def _extract_inline_messages_html_otp(
                 "[GenericAPI] inline messages 跳过发送前旧邮件: id=%s ts=%s after=%s subject=%r",
                 item.get("mail_id"), item.get("received_at"),
                 time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
-                item.get("subject") or "",
+                redact_otp_text(item.get("subject") or ""),
             )
             continue
         code = _extract_yangyang_openai_code(str(item.get("subject") or ""), str(item.get("body") or ""))
@@ -893,7 +902,9 @@ def _fetch_inline_messages_page_otp(
     exclude_message_ids: set[str] | None = None,
 ) -> tuple[str, dict] | None:
     """解析无 JSON API、直接把邮件卡片渲染在 HTML 里的 /messages 页面。"""
-    timeout = max(1.0, min(20.0, float(request_timeout if request_timeout is not None else 20.0)))
+    timeout = min(20.0, float(request_timeout if request_timeout is not None else 20.0))
+    if timeout <= 0:
+        raise GenericApiMailError("stage=mail_inline type=deadline_exhausted", retryable=True)
     try:
         resp = session.get(
             code_url,
@@ -901,17 +912,17 @@ def _fetch_inline_messages_page_otp(
             timeout=timeout,
             verify=False,
         )
-        if resp.status_code != 200:
-            logger.debug(
-                "[GenericAPI] inline messages 页面 HTTP %s: %s",
-                resp.status_code,
-                redact_otp_text((resp.text or "")[:160]),
-            )
-            return None
-        html = resp.text or ""
-    except Exception as exc:
-        logger.debug("[GenericAPI] inline messages 页面读取失败: %s: %s", type(exc).__name__, redact_otp_text(exc))
-        return None
+    except requests.exceptions.RequestException as exc:
+        raise GenericApiMailError(
+            f"stage=mail_inline type={type(exc).__name__}",
+            retryable=isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)),
+        ) from None
+    if resp.status_code != 200:
+        raise GenericApiMailError(
+            f"stage=mail_inline http_status={resp.status_code} type=http_error",
+            retryable=resp.status_code in {408, 425, 429} or resp.status_code >= 500,
+        )
+    html = resp.text or ""
 
     result = _extract_inline_messages_html_otp(
         html,
@@ -922,7 +933,7 @@ def _fetch_inline_messages_page_otp(
         code, meta = result
         logger.info(
             "[GenericAPI] inline messages 页面提取到新 OTP=%s, mail_id=%s, ts=%s, subject=%r",
-            mask_otp(code), meta.get("mail_id"), meta.get("received_at"), str(meta.get("subject") or "")[:80],
+            mask_otp(code), meta.get("mail_id"), meta.get("received_at"), redact_otp_text(str(meta.get("subject") or ""))[:80],
         )
     return result
 
@@ -1007,6 +1018,7 @@ def snapshot_current_otp(email: str, timeout: float = 8.0) -> str | None:
         "User-Agent": "Mozilla/5.0 (compatible; gpt-register/1.0)",
     }
     session = requests.Session()
+    session.trust_env = False
     request_timeout = max(1.0, min(2.0, float(timeout or 2.0)))
     try:
         if _parse_yangyang_code_url(account.code_url) is not None:
@@ -1042,7 +1054,7 @@ def snapshot_current_otp(email: str, timeout: float = 8.0) -> str | None:
         inline = _extract_inline_messages_html_otp(text, after_ts=None)
         return structured[0] if structured else (inline[0] if inline else _extract_code(text))
     except Exception as exc:
-        logger.debug("[GenericAPI] 读取历史 OTP 快照失败，继续注册：%s: %s", type(exc).__name__, redact_otp_text(exc))
+        logger.debug("[GenericAPI] 读取历史 OTP 快照失败，继续注册：type=%s", type(exc).__name__)
         return None
     finally:
         try:
@@ -1072,7 +1084,7 @@ def snapshot_current_message_ids(email: str, timeout: float = 8.0) -> set[str]:
             return set()
         return _extract_inline_message_ids(resp.text or "")
     except Exception as exc:
-        logger.debug("[GenericAPI] 读取历史邮件 ID 快照失败，继续注册：%s: %s", type(exc).__name__, redact_otp_text(exc))
+        logger.debug("[GenericAPI] 读取历史邮件 ID 快照失败，继续注册：type=%s", type(exc).__name__)
         return set()
     finally:
         try:
@@ -1149,7 +1161,7 @@ def fetch_latest_otp(
         try:
             return bool(should_stop())
         except Exception as exc:
-            logger.debug("[GenericAPI] 检查浏览器 OTP 状态失败，继续取码：%s", redact_otp_text(exc))
+            logger.debug("[GenericAPI] 检查浏览器 OTP 状态失败，继续取码：type=%s", type(exc).__name__)
             return False
 
     def excluded_code_is_stale(code: str | None, meta: dict | None = None) -> bool:
@@ -1209,7 +1221,13 @@ def fetch_latest_otp(
                 headers,
                 after_ts=after_ts,
                 exclude_message_ids=excluded_ids,
+                request_timeout=min(
+                    float(request_timeout if request_timeout is not None else getattr(_email_cfg, "GENERIC_API_REQUEST_TIMEOUT", 8) or 8),
+                    deadline - time.time(),
+                ),
             ) if is_yangyang else None
+            if is_yangyang:
+                consecutive_transport_errors = 0
             fly_result = None
             if (not yy_result) and is_flysms:
                 fly_result = _fetch_flysms_otp(
@@ -1314,9 +1332,8 @@ def fetch_latest_otp(
                             ),
                         )
                         logger.warning(
-                            "[GenericAPI] 取码接口瞬时网络失败，短间隔重试一次：%s: %s",
+                            "[GenericAPI] 取码接口瞬时网络失败，短间隔重试一次：type=%s",
                             type(exc).__name__,
-                            redact_otp_text(exc),
                         )
                         time.sleep(min(0.8, max(0.1, remaining_after_error / 10)))
                         resp = session.get(account.code_url, headers=headers, timeout=retry_budget, verify=False)
@@ -1370,7 +1387,7 @@ def fetch_latest_otp(
                         if structured_meta:
                             logger.info(
                                 f"[GenericAPI] 首次锁定 OTP={mask_otp(code)}, source={structured_meta.get('source') or 'structured_api'} "
-                                f"ts={structured_meta.get('received_at')} subject={str(structured_meta.get('subject') or '')[:80]!r}, "
+                                f"ts={structured_meta.get('received_at')} subject={redact_otp_text(str(structured_meta.get('subject') or ''))[:80]!r}, "
                                 f"等 {settle}s 看取码接口是否出现更新验证码..."
                             )
                         else:
@@ -1382,7 +1399,7 @@ def fetch_latest_otp(
                         if structured_meta:
                             logger.info(
                                 f"[GenericAPI] 发现更新 OTP={mask_otp(code)}, source=structured_api "
-                                f"ts={structured_meta.get('received_at')} subject={str(structured_meta.get('subject') or '')[:80]!r}，"
+                                f"ts={structured_meta.get('received_at')} subject={redact_otp_text(str(structured_meta.get('subject') or ''))[:80]!r}，"
                                 f"替换之前的 {mask_otp(best_otp)}, 重置 settle 计时"
                             )
                         else:
@@ -1396,24 +1413,32 @@ def fetch_latest_otp(
                     else:
                         logger.debug(f"[GenericAPI] 取码接口仍返回候选 OTP={mask_otp(best_otp)}")
                 else:
-                    last_error = no_code_reason or (
-                        "HTTP 200 但未提取到 6 位验证码，响应预览: "
-                        f"{redact_otp_text(text[:160])}"
-                    )
+                    last_error = no_code_reason or "HTTP 200 但未提取到 6 位验证码"
             else:
-                last_error = f"HTTP {resp.status_code}: {redact_otp_text(text[:160])}"
+                last_error = f"stage=mail_fetch http_status={resp.status_code}"
         except GenericApiTransportError:
             raise
+        except GenericApiMailError as exc:
+            if not exc.retryable:
+                raise
+            last_error = str(exc)
+            consecutive_transport_errors += 1
+            logger.warning("[GenericAPI] 取件请求失败（第 %s 次）：%s", consecutive_transport_errors, last_error)
+            if not best_otp and consecutive_transport_errors >= max_transport_errors:
+                raise GenericApiTransportError(
+                    "取码接口连续访问失败，已快速结束本轮 OTP 等待: "
+                    f"{email}; attempts={consecutive_transport_errors}; {last_error}"
+                ) from None
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-            last_error = f"{type(exc).__name__}: {redact_otp_text(exc)}"
+            last_error = f"stage=mail_fetch type={type(exc).__name__}"
             consecutive_transport_errors += 1
             if not best_otp and consecutive_transport_errors >= max_transport_errors:
                 raise GenericApiTransportError(
                     "取码接口连续网络失败，已快速结束本轮 OTP 等待: "
                     f"{email}; attempts={consecutive_transport_errors}; {last_error}"
-                ) from exc
+                ) from None
         except Exception as exc:
-            last_error = f"{type(exc).__name__}: {redact_otp_text(exc)}"
+            last_error = f"stage=mail_fetch type={type(exc).__name__}"
 
         if stop_requested():
             raise GenericApiMailError("验证码页面已进入下一步，停止等待新验证码")

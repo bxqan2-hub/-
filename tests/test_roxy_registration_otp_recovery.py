@@ -9,6 +9,57 @@ from core import registration_service, roxy_registration
 from core.roxybrowser_client import RoxyOpenResult
 
 
+class OtpNavigationDriver:
+    """Replay live page redraws using the real OTP state readers and a fake clock."""
+
+    def __init__(self, *, ready_at=0, advanced_at=None, advanced="profile", disabled_until=0, reload_ready_at=0):
+        self.now = 0.0
+        self.ready_at = ready_at
+        self.advanced_at = advanced_at
+        self.advanced = advanced
+        self.disabled_until = disabled_until
+        self.reload_ready_at = reload_ready_at
+        self.refresh_count = 0
+
+    @property
+    def current_url(self):
+        if self.advanced_at is not None and self.now >= self.advanced_at:
+            return {
+                "profile": "https://auth.openai.com/about-you",
+                "logged_in": "https://chatgpt.com/",
+                "unknown": "https://auth.openai.com/authorize/callback",
+                "email_verified": "https://auth.openai.com/email-verification",
+            }[self.advanced]
+        return "https://auth.openai.com/email-verification"
+
+    def refresh(self):
+        self.refresh_count += 1
+        self.ready_at = self.reload_ready_at
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def execute_script(self, script, *args):
+        state = {"url": self.current_url, "inputs": [], "errors": [], "text": "", "buttons": []}
+        if self.advanced_at is not None and self.now >= self.advanced_at:
+            if self.advanced == "profile":
+                state["inputs"] = [{"name": "name", "type": "text"}]
+            elif self.advanced == "email_verified":
+                state["text"] = "Email verified"
+        elif self.now >= self.ready_at:
+            state["inputs"] = [{
+                "name": "code", "autocomplete": "one-time-code", "value": "001414",
+                "disabled": self.now < self.disabled_until, "readOnly": False,
+            }]
+        # The email-only DOM reader must not treat profile fields as email inputs.
+        if 'input[type="email"]' in script:
+            state["inputs"] = []
+        return state
+
+    def execute_async_script(self, script, *args):
+        return self.current_url == "https://chatgpt.com/"
+
+
 class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
     def test_safe_get_restores_async_script_timeout_after_navigation(self):
         driver = MagicMock()
@@ -205,6 +256,24 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(state, "otp")
         wait_next.assert_called_once_with(driver, "mail@example.test", timeout=17)
 
+    def test_last_email_attempt_recovers_empty_intermediate_shell_with_nextauth(self):
+        driver = MagicMock()
+        driver.current_url = "https://chatgpt.com/auth/login?email=mail%40example.test"
+        with patch.object(roxy_registration, "_is_email_verification_page", return_value=False), \
+             patch.object(roxy_registration, "_is_signup_password_page", return_value=False), \
+             patch.object(roxy_registration, "_has_access_token", return_value=False), \
+             patch.object(roxy_registration, "_type_email_address"), \
+             patch.object(roxy_registration, "_email_input_value_state", return_value={"inputs": [{"value": "mail@example.test"}]}), \
+             patch.object(roxy_registration, "_submit_email_step"), \
+             patch.object(roxy_registration, "_wait_email_submit_next_state", side_effect=["unknown", "otp"]), \
+             patch.object(roxy_registration, "_submit_email_via_browser_nextauth", return_value={"ok": True}) as fallback, \
+             patch.object(roxy_registration, "human_delay"):
+            self.assertEqual(
+                roxy_registration._submit_email_and_wait_next(driver, "mail@example.test", attempts=1),
+                "otp",
+            )
+        fallback.assert_called_once_with(driver, "mail@example.test")
+
     def test_profile_page_fast_fails_when_dom_stays_incomplete(self):
         driver = MagicMock()
         snapshot = {
@@ -295,18 +364,19 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             )
         client.reconcile_registration_exit_ip.assert_called_once_with("203.0.113.31")
 
-    def test_empty_browser_probe_uses_reserved_same_proxy_preflight(self):
+    def test_empty_or_invalid_browser_probe_stops_before_preflight_can_be_reused(self):
         opened = RoxyOpenResult(
             "profile-1b",
             {},
             preflight_exit_geo={"ip": "203.0.113.32", "country": "JP"},
         )
         client = MagicMock()
-        client.reconcile_registration_exit_ip.return_value = True
-        selected = roxy_registration._verify_registration_exit_geo(client, opened, {})
-        self.assertEqual(selected["ip"], "203.0.113.32")
-        self.assertEqual(selected["verification_source"], "same_proxy_preflight_fallback")
-        client.reconcile_registration_exit_ip.assert_called_once_with("203.0.113.32")
+        for browser_geo in ({}, {"ip": "not-an-ip"}, None):
+            with self.subTest(browser_geo=browser_geo):
+                with self.assertRaisesRegex(RuntimeError, "窗口内出口 IP 复核失败") as raised:
+                    roxy_registration._verify_registration_exit_geo(client, opened, browser_geo)
+                self.assertTrue(roxy_registration._is_proxy_isolation_failure(raised.exception))
+        client.reconcile_registration_exit_ip.assert_not_called()
 
     def test_browser_exit_geo_is_reserved_when_preflight_was_skipped(self):
         opened = RoxyOpenResult("profile-2", {}, preflight_exit_geo={})
@@ -518,7 +588,9 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
     def test_pending_otp_refreshes_refills_and_resubmits_same_code_once(self):
         driver = MagicMock()
         driver.current_url = "https://auth.openai.com/email-verification"
-        with patch("core.roxy_registration._wait_for_otp_input", return_value="otp_ready") as wait_input, \
+        with patch.object(roxy_registration, "_wait_after_email_otp_submit", return_value="pending"), \
+             patch.object(roxy_registration, "_email_otp_page_state", return_value={"inputs": [{"name": "code"}]}), \
+             patch("core.roxy_registration._wait_for_otp_input", return_value="otp_ready") as wait_input, \
              patch("core.roxy_registration._clear_otp_inputs") as clear_inputs, \
              patch("core.roxy_registration._type_otp") as type_otp, \
              patch("core.roxy_registration._click_continue") as click_continue:
@@ -530,10 +602,75 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
 
         self.assertEqual(outcome, "submitted")
         driver.refresh.assert_called_once_with()
-        wait_input.assert_called_once_with(driver, timeout=6)
+        wait_input.assert_called_once_with(driver, timeout=30)
         clear_inputs.assert_called_once_with(driver)
         type_otp.assert_called_once_with(driver, "001414")
         click_continue.assert_called_once_with(driver)
+
+    def test_otp_wait_tolerates_hydration_and_disabled_input_until_ready(self):
+        driver = OtpNavigationDriver(ready_at=8, disabled_until=11)
+        with patch.object(roxy_registration.time, "time", side_effect=lambda: driver.now), \
+             patch.object(roxy_registration.time, "sleep", side_effect=driver.sleep):
+            self.assertIsNone(roxy_registration._wait_for_otp_input(driver, timeout=30))
+        self.assertGreaterEqual(driver.now, 11)
+        self.assertLess(driver.now, 12)
+
+    def test_late_otp_navigation_is_accepted_without_refresh(self):
+        driver = OtpNavigationDriver(advanced_at=12)
+        with patch.object(roxy_registration.time, "time", side_effect=lambda: driver.now), \
+             patch.object(roxy_registration.time, "sleep", side_effect=driver.sleep):
+            self.assertEqual(roxy_registration._wait_after_email_otp_submit(driver, timeout=15), "accepted")
+        self.assertEqual(driver.refresh_count, 0)
+        self.assertGreaterEqual(driver.now, 12)
+
+    def test_unknown_callback_is_pending_not_accepted(self):
+        driver = OtpNavigationDriver(advanced_at=0, advanced="unknown")
+        with patch.object(roxy_registration.time, "time", side_effect=lambda: driver.now), \
+             patch.object(roxy_registration.time, "sleep", side_effect=driver.sleep):
+            self.assertEqual(roxy_registration._wait_after_email_otp_submit(driver, timeout=3), "pending")
+
+    def test_reload_handles_late_profile_session_and_verified_without_replaying_code(self):
+        for advanced, expected in (("profile", "accepted"), ("logged_in", "accepted"), ("email_verified", "email_verified")):
+            with self.subTest(advanced=advanced):
+                driver = OtpNavigationDriver(advanced_at=9, advanced=advanced, reload_ready_at=12)
+                with patch.object(roxy_registration.time, "time", side_effect=lambda: driver.now), \
+                     patch.object(roxy_registration.time, "sleep", side_effect=driver.sleep), \
+                     patch.object(roxy_registration, "_clear_otp_inputs") as clear, \
+                     patch.object(roxy_registration, "_type_otp") as type_otp, \
+                     patch.object(roxy_registration, "_click_continue") as click:
+                    self.assertEqual(roxy_registration._reload_and_resubmit_otp_once(driver, "001414", timeout=6), expected)
+                self.assertEqual(driver.refresh_count, 1)
+                self.assertGreaterEqual(driver.now, 9)
+                clear.assert_not_called()
+                type_otp.assert_not_called()
+                click.assert_not_called()
+
+    def test_pending_disabled_form_is_not_refreshed_or_resubmitted(self):
+        driver = OtpNavigationDriver(disabled_until=60)
+        with patch.object(roxy_registration, "_type_otp") as type_otp:
+            self.assertEqual(roxy_registration._reload_and_resubmit_otp_once(driver, "001414"), "pending")
+        self.assertEqual(driver.refresh_count, 0)
+        type_otp.assert_not_called()
+
+    def test_reload_waits_for_eight_second_hydration_before_same_code_retry(self):
+        driver = OtpNavigationDriver(reload_ready_at=8)
+        with patch.object(roxy_registration.time, "time", side_effect=lambda: driver.now), \
+             patch.object(roxy_registration.time, "sleep", side_effect=driver.sleep), \
+             patch.object(roxy_registration, "_clear_otp_inputs"), \
+             patch.object(roxy_registration, "_type_otp") as type_otp, \
+             patch.object(roxy_registration, "_click_continue") as click:
+            self.assertEqual(roxy_registration._reload_and_resubmit_otp_once(driver, "001414", timeout=6), "submitted")
+        self.assertGreaterEqual(driver.now, 8)
+        type_otp.assert_called_once_with(driver, "001414")
+        click.assert_called_once_with(driver)
+
+    def test_reload_skips_continue_after_typing_auto_submits_to_profile(self):
+        driver = OtpNavigationDriver()
+        with patch.object(roxy_registration, "_clear_otp_inputs"), \
+             patch.object(roxy_registration, "_type_otp", side_effect=lambda *args: setattr(driver, "advanced_at", 0)), \
+             patch.object(roxy_registration, "_click_continue") as click:
+            self.assertEqual(roxy_registration._reload_and_resubmit_otp_once(driver, "001414"), "submitted")
+        click.assert_not_called()
 
     def test_confirmed_otp_submit_state_is_preserved(self):
         self.assertEqual(
