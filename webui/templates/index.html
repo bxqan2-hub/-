@@ -3993,7 +3993,7 @@ function renderJobs() {
       const gcChecking = j.status === 'gc_checking';
       const started = formatDateTime(j.started_at);
       const completed = formatDateTime(j.completed_at);
-      const err = j.error_message || j.gc_check_message || '';
+      const err = j.retry_reason || j.error_message || j.gc_check_message || '';
       const manualOtp = j.status === 'running' && j.email && j.manual_otp_required;
       const gcControls = j.gc_mode ? `<span class="gc-job-actions">
         <button type="button" class="gc-job-btn" data-copy-gc-at="${esc(j.id)}" ${j.account_id ? '' : 'disabled'} title="复制任务 #${esc(j.id)} 提取到的完整 AT">复制 AT</button>
@@ -4017,7 +4017,7 @@ function renderJobs() {
             ${manualOtp ? `<input class="manual-otp-input manual-otp-input--v2" data-otp-email="${esc(j.email)}" data-otp-job="${esc(j.id)}" placeholder="邮箱验证码" maxlength="8" title="手动模式下，打开邮箱后把 6 位验证码贴这里"><button type="button" class="jobs-v2-op jobs-v2-op--otp" data-submit-otp-job="${esc(j.id)}" data-email="${esc(j.email)}" title="提交验证码">${icons.check}</button>` : ''}
             ${stoppable ? `<button type="button" class="jobs-v2-op jobs-v2-op--stop" data-stop-job="${esc(j.id)}" title="${j.status === 'stopping' ? '停止/修复' : '停止'}">${icons.stop}</button>` : ''}
             ${gcControls}
-            ${j.retryable ? `<button type="button" class="jobs-v2-op jobs-v2-op--retry" data-retry-job="${esc(j.id)}" title="${esc(j.retry_action === 'codex' ? '账号已创建，仅补跑 Codex 授权' : (j.retry_label || '重试'))}">${icons.retry}</button>` : ''}
+            ${j.retryable ? `<button type="button" class="jobs-v2-op jobs-v2-op--retry" data-retry-job="${esc(j.id)}" title="${esc(j.retry_action === 'security' ? '账号已创建，补齐密码/2FA；进度在账号页查看' : (j.retry_action === 'codex' ? '账号已创建，仅补跑 Codex 授权' : (j.retry_label || '重试')))}">${icons.retry}</button>` : ''}
             <button type="button" class="jobs-v2-op jobs-v2-op--del" data-delete-job="${esc(j.id)}" ${protectedRow ? 'disabled title="请先停止任务或关闭该任务窗口"' : 'title="删除"'}>${icons.del}</button>
           </div>
         </td>
@@ -4310,7 +4310,7 @@ async function deleteSelectedJobs() {
 async function retryJob(jobId, btn) {
   const job = JOBS.find(j => Number(j.id) === Number(jobId));
   if (!job || !job.retryable) { showToast('该任务当前不可重试'); return; }
-  const actionText = job.retry_action === 'codex' ? '仅补跑 Codex 授权' : '创建新的完整注册任务';
+  const actionText = job.retry_action === 'security' ? '复用账号安全设置队列补齐密码/2FA，进度和日志在账号页查看' : (job.retry_action === 'codex' ? '仅补跑 Codex 授权' : '创建新的完整注册任务');
   if (!confirm(`确定${job.retry_label || '重试'}任务 #${jobId}？\n\n${actionText}\n原任务记录和日志会保留。`)) return;
   btn.disabled = true;
   try {
@@ -4330,7 +4330,7 @@ async function retryJob(jobId, btn) {
 
 async function retrySelectedJobs() {
   const ids = Array.from(JOB_SELECTED);
-  if (!confirm(`确定重试选中的 ${ids.length} 个任务吗？\n\n后端会逐条校验；已创建账号的任务只补跑 Codex，其余任务重新入队注册，不能重试的会自动跳过。`)) return;
+  if (!confirm(`确定重试选中的 ${ids.length} 个任务吗？\n\n后端会逐条校验；安全设置未完成的账号优先补密码/2FA（进度在账号页查看），其余已创建账号仅补跑 Codex，未创建账号则重新注册；不满足条件的自动跳过。`)) return;
   const btn = $('#btnRetrySelectedJobsV2');
   if (btn) btn.disabled = true;
   try {

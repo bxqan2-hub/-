@@ -290,3 +290,11 @@
 - 分组/精确邮箱筛选的后台刷新由 2 秒改为 10 秒节流，避免 700 账号分组反复触发全量内存筛选。
 - 新建分组后保持当前分组和列表位置，新组仅设为移动目标。
 - 验证：定向 `33 passed`；全量 `751 passed, 16 subtests passed`。
+
+## 本次 OTP-only 注册补密码与安全重试修复（2026-09-11）
+
+- 修改前重新读取锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `vendor/turb_gpt_free_register/core/account_export.py` 与 `core/roxy_registration.py`。上游没有本地 `post_login_add_password` 扩展；本次参考其 OTP 重定位/页面状态等待，以及同窗 Cookie、显式 Token、邮箱匹配和 enroll/activate 成功确认，不覆盖 vendor 或新增平行实现。
+- 最新 9 个已保存账号中 7 个停在 `password_email`，分别为 6 个提交失败和 1 个推进超时；它们未进入 MFA。修改 `core/account_export.py` 的既有验证码 helper/状态机，替换 0.75 秒固定重试和 8 秒推进判定，保持有界等待与密码终态确认。
+- `core/registration_service.py` 的安全失败任务优先调用已有账号安全队列，而非补跑 Codex；`webui/app.py` / `webui/templates/index.html` 复用现有字段展示错误和正确的重试操作。
+- `core/account_security_service.py` 补密码后不再透传旧 Token，重新读取同一浏览器 Session、匹配邮箱并同步 Cookie。已有 TOTP 且密码已确认时，只读刷新失败只附注，不将两项已完成凭据误标为激活失败；账号错配仍停止。
+- 证据、Finding→Path、验证与未完成事项见 `docs/2026-09-11_注册密码与2FA重认证修复-report.md`。不自动注册、不自动补设历史账号，实际新批次由用户验证。

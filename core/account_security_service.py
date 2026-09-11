@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """账号页独立补密码 + TOTP 2FA 扩展。
 
-该服务只由账号页按钮触发。它创建独立 Roxy 环境完成邮箱 OTP 登录，然后
+该服务由账号页按钮或注册安全失败重试入队。它创建独立 Roxy 环境完成邮箱 OTP 登录，然后
 复用 account_export 中已经验证的浏览器脚本执行密码重认证与 MFA
 enroll/activate；不会进入或修改注册任务主流程。
 """
@@ -108,6 +108,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
     confirmed_password = ""
     confirmed_secret = ""
     access_token = ""
+    validation_note = ""
     try:
         account_operation_control.raise_if_cancelled(operation_generation)
         account = db.get_account(int(account_id))
@@ -140,6 +141,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         )
         from core.roxy_codex_oauth import _fill_email_and_otp
         from core.account_export import (
+            TwoFASetupError,
             _setup_password_with_driver,
             _setup_totp_with_driver,
             _validate_2fa_token,
@@ -255,10 +257,12 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             confirmed_password = desired_password
             account_operation_control.raise_if_cancelled(operation_generation)
             password_done = True
+            # Password reauthentication can revoke the pre-password token.
+            # Persist the confirmed password first, without re-saving that token.
+            access_token = ""
             db.save_security_checkpoint(
                 email,
                 registration_password=confirmed_password,
-                access_token=access_token,
             )
             db.update_account_security_setup(
                 account_id,
@@ -268,9 +272,30 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                     "password_done": True, "totp_done": totp_done,
                 },
                 registration_password=confirmed_password,
-                access_token=access_token,
             )
             _append_log(email, f"[安全扩展] 密码已完成 mode={password_mode}")
+            try:
+                session_info = _fetch_chatgpt_session(
+                    driver,
+                    timeout=max(15, int(getattr(roxy_cfg, "ROXY_SESSION_WAIT_TIMEOUT", 25) or 25)),
+                    auto_jump_wait=max(3, int(getattr(roxy_cfg, "ROXY_SESSION_AUTO_JUMP_WAIT", 8) or 8)),
+                    refresh_attempts=1,
+                )
+                refreshed_email = str((session_info.get("user") or {}).get("email") or "").strip()
+                if refreshed_email.casefold() != email.casefold():
+                    raise TwoFASetupError("totp_session", "totp_session_account_mismatch", "密码重认证后的浏览器账号与目标账号不一致")
+                access_token = str(session_info.get("accessToken") or "").strip()
+                if not access_token:
+                    raise RuntimeError("密码已确认，当前浏览器 Session 未返回新 Access Token")
+                import_browser_cookies(session, driver, require_auth=True)
+                _append_log(email, "[安全扩展] 密码重认证后的同窗 Session 与 Cookie 已同步")
+            except Exception as exc:
+                if not totp_done or (isinstance(exc, TwoFASetupError) and exc.code == "totp_session_account_mismatch"):
+                    raise
+                # Both credential writes are already confirmed; a read failure
+                # is not an activation failure, and must not restore the old AT.
+                access_token = ""
+                validation_note = f"；Token 同窗只读刷新未通过（{type(exc).__name__}）"
 
         if not totp_done:
             account_operation_control.raise_if_cancelled(operation_generation)
@@ -302,13 +327,13 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             )
             _append_log(email, "[安全扩展] TOTP enroll/activate 已完成")
 
-        validation_note = ""
         account_operation_control.raise_if_cancelled(operation_generation)
-        try:
-            _validate_2fa_token(session, access_token)
-        except Exception as exc:
-            # 激活是远端写操作终态；只读 Token 校验失败不回滚已保存 Secret。
-            validation_note = f"；Token 只读校验未通过（{type(exc).__name__}）"
+        if not validation_note:
+            try:
+                _validate_2fa_token(session, access_token)
+            except Exception as exc:
+                # 激活是远端写操作终态；只读 Token 校验失败不回滚已保存 Secret。
+                validation_note = f"；Token 只读校验未通过（{type(exc).__name__}）"
         result = {
             "ok": True,
             "status": "success",

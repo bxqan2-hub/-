@@ -1203,41 +1203,82 @@ def _password_click_selenium(driver, field) -> bool:
         return False
 
 
-def _password_submit_code(driver, code: str) -> bool:
+def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -> bool:
     code = str(code or "").strip()
     if not re.fullmatch(r"\d{6}", code):
         return False
-    fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
-    if not fields:
-        return False
-    initial_url = _password_page_url(driver)
-
-    def _submitted_or_advanced(clicked: bool) -> bool:
-        if clicked:
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    entered = False
+    initial_body = _password_body_text(driver)
+    initial_email = "email-verification" in _password_page_url(driver).lower() or bool(_PASSWORD_EMAIL_RE.search(initial_body))
+    initial_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(initial_body)) and not initial_email
+    while time.monotonic() < deadline:
+        body = _password_body_text(driver)
+        if _PASSWORD_REJECTION_RE.search(body):
+            return False
+        # Only an observed next form confirms advancement. A missing/disabled
+        # OTP input or a changed URL alone is merely hydration/navigation.
+        if _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR):
             return True
-        time.sleep(0.35)
-        return bool(
-            _password_page_url(driver) != initial_url
-            or not _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
-        )
-
-    try:
-        if _is_playwright_page(driver):
-            if len(fields) >= 6:
-                for field, char in zip(fields[-6:], code):
-                    field.fill(char, timeout=3000)
-                return _submitted_or_advanced(_password_click_playwright(driver, fields[-6], 'button[type="submit"], input[type="submit"], button[name="intent"]'))
-            fields[0].fill(code, timeout=5000)
-            return _submitted_or_advanced(_password_click_playwright(driver, fields[0], 'button[type="submit"], input[type="submit"], button[name="intent"]'))
-        if len(fields) >= 6:
-            for field, char in zip(fields[-6:], code):
-                field.clear(); field.send_keys(char)
-            return _submitted_or_advanced(_password_click_selenium(driver, fields[-6]))
-        fields[0].clear(); fields[0].send_keys(code)
-        return _submitted_or_advanced(_password_click_selenium(driver, fields[0]))
-    except Exception as exc:
-        logger.debug("[2FA][密码] 验证码输入异常：%s", type(exc).__name__)
-        return False
+        fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+        if entered and fields:
+            is_email = "email-verification" in _password_page_url(driver).lower() or bool(_PASSWORD_EMAIL_RE.search(body))
+            is_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(body)) and not is_email
+            if (initial_authenticator and is_email) or (not initial_authenticator and is_authenticator):
+                # Auto-submit can lead to another OTP challenge, not only a
+                # password form. Let the caller acquire that challenge's code.
+                return True
+        last_key_attempted = False
+        try:
+            if fields and not entered:
+                split_fields = len(fields) >= 6
+                for index, char in enumerate(code):
+                    fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+                    field = fields[-6:][index] if split_fields else fields[0]
+                    if split_fields or index == 0:
+                        if _is_playwright_page(driver):
+                            field.fill("", timeout=1000)
+                        else:
+                            field.clear()
+                        fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+                        field = fields[-6:][index] if split_fields else fields[0]
+                    last_key_attempted = index == len(code) - 1
+                    if _is_playwright_page(driver):
+                        field.press(char, timeout=1000)
+                    else:
+                        field.send_keys(char)
+                    time.sleep(0.08)
+                entered = True
+                continue
+            if entered:
+                fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+                if fields:
+                    fields = fields[-6:] if len(fields) >= 6 else fields[:1]
+                    if _is_playwright_page(driver):
+                        observed = "".join(str(field.input_value(timeout=1000) or "") for field in fields)
+                    else:
+                        observed = "".join(str(field.get_attribute("value") or "") for field in fields)
+                    if observed == code:
+                        if _is_playwright_page(driver):
+                            clicked = _password_click_playwright(
+                                driver, fields[0],
+                                'button[type="submit"], input[type="submit"], button[name="intent"]',
+                            )
+                        else:
+                            clicked = _password_click_selenium(driver, fields[0])
+                        if clicked:
+                            return True
+                    elif observed:
+                        # A stale last key can also mean it was never accepted.
+                        # Refill an observed partial value, never submit it.
+                        entered = False
+        except Exception as exc:
+            # The last real key may trigger auto-submit before WebDriver
+            # returns. Do not clear/retype that code; observe the next form.
+            entered = entered or last_key_attempted
+            logger.debug("[2FA][密码] 验证码输入瞬态：%s", type(exc).__name__)
+        time.sleep(0.5)
+    return False
 
 
 def _password_submit_new_password(driver, fields: list, password: str) -> bool:
@@ -1363,7 +1404,7 @@ def _setup_password_with_driver(
         logger.warning("%s[2FA][密码] 重认证请求失败：%s", prefix, type(exc).__name__)
         return {
             "ok": False, "status": "failed", "stage": "password_reauth",
-            "code": "password_reauth_request_failed", "message": f"{type(exc).__name__}: {str(exc)[:160]}",
+            "code": "password_reauth_request_failed", "message": type(exc).__name__,
             "http_status": None,
         }
     if not isinstance(reauth, dict) or not reauth.get("ok"):
@@ -1388,7 +1429,7 @@ def _setup_password_with_driver(
     except Exception as exc:
         return {
             "ok": False, "status": "failed", "stage": "password_reauth",
-            "code": "password_reauth_navigation_failed", "message": f"{type(exc).__name__}: {str(exc)[:160]}",
+            "code": "password_reauth_navigation_failed", "message": type(exc).__name__,
             "http_status": None,
         }
 
@@ -1405,27 +1446,31 @@ def _setup_password_with_driver(
         last_url = _password_page_url(driver)
         password_fields = _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR)
         code_fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+        path = last_url.lower()
+        is_email_challenge = "email-verification" in path or bool(_PASSWORD_EMAIL_RE.search(body))
+        is_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(body))
+        challenge = "totp" if is_authenticator and not is_email_challenge else "email"
+        if not code_fields and not is_email_challenge and not is_authenticator:
+            challenge = "totp" if (totp_submitted_at or -1) > (email_submitted_at or -1) else "email"
+        challenge_used = email_used if challenge == "email" else totp_used
+        if challenge_used and not password_fields and not password_submitted:
+            submitted_at = email_submitted_at if challenge == "email" else totp_submitted_at
+            if _PASSWORD_REJECTION_RE.search(body):
+                return {
+                    "ok": False, "status": "failed", "stage": f"password_{challenge}",
+                    "code": f"password_{challenge}_reauth_rejected", "message": "重认证验证码被拒绝",
+                    "http_status": None,
+                }
+            if submitted_at is not None and time.monotonic() - submitted_at >= 45:
+                return {
+                    "ok": False, "status": "failed", "stage": f"password_{challenge}",
+                    "code": f"password_{challenge}_reauth_not_advanced",
+                    "message": "重认证验证码提交后页面未继续", "http_status": None,
+                }
+            time.sleep(0.5)
+            continue
         if code_fields and not password_fields:
-            path = last_url.lower()
-            is_email_challenge = "email-verification" in path or bool(_PASSWORD_EMAIL_RE.search(body))
-            is_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(body))
             if is_authenticator and not is_email_challenge:
-                if totp_used:
-                    if _PASSWORD_REJECTION_RE.search(body):
-                        return {
-                            "ok": False, "status": "failed", "stage": "password_totp",
-                            "code": "password_totp_reauth_rejected", "message": "TOTP 重认证验证码被拒绝",
-                            "http_status": None,
-                        }
-                    if totp_submitted_at and time.monotonic() - totp_submitted_at >= 8:
-                        return {
-                            "ok": False, "status": "failed", "stage": "password_totp",
-                            "code": "password_totp_reauth_not_advanced",
-                            "message": "TOTP 重认证提交后页面未继续",
-                            "http_status": None,
-                        }
-                    time.sleep(0.5)
-                    continue
                 if not totp_secret:
                     return {
                         "ok": False, "status": "failed", "stage": "password_totp",
@@ -1436,10 +1481,14 @@ def _setup_password_with_driver(
                 if totp_secret:
                     _wait_for_totp_window(min_remaining=5.0)
                     code = pyotp.TOTP(normalize_totp_secret(totp_secret)).now()
-                    if not _password_submit_code(driver, code):
+                    if not _password_submit_code(
+                        driver, code, timeout_seconds=min(45.0, max(0.0, deadline - time.monotonic())),
+                    ):
+                        rejected = bool(_PASSWORD_REJECTION_RE.search(_password_body_text(driver)))
                         return {
                             "ok": False, "status": "failed", "stage": "password_totp",
-                            "code": "password_totp_reauth_submit_failed", "message": "TOTP 重认证验证码提交失败",
+                            "code": "password_totp_reauth_rejected" if rejected else "password_totp_reauth_submit_failed",
+                            "message": "TOTP 重认证验证码被拒绝" if rejected else "TOTP 重认证验证码提交失败",
                             "http_status": None,
                         }
                     totp_used = True
@@ -1447,22 +1496,6 @@ def _setup_password_with_driver(
                     time.sleep(1.5)
                     continue
             if is_email_challenge or not is_authenticator:
-                if email_used:
-                    if _PASSWORD_REJECTION_RE.search(body):
-                        return {
-                            "ok": False, "status": "failed", "stage": "password_email",
-                            "code": "password_email_reauth_rejected", "message": "邮箱重认证验证码被拒绝",
-                            "http_status": None,
-                        }
-                    if email_submitted_at and time.monotonic() - email_submitted_at >= 8:
-                        return {
-                            "ok": False, "status": "failed", "stage": "password_email",
-                            "code": "password_email_reauth_not_advanced",
-                            "message": "邮箱重认证验证码提交后页面未继续",
-                            "http_status": None,
-                        }
-                    time.sleep(0.5)
-                    continue
                 code_after = requested_at
                 if not resend_attempted:
                     resend_attempted = True
@@ -1482,35 +1515,23 @@ def _setup_password_with_driver(
                 except Exception as exc:
                     return {
                         "ok": False, "status": "failed", "stage": "password_email",
-                        "code": "password_email_code_wait_failed", "message": f"{type(exc).__name__}: {str(exc)[:160]}",
+                        "code": "password_email_code_wait_failed", "message": type(exc).__name__,
                         "http_status": None,
                     }
-                code_submitted = False
-                for code_submit_attempt in (1, 2):
-                    if code_submit_attempt == 2:
-                        # The auth form can re-render between OTP discovery and
-                        # the first key/click sequence. Re-query once before
-                        # declaring a password re-auth failure; do not fetch a
-                        # second code or advance the workflow blindly.
-                        time.sleep(0.75)
-                        logger.info("%s[2FA][密码] 邮箱验证码提交瞬态失败，重新定位表单重试一次", prefix)
-                    if _password_submit_code(driver, code):
-                        code_submitted = True
-                        break
-                if not code_submitted:
-                    try:
-                        visible_code_inputs = len(_password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR))
-                    except Exception:
-                        visible_code_inputs = 0
+                if not _password_submit_code(
+                    driver, code, timeout_seconds=min(45.0, max(0.0, deadline - time.monotonic())),
+                ):
+                    rejected = bool(_PASSWORD_REJECTION_RE.search(_password_body_text(driver)))
                     logger.warning(
-                        "%s[2FA][密码] 邮箱验证码提交失败：url=%s visible_code_inputs=%s",
+                        "%s[2FA][密码] 邮箱验证码未完成提交：actionable_code_inputs=%s rejected=%s",
                         prefix,
-                        _password_page_url(driver)[:180],
-                        visible_code_inputs,
+                        len(_password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)),
+                        rejected,
                     )
                     return {
                         "ok": False, "status": "failed", "stage": "password_email",
-                        "code": "password_email_reauth_submit_failed", "message": "邮箱重认证验证码提交失败",
+                        "code": "password_email_reauth_rejected" if rejected else "password_email_reauth_submit_failed",
+                        "message": "邮箱重认证验证码被拒绝" if rejected else "邮箱重认证验证码提交失败",
                         "http_status": None,
                     }
                 email_used = True
@@ -1548,7 +1569,7 @@ def _setup_password_with_driver(
     _password_screenshot(driver)
     return {
         "ok": False, "status": "failed", "stage": "password_setup",
-        "code": "password_settings_timeout", "message": f"补设密码流程超时 url={last_url}",
+        "code": "password_settings_timeout", "message": "补设密码流程超时，尚未确认密码成功终态",
         "http_status": None,
     }
 

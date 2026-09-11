@@ -9,6 +9,7 @@
     submit_registration(email_source="outlook", count=5)
     → 创建 5 个任务，丢入线程池，立即返回 [job_dict, ...]
 """
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -685,13 +686,59 @@ def get_retry_info(job: dict) -> dict:
     if status not in ("failed", "stopped", "cancelled"):
         return info
 
+    account = _account_for_job(job)
+    if account:
+        raw_extra = account.get("extra_json")
+        try:
+            extra = json.loads(raw_extra) if isinstance(raw_extra, str) else raw_extra
+        except (TypeError, ValueError):
+            extra = {}
+        extra = extra if isinstance(extra, dict) else {}
+        twofa = extra.get("twofa")
+        twofa = twofa if isinstance(twofa, dict) else {}
+        security_status = str(account.get("security_setup_status") or "")
+        security_requested = (
+            str(twofa.get("status") or "") in {"failed", "partial_success", "success"}
+            or security_status in {"queued", "running", "failed", "partial", "stopped", "success"}
+        )
+        security_complete = bool(
+            str(extra.get("registration_password") or extra.get("chatgpt_password") or "").strip()
+            and str(account.get("totp_secret") or "").strip()
+        )
+        if security_status in {"queued", "running"}:
+            info["retry_reason"] = "补密码/2FA 已排队或正在执行，请在账号页查看进度"
+            return info
+        if security_requested and not security_complete:
+            info["retry_reason"] = "账号已创建，密码/2FA 尚未全部完成"
+            if str(account.get("codex_status") or "") == "deactivated":
+                info["retry_reason"] = "账号已废号，已停止补密码/2FA"
+                return info
+            if account.get("codex_status") == "retrying" or codex_retry_service.is_retrying(str(account.get("email") or "")):
+                info["retry_reason"] = "该账号正在补跑 Codex，请结束后再补密码/2FA"
+                return info
+            info.update({
+                "retryable": True,
+                "retry_action": "security",
+                "retry_label": "补密码/2FA",
+            })
+            return info
+        # 后续补设完成以当前凭据为准；旧 twofa.error 只保留为历史证据。
+        if security_requested and security_complete:
+            codex = extra.get("codex")
+            codex = codex if isinstance(codex, dict) else {}
+            codex_status = str(account.get("codex_status") or codex.get("status") or "")
+            codex_complete = codex_status in {"success", "skipped"} or (not codex_status and codex.get("ok") is True)
+            info["display_status"] = "success" if codex_complete else "partial_success"
+            if codex_complete:
+                info["retry_reason"] = "密码/2FA 已完成，Codex 已完成或按配置跳过"
+                return info
+
     successful_retry = db.get_successful_retry_for_job(int(job.get("id") or 0))
     if successful_retry is not None:
         info["retry_reason"] = f"后续重试任务 #{successful_retry.get('id')} 已成功"
         info["successful_retry_job_id"] = successful_retry.get("id")
         return info
 
-    account = _account_for_job(job)
     if account and job.get("account_id") is not None and status in ("failed", "stopped"):
         info["display_status"] = "success" if (account.get("codex_status") or "") == "success" else "partial_success"
 
@@ -719,7 +766,7 @@ def get_retry_info(job: dict) -> dict:
 
 
 def retry_job(job_id: int, workers: int | None = None) -> dict:
-    """智能重试终态任务：未生成账号则重新注册，已有账号则仅补跑 Codex。"""
+    """智能重试终态任务：优先补齐账号安全设置，其次补 Codex 或重新注册。"""
     source = db.get_job(job_id)
     if source is None:
         return {"ok": False, "error": "任务不存在", "status": 404}
@@ -733,6 +780,34 @@ def retry_job(job_id: int, workers: int | None = None) -> dict:
     account = _account_for_job(source)
     email = str((account or {}).get("email") or source.get("email") or "").strip()
     account_id = int(account["id"]) if account and account.get("id") is not None else None
+    if action == "security":
+        if not email or account_id is None:
+            return {"ok": False, "error": "已注册账号信息不完整，补密码/2FA 尚未入队", "status": 409}
+        from core.account_security_service import enqueue_account_security_setup
+
+        # 重新读取的账号状态与进程占位均需复核，避免列表查询后 Codex 已开始执行。
+        if account.get("codex_status") == "retrying" or codex_retry_service.is_retrying(email):
+            return {"ok": False, "error": "该账号正在补跑 Codex，请结束后再补密码/2FA", "status": 409}
+        result = enqueue_account_security_setup(
+            account_id=account_id, password_mode="add", trigger="registration_retry",
+        )
+        if not result.get("accepted"):
+            return {
+                "ok": False,
+                "error": result.get("error") or "补密码/2FA 尚未入队",
+                "status": 409 if result.get("busy") else (429 if result.get("queue_full") else 400),
+            }
+        return {
+            "ok": True,
+            "created": True,
+            "reused": False,
+            "message": "补密码/2FA 已入队，请在账号页查看进度和日志",
+            "source_job_id": int(job_id),
+            "retry_action": action,
+            "account_id": account_id,
+            "job": {"id": int(job_id), "status": source.get("status"), "account_id": account_id},
+        }
+
     reserved_codex = False
     if action == "codex":
         if not email or account_id is None:

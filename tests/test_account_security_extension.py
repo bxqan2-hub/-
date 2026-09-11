@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from core import account_security_service, db
 from webui.app import _compact_account_for_list, create_app
 
@@ -97,6 +99,44 @@ def test_security_setup_state_is_independent_and_credentials_are_not_compacted(m
         assert secret not in serialized
 
 
+@pytest.mark.parametrize("state", ["registration_failed", "running", "success", "credentials_complete", "malformed", "skipped"])
+def test_account_list_exposes_registration_security_failure_without_credentials(state) -> None:
+    row = {
+        "id": 700,
+        "email": "test@example.com",
+        "access_token": "PRIVATE-TOKEN",
+        "totp_secret": "",
+        "extra_json": json.dumps({"twofa": {
+            "status": "skipped" if state == "skipped" else "failed",
+            "error": {"stage": "password_email", "code": "password_email_reauth_submit_failed", "message": "PRIVATE-OTP PRIVATE-TOKEN"},
+            "private": "PRIVATE-SECRET",
+        }}),
+    }
+    if state in {"running", "success"}:
+        row.update(security_setup_status=state, security_setup_message="current setup state")
+    elif state == "credentials_complete":
+        extra = json.loads(row["extra_json"])
+        extra["registration_password"] = "PRIVATE-PASSWORD"
+        row.update(extra_json=json.dumps(extra), totp_secret="PRIVATE-SECRET")
+    elif state == "malformed":
+        row["extra_json"] = "[]"
+
+    compact = _compact_account_for_list(row)
+    if state == "registration_failed":
+        assert compact["security_setup_status"] == "failed"
+        assert compact["security_setup_stage"] == "password_email"
+        assert "password_email_reauth_submit_failed" in compact["security_setup_error"]
+    elif state in {"running", "success"}:
+        assert compact["security_setup_status"] == state
+        assert compact["security_setup_message"] == "current setup state"
+        assert "security_setup_error" not in compact
+    else:
+        assert "security_setup_status" not in compact
+    serialized = json.dumps(compact)
+    assert "PRIVATE-" not in serialized
+    assert "extra_json" not in compact
+
+
 def test_security_setup_api_routes_are_independent_and_do_not_return_secrets(monkeypatch, tmp_path) -> None:
     _isolate_storage(monkeypatch, tmp_path)
     account_id = db.insert_account(
@@ -145,7 +185,8 @@ def test_security_setup_api_routes_are_independent_and_do_not_return_secrets(mon
     assert rejected.status_code == 400
 
 
-def test_security_worker_reuses_validated_helpers_without_entering_registration(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("refresh_state", ["ok", "missing_token", "wrong_email", "read_failed", "existing_password", "existing_totp", "existing_totp_read_failed", "existing_totp_missing_token", "existing_totp_wrong_email", "existing_totp_cookie_failed"])
+def test_security_worker_reuses_validated_helpers_without_entering_registration(monkeypatch, tmp_path, refresh_state) -> None:
     from config import roxybrowser as roxy_cfg
     from core import account_export, registration_password, roxy_codex_oauth, roxy_registration, session as session_module
 
@@ -154,8 +195,8 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
         "id": 7,
         "email": "worker@example.com",
         "access_token": "old-token",
-        "totp_secret": "",
-        "extra_json": "{}",
+        "totp_secret": "WORKER-TOTP" if refresh_state.startswith("existing_totp") else "",
+        "extra_json": json.dumps({"registration_password": "Worker-pass-1!"}) if refresh_state == "existing_password" else "{}",
     }
 
     class Driver:
@@ -197,32 +238,41 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
     monkeypatch.setattr("core.roxybrowser_client.RoxyBrowserClient", Client)
     monkeypatch.setattr(roxy_registration, "_build_driver", lambda opened: Driver())
     monkeypatch.setattr(roxy_registration, "_center_browser_window", lambda driver: calls.setdefault("centered", True))
-    monkeypatch.setattr(
-        roxy_registration,
-        "_fetch_chatgpt_session",
-        lambda *args, **kwargs: {
-            "user": {"email": "worker@example.com"},
-            "accessToken": "browser-token",
-        },
-    )
+    def fetch_session(*args, **kwargs):
+        calls["session_reads"] = calls.get("session_reads", 0) + 1
+        refreshed = calls["session_reads"] > 1
+        if refreshed and refresh_state.endswith("read_failed"):
+            raise RuntimeError("session read failed")
+        return {
+            "user": {"email": "different@example.com" if refreshed and refresh_state.endswith("wrong_email") else "worker@example.com"},
+            "accessToken": "" if refreshed and refresh_state.endswith("missing_token") else "post-password-token" if refreshed else "browser-token",
+        }
+
+    monkeypatch.setattr(roxy_registration, "_fetch_chatgpt_session", fetch_session)
     monkeypatch.setattr(
         roxy_codex_oauth,
         "_fill_email_and_otp",
         lambda driver, email, provider, url: calls.update({"login_email": email, "login_url": url}),
     )
-    monkeypatch.setattr(account_export, "import_browser_cookies", lambda *args, **kwargs: calls.setdefault("cookies", kwargs))
+    def import_cookies(*args, **kwargs):
+        calls.setdefault("cookies", []).append(kwargs)
+        if len(calls["cookies"]) == 2 and refresh_state == "existing_totp_cookie_failed":
+            raise account_export.TwoFASetupError("cookie_import", "cookie_import_failed", "cookie read failed")
+
+    monkeypatch.setattr(account_export, "import_browser_cookies", import_cookies)
 
     def fake_password_setup(**kwargs):
         calls["password"] = kwargs
         return {"ok": True, "status": "success"}
 
     monkeypatch.setattr(account_export, "_setup_password_with_driver", fake_password_setup)
-    monkeypatch.setattr(
-        account_export,
-        "_setup_totp_with_driver",
-        lambda *args, **kwargs: ("WORKER-TOTP", "fresh-token", None),
-    )
-    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args, **kwargs: 200)
+    def setup_totp(*args, **kwargs):
+        calls["totp"] = kwargs
+        assert kwargs["access_token"] == ("browser-token" if refresh_state == "existing_password" else "post-password-token")
+        return "WORKER-TOTP", "fresh-token", None
+
+    monkeypatch.setattr(account_export, "_setup_totp_with_driver", setup_totp)
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args, **kwargs: calls.setdefault("validated_token", args[1]))
     monkeypatch.setattr(registration_password, "registration_password", lambda: "Worker-pass-1!")
     monkeypatch.setattr(session_module, "BrowserSession", BrowserSession)
     monkeypatch.setattr(roxy_cfg, "ROXY_SELENIUM_TIMEOUT", 30)
@@ -237,21 +287,44 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
         trigger="manual",
     )
 
-    assert result["ok"] is True
+    failed_refresh = refresh_state in {"missing_token", "wrong_email", "read_failed", "existing_totp_wrong_email"}
+    assert result["ok"] is not failed_refresh
     assert result["password_done"] is True
-    assert result["totp_done"] is True
+    assert result["totp_done"] is (not failed_refresh or refresh_state.startswith("existing_totp"))
     assert calls["open_profile"] == {"headless": False, "require_proxy_exit_ip": True}
     assert calls["login_email"] == "worker@example.com"
     assert calls["login_url"] == "https://chatgpt.com/auth/login"
-    assert calls["password"]["password_mode"] == "reset"
-    assert calls["password"]["console_compat"] is True
-    assert calls["password"]["password"] == "Worker-pass-1!"
+    if refresh_state != "existing_password":
+        assert calls["password"]["password_mode"] == "reset"
+        assert calls["password"]["console_compat"] is True
+        assert calls["password"]["password"] == "Worker-pass-1!"
+        assert calls["session_reads"] == 2
+        assert "access_token" not in calls["checkpoints"][0][1]
+    else:
+        assert "password" not in calls
+        assert calls["session_reads"] == 1
     assert calls["cleanup_profile"] == "profile-7"
     assert calls["driver_quit"] is True
     assert calls["session_closed"] is True
     assert calls["updates"][-1][1]["registration_password"] == "Worker-pass-1!"
-    assert calls["updates"][-1][1]["totp_secret"] == "WORKER-TOTP"
-    assert calls["updates"][-1][1]["access_token"] == "fresh-token"
+    if failed_refresh:
+        assert "totp" not in calls
+        assert "validated_token" not in calls
+        assert calls["updates"][-1][1]["totp_secret"] == ("WORKER-TOTP" if refresh_state.startswith("existing_totp") else None)
+        assert calls["updates"][-1][1]["access_token"] is None
+    elif refresh_state in {"existing_totp_read_failed", "existing_totp_missing_token", "existing_totp_cookie_failed"}:
+        assert "totp" not in calls
+        assert "validated_token" not in calls
+        assert result["status"] == "success"
+        assert "只读刷新" in result["message"]
+        assert calls["updates"][-1][1]["totp_secret"] == "WORKER-TOTP"
+        assert calls["updates"][-1][1]["access_token"] == ""
+    else:
+        expected_token = "post-password-token" if refresh_state == "existing_totp" else "fresh-token"
+        assert calls["updates"][-1][1]["totp_secret"] == "WORKER-TOTP"
+        assert calls["updates"][-1][1]["access_token"] == expected_token
+        assert calls["validated_token"] == expected_token
+        assert len(calls["cookies"]) == (1 if refresh_state == "existing_password" else 2)
 
 
 def test_accounts_template_contains_security_extension_button_and_polling() -> None:

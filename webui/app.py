@@ -687,6 +687,26 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         value = row.get(key)
         if value is not None and value != "":
             out[key] = value
+    if not out.get("security_setup_status") and not (out["password_configured"] and out["totp_enabled"]):
+        raw_extra = row.get("extra_json")
+        try:
+            extra = raw_extra if isinstance(raw_extra, dict) else json.loads(str(raw_extra or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+        twofa = extra.get("twofa") if isinstance(extra, dict) else None
+        if isinstance(twofa, dict) and twofa.get("status") == "failed":
+            error = twofa.get("error") if isinstance(twofa.get("error"), dict) else {}
+            stage = str(error.get("stage") or "")
+            code = str(error.get("code") or "")
+            # Reuse the existing security tooltip fields; raw server messages
+            # and the credential-bearing extra object never enter list payloads.
+            stage = stage if re.fullmatch(r"(?:password|totp)(?:_[a-z]+){1,8}", stage) else "security_setup"
+            code = code if re.fullmatch(r"(?:password|totp)(?:_[a-z]+){1,10}", code) else "security_setup_failed"
+            out.update({
+                "security_setup_status": "failed",
+                "security_setup_stage": stage,
+                "security_setup_error": f"注册时安全设置失败：{stage} / {code}",
+            })
     plan = str(row.get("current_plan_type") or row.get("plan_type") or "").lower()
     if row.get("has_active_plus_subscription") or any(x in plan for x in ("plus", "pro", "team", "go")):
         expire = row.get("expires_at")
@@ -798,7 +818,7 @@ def _compact_job_for_list(row: dict) -> dict:
     }
     for key in (
         "parent_job_id", "retry_attempt", "email", "started_at", "completed_at",
-        "display_status", "retryable", "retry_action", "retry_label",
+        "display_status", "retryable", "retry_action", "retry_label", "retry_reason",
         "manual_otp_required",
         # GC 任务列表操作和窗口状态。
         "gc_mode", "gc_window_state", "gc_check_state", "gc_check_message",
@@ -4427,7 +4447,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/jobs/<int:job_id>/retry")
     def api_job_retry(job_id: int):
-        """重试失败/停止/取消任务；服务端自动判断完整注册或 Codex 补跑。"""
+        """重试失败/停止/取消任务；服务端判断完整注册、安全补设或 Codex 补跑。"""
         data = request.get_json(silent=True) or {}
         try:
             workers = svc._normalize_workers(_positive_worker_count(data.get("workers"), svc.get_executor_workers()))

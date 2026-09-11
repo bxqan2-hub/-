@@ -1405,6 +1405,12 @@ def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -
         def fill(self, value, timeout=0):
             self.page.last_fill = str(value)
 
+        def input_value(self, timeout=0):
+            return self.page.last_fill
+
+        def press(self, value, timeout=0):
+            self.page.last_fill += str(value)
+
         def click(self, timeout=0):
             if self.page.stage == "email":
                 self.page.stage = "password"
@@ -1450,73 +1456,301 @@ def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -
     assert mail_kwargs["exclude_message_ids"] == {"mail-old"}
 
 
-def test_password_setup_retries_transient_email_code_submit(monkeypatch) -> None:
-    """邮箱重认证验证码提交遇到一次 DOM 瞬态失败时重定位同一表单。"""
+@pytest.fixture
+def password_reauth_driver(monkeypatch):
+    """Exercise real DOM helpers with a deterministic Selenium/time fixture."""
+    import core.email_provider
+    from selenium.common.exceptions import StaleElementReferenceException
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(account_export, "time", SimpleNamespace(
+        monotonic=lambda: clock.now,
+        time=lambda: 1_700_000_000 + clock.now,
+        sleep=lambda seconds: setattr(clock, "now", clock.now + seconds),
+    ))
     monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
     monkeypatch.setattr(account_export, "_snapshot_otp_message_ids", lambda *args, **kwargs: set())
-    import core.email_provider
-    monkeypatch.setattr(core.email_provider, "wait_for_otp", lambda *args, **kwargs: "123456")
-    monkeypatch.setattr(account_export.time, "sleep", lambda *args, **kwargs: None)
+    monkeypatch.setattr(account_export, "_wait_for_totp_window", lambda **kwargs: None)
+    monkeypatch.setattr(account_export.pyotp, "TOTP", lambda secret: SimpleNamespace(now=lambda: "654321"))
+
+    class Field:
+        def __init__(self, owner, kind, index=0):
+            self.owner, self.kind, self.index = owner, kind, index
+            self.generation = owner.generation
+
+        def check_live(self):
+            if self.kind == "code" and self.generation != self.owner.generation:
+                raise StaleElementReferenceException("fixture rerender")
+
+        def is_displayed(self):
+            self.check_live()
+            return True
+
+        def is_enabled(self):
+            self.check_live()
+            return self.kind == "password" or (
+                clock.now >= self.owner.disabled_until
+                and not (self.owner.submitted_at is not None and self.owner.disable_after_submit)
+            )
+
+        def get_attribute(self, name):
+            self.check_live()
+            assert name == "value"
+            return self.owner.values[self.index]
+
+        def clear(self):
+            self.check_live()
+            if self.kind == "code":
+                self.owner.values[self.index] = ""
+                self.owner.generation += 1
+
+        def send_keys(self, value):
+            self.check_live()
+            if self.kind == "password":
+                self.owner.password_values.append(value)
+                return
+            assert self.is_enabled()
+            assert len(value) == 1, "OTP must use individual real keystrokes"
+            if self.owner.stale_before_final and len(self.owner.keys) == 5:
+                self.owner.stale_before_final = False
+                self.owner.generation += 1
+                raise StaleElementReferenceException("fixture last key not accepted")
+            self.owner.keys.append(value)
+            self.owner.values[self.index] += value
+            self.owner.generation += 1
+            if self.owner.stale_midway and len(self.owner.keys) == 3:
+                raise StaleElementReferenceException("fixture middle key rerender")
+            if len("".join(self.owner.values)) == 6 and self.owner.auto_submit:
+                self.owner.submit_code()
+                raise StaleElementReferenceException("fixture last key auto-submit")
+
+        def find_element(self, *_args):
+            self.check_live()
+            return SimpleNamespace(find_element=lambda *_: Submit(self.owner, self.kind))
+
+    class Submit:
+        def __init__(self, owner, kind):
+            self.owner, self.kind = owner, kind
+
+        def is_displayed(self):
+            return True
+
+        def is_enabled(self):
+            return True
+
+        def click(self):
+            if self.kind == "code":
+                self.owner.explicit_code_clicks += 1
+                self.owner.submit_code()
+            else:
+                self.owner.password_submitted = True
 
     class Driver:
-        def __init__(self):
-            self.stage = "email"
-            self.url = "https://chatgpt.com/"
+        def __init__(self, *, disabled_after_fetch=0.0, advance_after=0.0, auto_submit=False,
+                     stale_midway=False, reject=False, reject_on_fetch=False,
+                     disable_after_submit=False, split_fields=False, hide_after_fetch=False,
+                     confirm_password=True, challenge="email", second_challenge=None, stale_before_final=False):
+            self.second_challenge, self.stale_before_final = second_challenge, stale_before_final
+            self.disabled_after_fetch, self.advance_after = disabled_after_fetch, advance_after
+            self.auto_submit, self.stale_midway, self.reject = auto_submit, stale_midway, reject
+            self.reject_on_fetch, self.disable_after_submit = reject_on_fetch, disable_after_submit or auto_submit
+            self.hide_after_fetch, self.confirm_password, self.challenge = hide_after_fetch, confirm_password, challenge
+            self.values = [""] * (6 if split_fields else 1)
+            self.keys, self.password_values, self.screenshots = [], [], []
+            self.submitted_codes, self.explicit_code_clicks = [], 0
+            self.generation, self.mail_calls, self.submit_calls = 0, 0, 0
+            self.disabled_until, self.submitted_at, self.password_submitted = 0.0, None, False
+            self.clock = clock
+
+        @property
+        def stage(self):
+            if self.password_submitted:
+                return "done"
+            if self.submitted_at is not None and not self.reject and self.advance_after is not None:
+                if clock.now - self.submitted_at >= self.advance_after:
+                    if self.second_challenge and self.submit_calls == 1:
+                        self.challenge, self.second_challenge = self.second_challenge, None
+                        self.submitted_at = None
+                        self.values = [""] * len(self.values)
+                        self.generation += 1
+                        return self.challenge
+                    return "password"
+            return self.challenge
+
+        @property
+        def current_url(self):
+            path = "email-verification" if self.stage == "email" else self.stage
+            return f"https://auth.openai.com/{path}?token=secret-query&email=user@example.test"
 
         def execute_async_script(self, _script):
-            return {"ok": True, "stage": "signin", "status": 200, "url": "https://auth.openai.com/reauth"}
+            return {"ok": True, "status": 200, "url": self.current_url}
 
         def execute_script(self, script, *_args):
             if "document.body" in script:
+                if self.reject_on_fetch and self.mail_calls or self.reject and self.submitted_at is not None:
+                    return "Invalid verification code"
                 return {
                     "email": "Enter the verification code sent to your email",
+                    "totp": "Enter your authenticator code",
                     "password": "Set a password",
-                    "done": "Password updated",
-                }.get(self.stage, "")
+                    "done": "Password updated" if self.confirm_password else "Working",
+                }[self.stage]
             return False
 
-        def get(self, url):
-            self.url = str(url)
+        def find_elements(self, _by, selector):
+            if "password" in selector:
+                return [Field(self, "password")] if self.stage == "password" else []
+            if self.stage not in {"email", "totp"} or self.hide_after_fetch and self.mail_calls:
+                return []
+            return [Field(self, "code", index) for index in range(len(self.values))]
 
-    driver = Driver()
-    visible_calls = []
+        def get(self, _url):
+            pass
 
-    def visible_inputs(_driver, selector):
-        visible_calls.append(selector)
-        if "password" in selector:
-            return [object()] if driver.stage == "password" else []
-        return [object()] if driver.stage == "email" else []
+        def save_screenshot(self, path):
+            self.screenshots.append(path)
 
-    monkeypatch.setattr(account_export, "_password_visible_inputs", visible_inputs)
-    submit_calls = []
+        def submit_code(self):
+            challenge = self.stage
+            value = "".join(self.values)
+            assert value == {"email": "012345", "totp": "654321"}[challenge]
+            self.submitted_codes.append((challenge, value))
+            self.submit_calls += 1
+            self.submitted_at = clock.now
 
-    def submit_code(_driver, code):
-        submit_calls.append(code)
-        if len(submit_calls) == 2:
-            driver.stage = "password"
-            return True
-        return False
+        def fetch_code(self, *_args, **_kwargs):
+            self.mail_calls += 1
+            self.disabled_until = clock.now + self.disabled_after_fetch
+            return "012345"
 
-    monkeypatch.setattr(account_export, "_password_submit_code", submit_code)
+    def make_driver(**kwargs):
+        driver = Driver(**kwargs)
+        monkeypatch.setattr(core.email_provider, "wait_for_otp", driver.fetch_code)
+        return driver
 
-    def submit_password(_driver, _fields, _password):
-        driver.stage = "done"
-        return True
+    return make_driver
 
-    monkeypatch.setattr(account_export, "_password_submit_new_password", submit_password)
 
+@pytest.mark.parametrize("options", [
+    {"disabled_after_fetch": 3.0},
+    {"auto_submit": True, "advance_after": 3.0},
+    {"advance_after": 10.0},
+    {"stale_midway": True},
+    {"split_fields": True},
+    {"stale_before_final": True},
+])
+def test_password_setup_retries_transient_email_code_submit(password_reauth_driver, options) -> None:
+    driver = password_reauth_driver(**options)
     result = account_export._setup_password_with_driver(
-        driver=driver,
-        session=object(),
-        email="user@example.com",
-        password="Ab3!cdefgh123",
-        timeout_seconds=30,
+        driver=driver, session=object(), email="user@example.test",
+        password="Ab3!cdefgh123", timeout_seconds=60,
     )
-
     assert result["ok"] is True, result
     assert result["email_reauth_used"] is True
-    assert submit_calls == ["123456", "123456"]
-    assert visible_calls
+    assert driver.mail_calls == driver.submit_calls == 1
+    assert "".join(driver.values) == "012345"
+    assert driver.password_values == ["Ab3!cdefgh123"]
+    if not options.get("stale_midway") and not options.get("stale_before_final"):
+        assert driver.keys == list("012345")
+    assert driver.clock.now >= max(options.get("advance_after", 0), options.get("disabled_after_fetch", 0))
+
+
+@pytest.mark.parametrize("challenge", ["email", "totp"])
+def test_password_reauth_rejection_is_detected_with_disabled_input(password_reauth_driver, challenge) -> None:
+    driver = password_reauth_driver(challenge=challenge, reject=True, disable_after_submit=True)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test",
+        password="Ab3!cdefgh123", totp_secret="JBSWY3DPEHPK3PXP", timeout_seconds=60,
+    )
+    assert result["ok"] is False
+    assert result["code"] == f"password_{challenge}_reauth_rejected"
+    assert driver.clock.now < 5
+    assert driver.password_values == []
+    assert "password" not in result
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_password_reauth_waits_boundedly_without_false_success(password_reauth_driver, disabled) -> None:
+    driver = password_reauth_driver(advance_after=None, disable_after_submit=disabled)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test",
+        password="Ab3!cdefgh123", timeout_seconds=120,
+    )
+    assert result["ok"] is False
+    assert result["code"] == "password_email_reauth_not_advanced"
+    assert 45 <= driver.clock.now < 47
+    assert driver.mail_calls == driver.submit_calls == 1
+    assert driver.password_values == []
+    assert "password" not in result
+
+
+@pytest.mark.parametrize("options, expected", [
+    ({"disabled_after_fetch": 100.0}, "password_email_reauth_submit_failed"),
+    ({"hide_after_fetch": True}, "password_email_reauth_submit_failed"),
+    ({"disabled_after_fetch": 3.0, "reject_on_fetch": True}, "password_email_reauth_rejected"),
+])
+def test_password_reauth_missing_inputs_never_confirm_advancement(password_reauth_driver, options, expected, caplog) -> None:
+    driver = password_reauth_driver(**options)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test",
+        password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["ok"] is False
+    assert result["code"] == expected
+    assert driver.submit_calls == 0
+    assert driver.password_values == []
+    assert "password" not in result
+    assert driver.clock.now <= 45
+    for sensitive in ("012345", "secret-query", "user@example.test", "Ab3!cdefgh123"):
+        assert sensitive not in caplog.text
+        assert sensitive not in result["message"]
+
+
+def test_password_reauth_total_deadline_and_success_confirmation(password_reauth_driver) -> None:
+    driver = password_reauth_driver(disabled_after_fetch=20.0, advance_after=20.0)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test",
+        password="Ab3!cdefgh123", timeout_seconds=30,
+    )
+    assert result["ok"] is False
+    assert driver.clock.now < 31
+    assert driver.password_values == []
+    assert "password" not in result
+    assert "secret-query" not in result["message"]
+
+
+def test_password_success_requires_confirmed_final_page(password_reauth_driver) -> None:
+    driver = password_reauth_driver(confirm_password=False)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test",
+        password="Ab3!cdefgh123", timeout_seconds=30,
+    )
+    assert result["ok"] is False
+    assert result["code"] == "password_settings_timeout"
+    assert driver.password_values == ["Ab3!cdefgh123"]
+    assert "password" not in result
+    assert "secret-query" not in result["message"]
+
+
+@pytest.mark.parametrize("first, second", [("email", "totp"), ("totp", "email")])
+@pytest.mark.parametrize("auto_submit, advance_after", [(False, 0), (True, 3), (False, 30), (True, 30)])
+def test_password_reauth_preserves_challenge_switch(password_reauth_driver, first, second, auto_submit, advance_after) -> None:
+    driver = password_reauth_driver(
+        challenge=first, second_challenge=second, auto_submit=auto_submit, advance_after=advance_after,
+    )
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test",
+        password="Ab3!cdefgh123", totp_secret="JBSWY3DPEHPK3PXP", timeout_seconds=120,
+    )
+    assert result["ok"] is True, result
+    assert result["email_reauth_used"] is result["totp_reauth_used"] is True
+    assert driver.mail_calls == 1
+    assert driver.submit_calls == 2
+    assert driver.password_values == ["Ab3!cdefgh123"]
+    codes = {"email": "012345", "totp": "654321"}
+    assert driver.submitted_codes == [(first, codes[first]), (second, codes[second])]
+    assert driver.explicit_code_clicks == (0 if auto_submit else 2)
+    assert driver.clock.now >= advance_after * 2
 
 
 def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypatch) -> None:
