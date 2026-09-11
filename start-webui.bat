@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 rem Prefer the system Node.js installation so npm is available in the runtime self-check.
@@ -22,10 +22,23 @@ if errorlevel 1 (
   goto failed
 )
 for /f %%p in ('.venv\Scripts\python.exe -c "import os; print(int(os.environ['PORT']))"') do set "PORT=%%p"
-netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul
-if not errorlevel 1 (
-  echo [ERR] Port %PORT% is already in use. Existing services were left running.
-  echo Use the running WebUI or start-webui.bat with a different port.
+set "EXISTING_PID="
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%PORT% .*LISTENING"') do if not defined EXISTING_PID set "EXISTING_PID=%%p"
+if defined EXISTING_PID (
+  set "WEBUI_HTTP="
+  for /f "delims=" %%s in ('curl.exe --noproxy "*" -s -o nul -w "%%{http_code}" http://127.0.0.1:%PORT%/ 2^>nul') do set "WEBUI_HTTP=%%s"
+  if "!WEBUI_HTTP!"=="200" if "!EXISTING_PID!"=="" goto failed
+  if "!WEBUI_HTTP!"=="302" (
+    echo WebUI is already running on http://127.0.0.1:%PORT% ^(PID !EXISTING_PID!^).
+    start "" "http://127.0.0.1:%PORT%/"
+    exit /b 0
+  )
+  if "!WEBUI_HTTP!"=="200" (
+    echo WebUI is already running on http://127.0.0.1:%PORT% ^(PID !EXISTING_PID!^).
+    start "" "http://127.0.0.1:%PORT%/"
+    exit /b 0
+  )
+  echo [ERR] Port %PORT% is occupied by PID !EXISTING_PID!, but it is not the WebUI ^(HTTP !WEBUI_HTTP!^).
   goto failed
 )
 ".venv\Scripts\python.exe" tools\check_integrations.py
