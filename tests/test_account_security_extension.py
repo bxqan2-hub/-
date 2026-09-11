@@ -327,6 +327,127 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
         assert len(calls["cookies"]) == (1 if refresh_state == "existing_password" else 2)
 
 
+@pytest.mark.parametrize("failure_source, expected_stage, expected_code, expected_status", [
+    ("session", "totp_session", "totp_session_refresh_failed", 403),
+    ("password_result", "password_reauth", "password_reauth_start_failed", 403),
+    ("password_exception", "password_email", "password_email_code_wait_failed", None),
+    ("password_untyped", "security_setup", "security_setup_failed", None),
+    ("db_read", "security_setup", "security_setup_failed", None),
+    ("empty_email", "security_setup", "security_setup_failed", None),
+])
+def test_security_worker_preserves_failure_fields_without_logging_credentials(
+    monkeypatch, tmp_path, caplog, failure_source, expected_stage, expected_code, expected_status,
+) -> None:
+    from threading import BoundedSemaphore
+
+    from config import roxybrowser as roxy_cfg
+    from core import account_export, registration_password, roxy_codex_oauth, roxy_registration, session as session_module
+
+    token = "PRIVATE-TOKEN-PREFIX-" + "A" * 300
+    secret = "JBSWY3DPEHPK3PXP"
+    password = "Private-pass-1!"
+    private_url = "https://fixture.example/callback?token=" + token
+    detail = f"token={token} secret={secret} password={password} url={private_url} OTP=123456"
+    calls = {"updates": [], "checkpoints": [], "cleanup": 0, "password": 0}
+    email = "worker@example.com"
+    _isolate_storage(monkeypatch, tmp_path / "storage")
+    account_id = db.insert_account(email=email, access_token=token, extra={})
+    assert db.claim_account_security_setup(account_id) is True
+    get_account = db.get_account
+    update_security_setup = db.update_account_security_setup
+
+    def record_update(*args, **kwargs):
+        calls["updates"].append((args, kwargs))
+        return update_security_setup(*args, **kwargs)
+
+    def read_account(value):
+        if failure_source == "db_read":
+            raise RuntimeError(detail)
+        account = get_account(value)
+        if failure_source == "empty_email":
+            account["email"] = ""
+        return account
+
+    driver = SimpleNamespace(
+        set_page_load_timeout=lambda value: None,
+        set_script_timeout=lambda value: None,
+        quit=lambda: None,
+    )
+
+    class Client:
+        profile_proxy = ""
+
+        def open_profile(self, **kwargs):
+            return SimpleNamespace(profile_id="profile-7", created_by_run=True)
+
+        def cleanup_profile(self, opened):
+            calls["cleanup"] += 1
+            raise RuntimeError(detail)
+
+    def fetch_session(*args, **kwargs):
+        if failure_source == "session":
+            raise account_export.TwoFASetupError(expected_stage, expected_code, detail, http_status=expected_status)
+        return {"user": {"email": email}, "accessToken": token}
+
+    def setup_password(**kwargs):
+        calls["password"] += 1
+        if failure_source == "password_result":
+            return {"ok": False, "status": "failed", "stage": expected_stage,
+                    "code": expected_code, "http_status": expected_status, "message": detail}
+        if failure_source == "password_exception":
+            raise account_export.TwoFASetupError(expected_stage, expected_code, detail)
+        raise RuntimeError(detail)
+
+    monkeypatch.setattr(account_security_service, "_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(account_security_service, "_QUEUE_SLOTS", BoundedSemaphore(1))
+    monkeypatch.setattr(db, "get_account", read_account)
+    monkeypatch.setattr(db, "update_account_security_setup", record_update)
+    monkeypatch.setattr(db, "save_security_checkpoint", lambda *args, **kwargs: calls["checkpoints"].append((args, kwargs)))
+    monkeypatch.setattr("core.roxybrowser_client.RoxyBrowserClient", Client)
+    monkeypatch.setattr(roxy_registration, "_build_driver", lambda opened: driver)
+    monkeypatch.setattr(roxy_registration, "_center_browser_window", lambda value: None)
+    monkeypatch.setattr(roxy_registration, "_fetch_chatgpt_session", fetch_session)
+    monkeypatch.setattr(roxy_codex_oauth, "_fill_email_and_otp", lambda *args: None)
+    monkeypatch.setattr(account_export, "import_browser_cookies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", setup_password)
+    monkeypatch.setattr(account_export, "_setup_totp_with_driver", lambda *args, **kwargs: pytest.fail("pre-MFA failure must stop all enrollment writes"))
+    monkeypatch.setattr(account_export, "_validate_2fa_token", lambda *args: pytest.fail("pre-MFA failure must stop token validation"))
+    monkeypatch.setattr(registration_password, "registration_password", lambda: password)
+    monkeypatch.setattr(session_module, "BrowserSession", lambda **kwargs: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(roxy_cfg, "ROXY_CREATE_API_ATTEMPTS", 1)
+    monkeypatch.setattr(account_security_service.time, "sleep", lambda seconds: None)
+
+    assert account_security_service._QUEUE_SLOTS.acquire(blocking=False) is True
+    result = account_security_service._run_security_setup(account_id=account_id, password_mode="add", trigger="manual")
+    assert account_security_service._QUEUE_SLOTS.acquire(blocking=False) is True
+    account_security_service._QUEUE_SLOTS.release()
+
+    assert result["ok"] is False and result["status"] == "failed"
+    assert result["stage"] == expected_stage
+    assert "code" not in result and "http_status" not in result
+    assert result["password_done"] is False and result["totp_done"] is False
+    assert expected_stage in result["error"] and expected_code in result["error"]
+    assert f"http_status={expected_status or '-'}" in result["error"]
+    early_failure = failure_source in {"db_read", "empty_email"}
+    assert calls["password"] == (0 if early_failure or failure_source == "session" else 1)
+    assert calls["cleanup"] == (0 if early_failure else 2 if failure_source == "session" else 1)
+    assert calls["checkpoints"] == []
+    assert calls["updates"][-1][0][1] == result
+    assert all(kwargs.get("registration_password") is None and kwargs.get("totp_secret") is None
+               for _args, kwargs in calls["updates"])
+    stored = get_account(account_id)
+    assert stored["security_setup_stage"] == expected_stage
+    assert stored["security_setup_error"] == result["error"]
+    assert stored["security_setup_password_done"] is False and stored["security_setup_totp_done"] is False
+    assert not json.loads(stored["extra_json"] or "{}").get("registration_password")
+    assert not stored.get("totp_secret")
+    diagnostics = json.dumps(result, ensure_ascii=False) + caplog.text + json.dumps(_compact_account_for_list(stored))
+    if not early_failure:
+        diagnostics += account_security_service.log_path(email).read_text(encoding="utf-8")
+    for sensitive in (token, "PRIVATE-TOKEN-PREFIX", secret, password, private_url, "https://fixture.example", "123456"):
+        assert sensitive not in diagnostics
+
+
 def test_accounts_template_contains_security_extension_button_and_polling() -> None:
     source = (Path(__file__).resolve().parents[1] / "webui" / "templates" / "index.html").read_text(encoding="utf-8")
     assert 'data-account-security-setup="${id}"' in source

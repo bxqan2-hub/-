@@ -97,6 +97,9 @@ def _stored_password(account: dict) -> str:
 
 
 def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) -> dict:
+    from core.account_export import TwoFASetupError
+    from core.twofa_proxy import twofa_failure_payload
+
     operation_generation = account_operation_control.snapshot()
     client = None
     opened = None
@@ -141,7 +144,6 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         )
         from core.roxy_codex_oauth import _fill_email_and_otp
         from core.account_export import (
-            TwoFASetupError,
             _setup_password_with_driver,
             _setup_totp_with_driver,
             _validate_2fa_token,
@@ -189,10 +191,14 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             except Exception as exc:
                 if account_operation_control.is_cancelled(operation_generation):
                     raise account_operation_control.AccountOperationStopped("账号页操作已停止") from exc
+                failure = twofa_failure_payload(exc, default_stage="browser_login")
+                if not isinstance(exc, TwoFASetupError):
+                    failure["code"] = "security_setup_failed"
                 _append_log(
                     email,
                     f"[安全扩展] Roxy 尝试 {browser_attempt}/{browser_attempts} 失败："
-                    f"{type(exc).__name__}: {str(exc)[:240]}",
+                    f"{type(exc).__name__}: stage={failure['stage']} code={failure['code']} "
+                    f"http_status={failure['http_status'] or '-'}",
                 )
                 if driver is not None:
                     try:
@@ -203,8 +209,8 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                 if client is not None and opened is not None:
                     try:
                         client.cleanup_profile(opened)
-                    except Exception:
-                        logger.exception("[安全扩展] Roxy 重试前清理失败 account_id=%s", account_id)
+                    except Exception as cleanup_exc:
+                        logger.error("[安全扩展] Roxy 重试前清理失败 account_id=%s type=%s", account_id, type(cleanup_exc).__name__)
                     opened = None
                 if browser_attempt >= browser_attempts:
                     raise
@@ -253,7 +259,12 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                 console_compat=True,
             )
             if not bool(password_result.get("ok")):
-                raise RuntimeError(str(password_result.get("message") or "补设密码未确认成功"))
+                raise TwoFASetupError(
+                    str(password_result.get("stage") or "password_setup"),
+                    str(password_result.get("code") or "password_setup_failed"),
+                    "补设密码未确认成功",
+                    http_status=password_result.get("http_status"),
+                )
             confirmed_password = desired_password
             account_operation_control.raise_if_cancelled(operation_generation)
             password_done = True
@@ -359,7 +370,7 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             "status": "stopped",
             "stage": "stopped",
             "message": "密码/2FA 设置已停止",
-            "error": str(exc) or "账号页操作已停止",
+            "error": "账号页操作已停止",
             "profile_id": getattr(opened, "profile_id", None),
             "password_done": password_done,
             "totp_done": totp_done,
@@ -373,8 +384,8 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                 totp_secret=confirmed_secret or None,
                 access_token=access_token or None,
             )
-        except Exception:
-            logger.exception("[安全扩展] 写入停止状态异常 account_id=%s", account_id)
+        except Exception as persistence_exc:
+            logger.error("[安全扩展] 写入停止状态异常 account_id=%s type=%s", account_id, type(persistence_exc).__name__)
         if email:
             _append_log(email, "[安全扩展] 已停止")
         return result
@@ -402,17 +413,21 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                     totp_secret=confirmed_secret or None,
                     access_token=access_token or None,
                 )
-            except Exception:
-                logger.exception("[安全扩展] 写入竞态停止状态异常 account_id=%s", account_id)
+            except Exception as persistence_exc:
+                logger.error("[安全扩展] 写入竞态停止状态异常 account_id=%s type=%s", account_id, type(persistence_exc).__name__)
             if email:
                 _append_log(email, "[安全扩展] 已停止")
             return result
+        failure = twofa_failure_payload(exc, default_stage="security_setup")
+        if not isinstance(exc, TwoFASetupError):
+            failure["code"] = "security_setup_failed"
         result = {
             "ok": False,
             "status": "partial" if password_done or totp_done else "failed",
-            "stage": "failed",
+            "stage": failure["stage"],
             "message": "密码/2FA 设置未全部完成",
-            "error": f"{type(exc).__name__}: {str(exc)[:400]}",
+            "error": f"{type(exc).__name__}: stage={failure['stage']} code={failure['code']} "
+                     f"http_status={failure['http_status'] or '-'}",
             "profile_id": getattr(opened, "profile_id", None),
             "password_done": password_done,
             "totp_done": totp_done,
@@ -426,11 +441,11 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                 totp_secret=confirmed_secret or None,
                 access_token=access_token or None,
             )
-        except Exception:
-            logger.exception("[安全扩展] 写入失败状态异常 account_id=%s", account_id)
+        except Exception as persistence_exc:
+            logger.error("[安全扩展] 写入失败状态异常 account_id=%s type=%s", account_id, type(persistence_exc).__name__)
         if email:
             _append_log(email, f"[安全扩展] 失败：{result['error']}")
-        logger.exception("[安全扩展] 任务失败 account_id=%s", account_id)
+        logger.error("[安全扩展] 任务失败 account_id=%s %s", account_id, result["error"])
         return result
     finally:
         _clear_active_context(account_id)
@@ -447,8 +462,8 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
         if client is not None and opened is not None:
             try:
                 client.cleanup_profile(opened)
-            except Exception:
-                logger.exception("[安全扩展] 清理 Roxy 环境失败")
+            except Exception as cleanup_exc:
+                logger.error("[安全扩展] 清理 Roxy 环境失败 type=%s", type(cleanup_exc).__name__)
         _QUEUE_SLOTS.release()
 
 

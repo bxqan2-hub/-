@@ -585,6 +585,45 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "without an acceptance signal"):
             roxy_registration._require_confirmed_otp_submit("pending", 20)
 
+    def test_auth_route_error_stops_otp_wait_and_replay_without_exposing_page(self):
+        driver = MagicMock()
+        driver.current_url = "https://auth.openai.com/email-verification"
+        state = {
+            "url": driver.current_url + "?token=PRIVATE_QUERY",
+            "title": "Oops, an error occurred! - OpenAI",
+            "text": 'Route Error (500 Internal Server Error): {"isTrusted": true}\n'
+                    "Try again PRIVATE_SECRET mail@example.test 123456",
+            "inputs": [], "buttons": [{"text": "Try again"}], "errors": [],
+        }
+        with self.assertRaisesRegex(RuntimeError, "stage=otp_page.*page_status=500"):
+            roxy_registration._email_otp_terminal_error(state)
+        for operation in ("observe", "input", "replay", "resend"):
+            with self.subTest(operation=operation), \
+                 patch.object(roxy_registration, "_email_otp_page_state", return_value=state), \
+                 patch.object(roxy_registration, "_type_otp") as type_otp, \
+                 patch.object(roxy_registration, "_click_resend_email_otp") as resend, \
+                 patch.object(roxy_registration, "_otp_flow_advanced_state", return_value=None), \
+                 patch.object(roxy_registration.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "stage=otp_page.*page_status=500") as caught:
+                    if operation == "observe":
+                        roxy_registration._wait_after_email_otp_submit(driver, timeout=0)
+                    elif operation == "input":
+                        roxy_registration._wait_for_otp_input(driver, timeout=1)
+                    elif operation == "replay":
+                        roxy_registration._reload_and_resubmit_otp_once(driver, "123456")
+                    else:
+                        roxy_registration._prepare_next_email_otp_attempt(driver, "mail@example.test")
+                for private in ("PRIVATE_QUERY", "PRIVATE_SECRET", "mail@example.test", "123456"):
+                    self.assertNotIn(private, str(caught.exception))
+                type_otp.assert_not_called()
+                resend.assert_not_called()
+                driver.refresh.assert_not_called()
+
+    def test_auth_route_error_detection_does_not_reject_generic_page_hints(self):
+        for text in ("Try again", "Your code is invalid", "Please try again in 500 seconds"):
+            with self.subTest(text=text):
+                self.assertIsNone(roxy_registration._email_otp_terminal_error({"text": text}))
+
     def test_pending_otp_refreshes_refills_and_resubmits_same_code_once(self):
         driver = MagicMock()
         driver.current_url = "https://auth.openai.com/email-verification"

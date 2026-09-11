@@ -1424,7 +1424,8 @@ def fetch_latest_otp(
             last_error = str(exc)
             consecutive_transport_errors += 1
             logger.warning("[GenericAPI] 取件请求失败（第 %s 次）：%s", consecutive_transport_errors, last_error)
-            if not best_otp and consecutive_transport_errors >= max_transport_errors:
+            # 末次请求耗尽总预算时，保留 OTP 等待超时及最后阶段，不误报提前连续不可达。
+            if not best_otp and consecutive_transport_errors >= max_transport_errors and time.time() < deadline:
                 raise GenericApiTransportError(
                     "取码接口连续访问失败，已快速结束本轮 OTP 等待: "
                     f"{email}; attempts={consecutive_transport_errors}; {last_error}"
@@ -1432,7 +1433,7 @@ def fetch_latest_otp(
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
             last_error = f"stage=mail_fetch type={type(exc).__name__}"
             consecutive_transport_errors += 1
-            if not best_otp and consecutive_transport_errors >= max_transport_errors:
+            if not best_otp and consecutive_transport_errors >= max_transport_errors and time.time() < deadline:
                 raise GenericApiTransportError(
                     "取码接口连续网络失败，已快速结束本轮 OTP 等待: "
                     f"{email}; attempts={consecutive_transport_errors}; {last_error}"

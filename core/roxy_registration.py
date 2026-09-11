@@ -1658,7 +1658,7 @@ def _is_email_verification_page(driver) -> bool:
 
 
 def _email_otp_terminal_error(state: dict | None) -> str | None:
-    """识别验证码提交后的不可恢复账号错误，避免把它当成验证码错误重试。"""
+    """区分账号终态与认证页服务错误，避免误报错码或继续重放验证码。"""
     state = state or {}
     page_text = " ".join(
         str(value or "")
@@ -1671,6 +1671,14 @@ def _email_otp_terminal_error(state: dict | None) -> str | None:
     normalized = re.sub(r"[\s-]+", "_", page_text)
     if "account_deactivated" in normalized:
         return "account_deactivated"
+    route_error = re.search(r"\broute error\s*\(\s*([45]\d{2})\b", page_text)
+    if route_error:
+        # This is the rendered page status, not a captured OTP POST response.
+        # Its write outcome is unknown; preserve the stop without resending.
+        raise RuntimeError(
+            "OTP page stage=otp_page code=auth_route_error "
+            f"page_status={route_error.group(1)}; OTP acceptance was not confirmed"
+        )
     return None
 
 
@@ -3781,11 +3789,11 @@ def run_roxy_registration(
                     if advanced_state in ("profile", "logged_in", "email_verified"):
                         logger.info("[Roxy注册][OTP] 取码期间页面已进入下一步：%s，停止继续取旧验证码", advanced_state)
                         if advanced_state == "email_verified":
+                            otp_after_ts = time.time()
                             callback_state = _resume_chatgpt_login_callback(driver, email=email)
                             if callback_state == "otp":
                                 if otp_attempt >= max_otp_attempts:
                                     raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
-                                otp_after_ts = time.time()
                                 if current_otp:
                                     rejected_otps.add(str(current_otp))
                                 current_otp = None
@@ -3832,11 +3840,11 @@ def run_roxy_registration(
                     )
                     if retry_state in ("profile", "logged_in", "email_verified"):
                         if retry_state == "email_verified":
+                            otp_after_ts = time.time()
                             callback_state = _resume_chatgpt_login_callback(driver, email=email)
                             if callback_state == "otp":
                                 if otp_attempt >= max_otp_attempts:
                                     raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
-                                otp_after_ts = time.time()
                                 if current_otp:
                                     rejected_otps.add(str(current_otp))
                                 current_otp = None
@@ -3852,11 +3860,11 @@ def run_roxy_registration(
                 break
             if otp_ready == "email_verified":
                 logger.info("[Roxy][OTP] Email verified page appeared before OTP input; resuming ChatGPT callback")
+                otp_after_ts = time.time()
                 callback_state = _resume_chatgpt_login_callback(driver, email=email)
                 if callback_state == "otp":
                     if otp_attempt >= max_otp_attempts:
                         raise RuntimeError("Email verified callback still requires OTP after maximum retries")
-                    otp_after_ts = time.time()
                     if current_otp:
                         rejected_otps.add(str(current_otp))
                     current_otp = None
@@ -3923,11 +3931,12 @@ def run_roxy_registration(
                 break
             if outcome == 'email_verified':
                 logger.info("[Roxy注册][OTP] 邮箱已验证，重新进入 ChatGPT 登录入口完成回调")
+                # The callback can issue and deliver mail before its page is ready.
+                otp_after_ts = time.time()
                 callback_state = _resume_chatgpt_login_callback(driver, email=email)
                 if callback_state == "otp":
                     if otp_attempt >= max_otp_attempts:
                         raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
-                    otp_after_ts = time.time()
                     if current_otp:
                         rejected_otps.add(str(current_otp))
                     current_otp = None
@@ -3953,11 +3962,11 @@ def run_roxy_registration(
             )
             if retry_state in ("profile", "logged_in", "email_verified"):
                 if retry_state == "email_verified":
+                    otp_after_ts = time.time()
                     callback_state = _resume_chatgpt_login_callback(driver, email=email)
                     if callback_state == "otp":
                         if otp_attempt >= max_otp_attempts:
                             raise RuntimeError("邮箱验证后 callback 仍要求 OTP，已达到最大重试次数")
-                        otp_after_ts = time.time()
                         if current_otp:
                             rejected_otps.add(str(current_otp))
                         current_otp = None

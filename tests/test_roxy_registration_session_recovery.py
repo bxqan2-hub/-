@@ -9,6 +9,118 @@ from core.roxybrowser_client import RoxyOpenResult
 
 
 class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
+    def test_registration_callback_keeps_mail_received_during_navigation(self):
+        for branch in (
+            "wait_verified", "wait_prepare_verified", "input_verified",
+            "submit_verified", "rejected_prepare_verified",
+        ):
+            with self.subTest(branch=branch), ExitStack() as stack:
+                client = MagicMock()
+                client.profile_proxy = "http://proxy.example:8080"
+                client.open_profile.return_value = RoxyOpenResult(
+                    "profile-fixture", {}, preflight_exit_geo={"ip": "198.51.100.7"},
+                )
+                client.reconcile_registration_exit_ip.return_value = True
+                driver = MagicMock()
+                clock = [1000.0]
+                sent_at = []
+                mail_reads = []
+
+                def resume_callback(actual_driver, *, email):
+                    self.assertIs(actual_driver, driver)
+                    self.assertEqual(email, "mail@example.test")
+                    sent_at.append(clock[0])
+                    clock[0] += 10.0
+                    return "otp"
+
+                def read_mail(email, **kwargs):
+                    self.assertEqual(email, "mail@example.test")
+                    mail_reads.append((kwargs["after_ts"], set(kwargs["exclude_codes"])))
+                    if len(mail_reads) == 1:
+                        if branch in ("wait_verified", "wait_prepare_verified"):
+                            raise RuntimeError("fixture initial OTP wait interrupted")
+                        return "111111"
+                    return "222222"
+
+                mocked = {
+                    "RoxyBrowserClient": client,
+                    "_build_driver": driver,
+                    "_center_browser_window": None,
+                    "probe_selenium_driver_exit_geo": {"ip": "198.51.100.7"},
+                    "_start_traffic_optimizer": None,
+                    "_safe_get": None,
+                    "human_delay": None,
+                    "_page_warmup": None,
+                    "_maybe_accept": None,
+                    "_check_manual_stop": None,
+                    "_submit_email_and_wait_next": "otp",
+                    "registration_password_required": False,
+                    "_fill_password_page_if_present": "confirmed-password",
+                    "_snapshot_current_email_otp": "000000",
+                    "_otp_flow_advanced_state": "email_verified" if branch == "wait_verified" else None,
+                    "_prepare_next_email_otp_attempt": "email_verified",
+                    "_clear_otp_inputs": None,
+                    "_is_email_verification_page": False,
+                    "_complete_profile_page": True,
+                    "_fetch_or_recover_chatgpt_session": {
+                        "accessToken": "registration-at", "user": {"email": "mail@example.test"},
+                    },
+                    "_finish_traffic_optimizer": {},
+                    "resolve_email_source": "generic_api",
+                    "_release_roxy_registration_email_failure": "fixture_failed",
+                    "save_account_data": 706,
+                }
+                mocked_calls = {}
+                for name, result in mocked.items():
+                    mocked_calls[name] = stack.enter_context(patch.object(roxy_registration, name, return_value=result))
+                stack.enter_context(patch.object(roxy_registration._cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
+                stack.enter_context(patch.object(roxy_registration._twofa_cfg, "ENABLE_2FA", False))
+                stack.enter_context(patch("config.codex.ENABLE_CODEX_AUTO", False))
+                stack.enter_context(patch.object(roxy_registration.time, "time", side_effect=lambda: clock[0]))
+                stack.enter_context(patch.object(roxy_registration, "logger"))
+                resume = stack.enter_context(patch.object(
+                    roxy_registration, "_resume_chatgpt_login_callback", side_effect=resume_callback,
+                ))
+                stack.enter_context(patch.object(roxy_registration, "wait_for_otp", side_effect=read_mail))
+                stack.enter_context(patch.object(
+                    roxy_registration, "_wait_for_otp_input",
+                    side_effect=["email_verified", None] if branch == "input_verified" else None,
+                    return_value=None,
+                ))
+                outcomes = {
+                    "submit_verified": ["email_verified", "accepted"],
+                    "rejected_prepare_verified": ["invalid", "accepted"],
+                }
+                stack.enter_context(patch.object(
+                    roxy_registration, "_wait_after_email_otp_submit",
+                    side_effect=outcomes.get(branch), return_value="accepted",
+                ))
+                type_otp = stack.enter_context(patch.object(roxy_registration, "_type_otp"))
+
+                result = roxy_registration.run_roxy_registration(
+                    "mail@example.test", "Test User", "1990-01-01",
+                )
+
+                self.assertTrue(result["success"], result.get("error"))
+                resume.assert_called_once_with(driver, email="mail@example.test")
+                self.assertEqual(len(mail_reads), 2)
+                self.assertEqual(mail_reads[0][1], {"000000"})
+                expected_exclusions = {"000000"}
+                if branch not in ("wait_verified", "wait_prepare_verified"):
+                    expected_exclusions.add("111111")
+                self.assertEqual(mail_reads[1][1], expected_exclusions)
+                expected_inputs = [(driver, "222222")]
+                if branch in ("submit_verified", "rejected_prepare_verified"):
+                    expected_inputs.insert(0, (driver, "111111"))
+                self.assertEqual([item.args for item in type_otp.call_args_list], expected_inputs)
+                self.assertEqual(
+                    mocked_calls["_prepare_next_email_otp_attempt"].call_count,
+                    int(branch in ("wait_prepare_verified", "rejected_prepare_verified")),
+                )
+                mocked_calls["RoxyBrowserClient"].assert_called_once()
+                mocked_calls["_build_driver"].assert_called_once()
+                self.assertLessEqual(mail_reads[1][0], sent_at[0])
+
     def test_registration_saves_refreshed_session_even_when_mfa_returns_failure_or_raises(self):
         for outcome in ("failure_return", "exception", "success", "absent"):
             with self.subTest(outcome=outcome), ExitStack() as stack:
