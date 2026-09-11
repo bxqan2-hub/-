@@ -315,3 +315,11 @@
 - 本次 US 五个新邮箱的密码与 MFA 远端均成功；四次邮箱重认证都 `resend=0 post_count=1 http=200`，另一个走注册密码页。两次最终本地 JSON replace 失败已从确认 checkpoint 恢复，不将首轮 3/5 完整任务改写为 5/5。
 - 现场追加修复 `core/db.py::_write_json` 的 Windows 暂态原子替换，真实 Win32 占用回归通过；补充统一 pytest DB 路径隔离，防止旧 WebUI 启动恢复测试修改运行数据。五个最终账号密码/2FA 均具备，套餐 HTTP 200；隔离全量 `953 passed, 1 deselected, 1 warning, 61 subtests passed`。
 - 证据、Finding→Path、安全复核、局限及八项自检见 `docs/2026-09-11_US英文重认证批量失败修复-report.md`。
+
+## 本次出口探测回归与注册指纹核对（2026-09-11）
+
+- 修改前重读并对照锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的注册和 MFA 文件，版本不变；上游没有本地出口探测 helper，不覆盖上游实现。
+- 现场同一代理重现 4 秒超时、8 秒约 4.1–4.4 秒成功；删除本地 Selenium 固定 2 秒并行路径和只访问末端接口的回退，在原 helper 中使用同窗、按配置顺序的有界导航。保留真实出口占用/冷却与漂移即停止，不以预检代替窗口实测。
+- 密码终态 checkpoint、精确邮箱匹配、同窗 Cookie/代理、显式 Token 与 enroll/activate 成功确认均复核，未修改密码/MFA 状态机。
+- 3 个独立 Profile 的出口预检/实测一致并完成清理；定向 62 项通过，全量 `959 passed, 1 deselected, 1 warning, 61 subtests passed`。8 秒配置已热加载；自动重启被执行环境拦截，新源码仍待服务重启生效。
+- 试用比较只看注册时指纹/IP；当前仅有 12 个有资格旧账号，没有无资格对照和完整历史指纹，未实现指纹复用。证据、其他邮箱实查、交付限制与八项自检见 `docs/2026-09-11_出口探测回归与注册指纹核对-report.md`。

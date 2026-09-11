@@ -660,7 +660,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "IP_GEO_TIMEOUT", "file": "browser.py", "type": "float", "group": "浏览器画像",
-        "label": "IP定位超时(秒)", "help": "出口 IP 地理信息接口的单次请求超时；接口失败会自动回退，不影响注册",
+        "label": "IP定位超时(秒)", "help": "每个出口接口的请求超时，建议 8 秒；Roxy 按接口顺序探测，全部失败或出口冲突/漂移时终止该账号",
     },
 
     # ---- 代理池 ----

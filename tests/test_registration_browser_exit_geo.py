@@ -65,7 +65,6 @@ class _SeleniumDriver:
         self.closed_handles = []
         self.page_load_timeouts = []
         self.script_timeouts = []
-        self.async_calls = []
 
     def set_page_load_timeout(self, value):
         self.page_load_timeouts.append(value)
@@ -77,13 +76,6 @@ class _SeleniumDriver:
         self.urls.append(url)
 
     def execute_script(self, _script):
-        if isinstance(self.payload, list):
-            return self.payload.pop(0)
-        return self.payload
-
-    def execute_async_script(self, _script, endpoints, timeout_ms):
-        self.async_calls.append((list(endpoints), timeout_ms))
-        self.urls.extend(endpoints)
         if isinstance(self.payload, list):
             return self.payload.pop(0)
         return self.payload
@@ -113,6 +105,8 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
             },
         )
         self.assertEqual(normalize_browser_exit_geo({"ip": "proxy.example.test"}), {})
+        self.assertEqual(normalize_browser_exit_geo({"ip": "203.0.113.7", "success": False}), {})
+        self.assertEqual(normalize_browser_exit_geo({"ip": "203.0.113.7", "status": "fail"}), {})
 
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))
     @patch("curl_cffi.requests.Session")
@@ -131,6 +125,8 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
             {"http": "socks5h://proxy.example:1080", "https": "socks5h://proxy.example:1080"},
         )
         session_cls.return_value.get.assert_called_once()
+        session_cls.assert_called_once_with(impersonate="chrome", trust_env=False)
+        self.assertFalse(session_cls.return_value.get.call_args.kwargs["allow_redirects"])
 
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))
     def test_playwright_probe_uses_temporary_page_in_same_context(self, _settings):
@@ -169,20 +165,18 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
         "core.browser_exit_geo._probe_settings",
         return_value=(["https://geo-a.example/json", "https://geo-b.example/json"], 4.0),
     )
-    def test_selenium_probe_queries_all_endpoints_in_one_parallel_call(self, _settings):
+    def test_selenium_probe_stops_after_first_valid_configured_endpoint(self, _settings):
         driver = _SeleniumDriver({"ip": "198.51.100.30", "country": "GB"})
 
         geo = probe_selenium_driver_exit_geo(driver, label="Roxy registration")
 
         self.assertEqual(geo["ip"], "198.51.100.30")
-        self.assertEqual(driver.async_calls, [(
-            ["https://geo-a.example/json", "https://geo-b.example/json"],
-            2000,
-        )])
+        self.assertEqual(driver.urls, ["https://geo-a.example/json"])
+        self.assertEqual(driver.page_load_timeouts, [4])
 
     @patch("core.browser_exit_geo.time.sleep")
-    @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))
-    def test_selenium_probe_uses_one_direct_fallback_when_parallel_fetch_is_empty(self, _settings, sleep):
+    @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo-a.example/json", "https://geo-b.example/json"], 3.0))
+    def test_selenium_probe_tries_next_endpoint_when_first_response_is_invalid(self, _settings, sleep):
         driver = _SeleniumDriver([None, {"ip": "198.51.100.31", "country": "JP"}])
         geo = probe_selenium_driver_exit_geo(
             driver,
@@ -191,9 +185,54 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
             retry_delay=2,
         )
         self.assertEqual(geo["ip"], "198.51.100.31")
-        self.assertEqual(driver.urls, ["https://geo.example/json", "https://geo.example/json"])
-        self.assertEqual(len(driver.async_calls), 1)
+        self.assertEqual(driver.urls, ["https://geo-a.example/json", "https://geo-b.example/json"])
         sleep.assert_not_called()
+
+    @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo-a.example/json", "https://geo-b.example/json"], 8.0))
+    def test_selenium_timeout_still_tries_next_endpoint_with_full_configured_budget(self, _settings):
+        from selenium.common.exceptions import TimeoutException
+
+        driver = _SeleniumDriver({"ip": "203.0.113.45", "country": "JP"})
+        driver.get = MagicMock(side_effect=[TimeoutException("private-proxy-password"), None])
+        with self.assertLogs("core.browser_exit_geo", level="INFO") as logs:
+            result = probe_selenium_driver_exit_geo(driver, label="Roxy", restore_page_load_timeout=90, restore_script_timeout=20)
+        self.assertEqual(result["ip"], "203.0.113.45")
+        self.assertEqual([c.args[0] for c in driver.get.call_args_list], ["https://geo-a.example/json", "https://geo-b.example/json"])
+        self.assertEqual(driver.page_load_timeouts, [8, 90])
+        self.assertEqual(driver.script_timeouts, [20])
+        self.assertNotIn("private-proxy-password", str(logs.output))
+        self.assertIn("error_type=TimeoutException", str(logs.output))
+
+    @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 8.0))
+    def test_selenium_probe_cancellation_restores_tab_and_propagates(self, _settings):
+        driver = _SeleniumDriver(None)
+        with self.assertRaisesRegex(RuntimeError, "stopped"):
+            probe_selenium_driver_exit_geo(driver, label="Roxy", stop_check=MagicMock(side_effect=RuntimeError("stopped")))
+        self.assertEqual(driver.closed_handles, ["probe"])
+        self.assertEqual(driver.current_window_handle, "registration")
+        self.assertEqual(driver.urls, [])
+
+    @patch("core.browser_exit_geo.time.sleep")
+    @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 8.0))
+    def test_selenium_probe_empty_result_stays_bounded_and_does_not_use_preflight(self, _settings, sleep):
+        driver = _SeleniumDriver(None)
+        self.assertEqual(probe_selenium_driver_exit_geo(driver, label="Roxy", attempts=0), {})
+        self.assertEqual(driver.urls, ["https://geo.example/json"])
+        sleep.assert_not_called()
+
+    @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo-a.example/json?token=secret", "https://geo-b.example/json"], 8.0))
+    @patch("curl_cffi.requests.Session")
+    def test_preflight_logs_http_failure_without_private_query_or_response_body(self, session_cls, _settings):
+        invalid = MagicMock(status_code=429)
+        valid = MagicMock(status_code=200)
+        valid.json.return_value = {"ip": "203.0.113.46"}
+        session_cls.return_value.get.side_effect = [invalid, valid]
+        with self.assertLogs("core.browser_exit_geo", level="INFO") as logs:
+            result = probe_proxy_exit_geo("socks5h://private-user:private-password@proxy.example:1080", label="Roxy")
+        self.assertEqual(result["ip"], "203.0.113.46")
+        self.assertIn("http_status=429", str(logs.output))
+        for value in ("token=secret", "private-user", "private-password"):
+            self.assertNotIn(value, str(logs.output))
 
     @patch("core.browser_exit_geo.time.sleep")
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 3.0))

@@ -707,7 +707,7 @@ class RoxyBrowserClient:
                     break
                 self.profile_proxy = replacement
                 self.profile_proxy_source = "pool"
-                logger.warning("[Roxy] 当前粘性代理未读到出口 IP，立即随机更换下一条")
+                logger.warning("[Roxy] 当前候选未通过出口预检或独立性核对，随机更换下一条")
             if not preflight_exit_geo.get("ip"):
                 self._release_exit_ip_reservation()
                 if duplicate_exit_ips:
@@ -717,7 +717,7 @@ class RoxyBrowserClient:
                     )
                 raise RuntimeError(
                     f"Roxy 代理出口快速检测失败（已检测 {len(failed_proxies)} 条），"
-                    "环境未创建、窗口未打开；请检查代理格式或节点连通性"
+                    "环境未创建、窗口未打开；请按 proxy_preflight 日志区分超时、代理传输、HTTP 和无效出口响应"
                 )
             logger.info(
                 "[Roxy] 代理预检完成，允许创建环境：exit_ip=%s country=%s",

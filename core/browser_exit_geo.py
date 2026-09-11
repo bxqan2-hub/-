@@ -6,13 +6,14 @@ import ipaddress
 import logging
 import math
 import time
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 
 def normalize_browser_exit_geo(data: dict | None) -> dict:
     """Normalize the JSON shapes returned by the configured IP geo services."""
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("success") is False or data.get("status") == "fail":
         return {}
     ip_value = str(data.get("ip") or data.get("query") or "").strip()
     try:
@@ -95,7 +96,7 @@ def probe_proxy_exit_geo(
         attempt += 1
         if callable(stop_check):
             stop_check()
-        session = Session(impersonate="chrome")
+        session = Session(impersonate="chrome", trust_env=False)
         session.proxies = {"http": proxy_url, "https": proxy_url}
         try:
             for endpoint in endpoints:
@@ -106,17 +107,20 @@ def probe_proxy_exit_geo(
                         endpoint,
                         headers={"Accept": "application/json"},
                         timeout=timeout,
+                        allow_redirects=False,
                     )
                     if int(response.status_code) != 200:
+                        logger.warning("[%s] stage=proxy_preflight endpoint=%s http_status=%s attempt=%s/%s", label, urlparse(endpoint).hostname, response.status_code, attempt, max_attempts)
                         continue
                     geo = normalize_browser_exit_geo(response.json())
                     if geo.get("ip"):
                         _log_detected(label, geo)
                         return geo
+                    logger.warning("[%s] stage=proxy_preflight endpoint=%s http_status=200 error_type=invalid_geo attempt=%s/%s", label, urlparse(endpoint).hostname, attempt, max_attempts)
                 except Exception as exc:
-                    logger.debug(
-                        "[%s] 窗口打开前出口 IP 探测失败 endpoint=%s attempt=%s/%s: %s: %s",
-                        label, endpoint, attempt, max_attempts, type(exc).__name__, exc,
+                    logger.warning(
+                        "[%s] stage=proxy_preflight endpoint=%s attempt=%s/%s error_type=%s curl_code=%s timeout=%s",
+                        label, urlparse(endpoint).hostname, attempt, max_attempts, type(exc).__name__, getattr(exc, "code", None), timeout,
                     )
         finally:
             try:
@@ -207,9 +211,6 @@ def probe_selenium_driver_exit_geo(
         probe_opened = True
         timeout_seconds = max(1, int(math.ceil(timeout)))
         driver.set_page_load_timeout(timeout_seconds)
-        # Selenium 的 async callback 还需要极短的收尾空间；所有 IP 服务在浏览器
-        # 内并行请求，因此一次尝试只消耗一个 timeout，而不是 endpoints * timeout。
-        driver.set_script_timeout(timeout_seconds + 1)
         configured_attempts = int(attempts if attempts is not None else 1)
         max_attempts = max(1, min(10, configured_attempts or 1))
         delay = max(0.0, float(retry_delay or 0.0))
@@ -218,88 +219,41 @@ def probe_selenium_driver_exit_geo(
             attempt += 1
             if callable(stop_check):
                 stop_check()
-            if callable(stop_check):
-                stop_check()
-            try:
-                # Give the CORS-based parallel fast path at most two seconds.
-                # A direct navigation fallback below then gets the normal page
-                # timeout, keeping the full recovery bounded to about six seconds.
-                parallel_timeout_ms = max(250, min(2000, int(math.ceil(timeout * 1000))))
-                data = driver.execute_async_script(
-                    """
-                    const endpoints = Array.isArray(arguments[0]) ? arguments[0] : [];
-                    const timeoutMs = Math.max(250, Number(arguments[1]) || 1000);
-                    const done = arguments[arguments.length - 1];
-                    const request = async url => {
-                      const controller = new AbortController();
-                      const timer = setTimeout(() => controller.abort(), timeoutMs);
-                      try {
-                        const response = await fetch(url, {
-                          method: 'GET',
-                          headers: {Accept: 'application/json'},
-                          cache: 'no-store',
-                          credentials: 'omit',
-                          signal: controller.signal,
-                        });
-                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                        const payload = await response.json();
-                        const ip = String(payload?.ip || payload?.query || '').trim();
-                        if (!ip) throw new Error('missing_ip');
-                        return payload;
-                      } finally {
-                        clearTimeout(timer);
-                      }
-                    };
-                    Promise.any(endpoints.map(request))
-                      .then(payload => done(payload))
-                      .catch(() => done(null));
-                    """,
-                    endpoints,
-                    parallel_timeout_ms,
-                )
-                geo = normalize_browser_exit_geo(data)
-                if geo.get("ip"):
-                    _log_detected(label, geo)
-                    return geo
-                # about:blank fetch occasionally returns null inside Roxy even
-                # though the same proxy passed preflight. Navigate one endpoint
-                # directly to remove CORS/fetch-context ambiguity; do not walk
-                # every endpoint sequentially.
-                if endpoints:
-                    if callable(stop_check):
-                        stop_check()
-                    fallback_endpoint = endpoints[-1]
-                    logger.info("[%s] 并行出口检测无结果，改用一次同窗口直达复核", label)
-                    driver.get(fallback_endpoint)
-                    fallback_data = driver.execute_script(
+            # Match preflight endpoint order in the same Profile. Direct
+            # navigation avoids CORS and the old hard-coded two-second abort.
+            # Each endpoint uses the existing configured timeout; no direct-IP
+            # or preflight-result substitution is permitted.
+            for endpoint in endpoints:
+                if callable(stop_check):
+                    stop_check()
+                try:
+                    driver.get(endpoint)
+                    data = driver.execute_script(
                         """
                         const text = document.body?.innerText || document.documentElement?.innerText || '';
                         try { return JSON.parse(text); } catch (_) { return null; }
                         """
                     )
-                    geo = normalize_browser_exit_geo(fallback_data)
+                    geo = normalize_browser_exit_geo(data)
                     if geo.get("ip"):
                         _log_detected(label, geo)
                         return geo
-            except Exception as exc:
-                logger.debug(
-                    "[%s] 浏览器出口 IP 并行探测失败 attempt=%s/%s: %s: %s",
-                    label, attempt, max_attempts, type(exc).__name__, exc,
-                )
+                    logger.warning("[%s] stage=browser_exit_probe endpoint=%s attempt=%s/%s error_type=invalid_geo", label, urlparse(endpoint).hostname, attempt, max_attempts)
+                except Exception as exc:
+                    logger.warning("[%s] stage=browser_exit_probe endpoint=%s attempt=%s/%s error_type=%s timeout=%s", label, urlparse(endpoint).hostname, attempt, max_attempts, type(exc).__name__, timeout_seconds)
             if attempt >= max_attempts:
                 break
             if delay:
                 time.sleep(min(5.0, delay * attempt))
-        logger.warning("[%s] 未能从当前注册浏览器上下文识别出口 IP，账号将留空", label)
+        logger.warning("[%s] stage=browser_exit_probe 所有接口均未返回有效出口，交由调用方终止注册", label)
         return {}
     except Exception as exc:
         if callable(stop_check):
             stop_check()
         logger.warning(
-            "[%s] 无法创建浏览器出口探测临时标签: %s: %s",
+            "[%s] stage=browser_exit_probe 临时标签检查失败 error_type=%s",
             label,
             type(exc).__name__,
-            exc,
         )
         return {}
     finally:
