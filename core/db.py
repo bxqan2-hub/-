@@ -97,9 +97,22 @@ def _write_json(path: Path, data: Any) -> None:
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        tmp.replace(path)
+        for attempt in range(6):
+            try:
+                tmp.replace(path)
+                break
+            except PermissionError as exc:
+                # Windows readers may briefly hold the destination without
+                # FILE_SHARE_DELETE. Retry the same atomic rename, not the write.
+                if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                    raise
+                logger.warning("[Storage] atomic_replace_busy winerror=%s attempt=%s/6", exc.winerror, attempt + 1)
+                time.sleep(0.05 * (2 ** attempt))
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("[Storage] temp_cleanup_failed error_type=%s", type(exc).__name__)
 
 
 def _next_id(items: list[dict]) -> int:

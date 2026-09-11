@@ -306,3 +306,12 @@
 - 修改本地既有邮箱提交与 OTP 状态观察，完整等待后才做一次恢复；明确资料页/Session/Email verified 后不重输已用码。按原代理隔离规则删除预检结果替代窗口实测的回退，独立记录 `proxy_isolation`。
 - MFA 只对 503/429 且空业务响应做最多 3 次同窗重试；删除模糊写结果的 activate 外层重放。Session 重读在 POST 前匹配目标邮箱，新 Token 通过原 checkpoint 与内部 session 透传给 Roxy finally，即使 MFA 失败也不重新保存旧注册 Token；Secret 仍等待 `success is True`。
 - 邮箱接口阶段/预算/日志脱敏与时区、历史消息 ID 修复沿现有适配器；不增加配置或第二套注册执行器。统一回归及用户要求的五新邮箱现场验证，见 `docs/2026-09-11_最新注册失败与邮箱实查修复-report.md`。
+
+## 本次 US 英文重认证批量失败修复（2026-09-11）
+
+- 修改前重新获取并对照锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的两个注册/MFA 文件；锁定版本不变。上游没有本地登录后补密码扩展，保留同窗 Cookie/代理、精确邮箱匹配、显式 Token 和 enroll/activate 成功确认，不复制上游整条协议备用实现。
+- 16:55 出口由 VN 变 US 后，两批共有 22 个账号停在密码邮箱重认证，未进入 MFA。实查最新八个邮箱均已收到正确的新邮件；英文页面触发提前重发，而越南语没有。旧整页 `error/try again` 判断还会在输入前误报拒绝。
+- 修改 `core/account_export.py` 的原收码/提交路径：初始邮件先等、仅真实超时且同一有效挑战重发一次；普通提示与 code/page/HTTP 错误分开；被动追踪当前浏览器 POST，避免自动提交后再点击，不读取正文或消耗共享 performance 日志。密码重认证 JS 在 CSRF/signin 前校验目标邮箱。
+- 本次 US 五个新邮箱的密码与 MFA 远端均成功；四次邮箱重认证都 `resend=0 post_count=1 http=200`，另一个走注册密码页。两次最终本地 JSON replace 失败已从确认 checkpoint 恢复，不将首轮 3/5 完整任务改写为 5/5。
+- 现场追加修复 `core/db.py::_write_json` 的 Windows 暂态原子替换，真实 Win32 占用回归通过；补充统一 pytest DB 路径隔离，防止旧 WebUI 启动恢复测试修改运行数据。五个最终账号密码/2FA 均具备，套餐 HTTP 200；隔离全量 `953 passed, 1 deselected, 1 warning, 61 subtests passed`。
+- 证据、Finding→Path、安全复核、局限及八项自检见 `docs/2026-09-11_US英文重认证批量失败修复-report.md`。

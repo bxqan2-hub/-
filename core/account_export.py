@@ -626,11 +626,24 @@ _PASSWORD_AUTHENTICATOR_RE = re.compile(
     re.IGNORECASE,
 )
 _PASSWORD_EMAIL_RE = re.compile(
-    r"email[- ]verification|email code|verification code sent|邮箱|郵箱|メール|이메일",
+    r"email[- ]verification|email code|verification code sent|邮箱|郵箱|メール|이메일|mã.*(?:email|gửi)",
     re.IGNORECASE,
 )
 _PASSWORD_REJECTION_RE = re.compile(
     r"incorrect|invalid|rejected|failed|error|try again|could not|unable|错误|无效|不匹配|失败|拒绝|重试",
+    re.IGNORECASE,
+)
+_PASSWORD_CODE_REJECTION_RE = re.compile(
+    r"(?:invalid|incorrect|wrong|expired|rejected)\s+(?:(?:verification|security|email|one.time|authentication)\s+)?code|"
+    r"(?:verification\s+)?code\s+(?:(?:is|has|was)\s+)?(?:invalid|incorrect|wrong|expired|rejected)|"
+    r"验证码.{0,12}(?:错误|无效|过期|不匹配)|(?:错误|无效|过期)的?验证码|"
+    r"mã.{0,20}(?:không hợp lệ|không chính xác|hết hạn)",
+    re.IGNORECASE,
+)
+_PASSWORD_PAGE_ERROR_RE = re.compile(
+    r"something went wrong|(?:unknown|unexpected) error|an error (?:occurred|has occurred)|"
+    r"route error|invalid content type|发生(?:未知|意外)?错误|出现(?:未知|意外)?错误|"
+    r"不明なエラー|đã xảy ra lỗi",
     re.IGNORECASE,
 )
 _PASSWORD_SUCCESS_RE = re.compile(
@@ -645,7 +658,7 @@ _BROWSER_CHALLENGE_RE = re.compile(
 )
 
 _PASSWORD_REAUTH_JS = r"""
-async () => {
+async expectedEmail => {
   const sessionResponse = await fetch('/api/auth/session', {
     credentials: 'include', headers: {'accept': 'application/json'},
   });
@@ -653,6 +666,8 @@ async () => {
   const email = String(session?.user?.email || '');
   if (!sessionResponse.ok || !session?.accessToken || !email)
     return {ok:false, stage:'session', status:sessionResponse.status};
+  if (!expectedEmail || email.trim().toLowerCase() !== String(expectedEmail).trim().toLowerCase())
+    return {ok:false, stage:'session_account_mismatch', status:sessionResponse.status};
   const csrfResponse = await fetch('/api/auth/csrf', {
     credentials: 'include', headers: {'accept': 'application/json'},
   });
@@ -684,6 +699,7 @@ async () => {
 """
 
 _PASSWORD_REAUTH_SELENIUM_JS = r"""
+const expectedEmail = String(arguments[0] || '').trim().toLowerCase();
 const done = arguments[arguments.length - 1];
 (async () => {
   try {
@@ -695,6 +711,8 @@ const done = arguments[arguments.length - 1];
       const email = String(session?.user?.email || '');
       if (!sessionResponse.ok || !session?.accessToken || !email)
         return {ok:false, stage:'session', status:sessionResponse.status};
+      if (!expectedEmail || email.trim().toLowerCase() !== expectedEmail)
+        return {ok:false, stage:'session_account_mismatch', status:sessionResponse.status};
       const csrfResponse = await fetch('/api/auth/csrf', {
         credentials: 'include', headers: {'accept': 'application/json'},
       });
@@ -733,7 +751,7 @@ _PASSWORD_RESEND_JS = r"""
   const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
   const target = [...document.querySelectorAll('button,a,[role="button"],[role="link"]')]
     .filter(el => visible(el) && enabled(el)).find(el =>
-      /resend|send again|send a new|new code|重新发送|再次发送|重发|重發|再送信|もう一度送信|다시\s*보내|재전송/i
+      /resend|send again|send a new|new code|重新发送|再次发送|重发|重發|再送信|もう一度送信|다시\s*보내|재전송|gửi\s*lại\s*mã|gởi\s*lại\s*mã/i
         .test([el.innerText, el.textContent, el.getAttribute('aria-label'), el.getAttribute('title')]
           .filter(Boolean).join(' ')));
   if (!target) return false;
@@ -1148,7 +1166,7 @@ def _password_body_text(driver) -> str:
         return ""
 
 
-def _password_visible_playwright(driver, selector: str) -> list:
+def _password_visible_playwright(driver, selector: str, *, require_enabled: bool = True) -> list:
     try:
         locator = driver.locator(selector)
         count = min(int(locator.count()), 20)
@@ -1158,14 +1176,17 @@ def _password_visible_playwright(driver, selector: str) -> list:
     for index in range(count):
         candidate = locator.nth(index)
         try:
-            if candidate.is_visible(timeout=500):
+            enabled = getattr(candidate, "is_enabled", None)
+            if candidate.is_visible(timeout=500) and (
+                not require_enabled or not callable(enabled) or enabled(timeout=500)
+            ):
                 result.append(candidate)
         except Exception:
             continue
     return result
 
 
-def _password_visible_selenium(driver, selector: str) -> list:
+def _password_visible_selenium(driver, selector: str, *, require_enabled: bool = True) -> list:
     try:
         from selenium.webdriver.common.by import By
         elements = driver.find_elements(By.CSS_SELECTOR, selector)
@@ -1180,15 +1201,15 @@ def _password_visible_selenium(driver, selector: str) -> list:
     visible = []
     for candidate in elements[:20]:
         try:
-            if candidate.is_displayed() and candidate.is_enabled():
+            if candidate.is_displayed() and (not require_enabled or candidate.is_enabled()):
                 visible.append(candidate)
         except Exception:
             continue
     return visible
 
 
-def _password_visible_inputs(driver, selector: str) -> list:
-    return _password_visible_playwright(driver, selector) if _is_playwright_page(driver) else _password_visible_selenium(driver, selector)
+def _password_visible_inputs(driver, selector: str, *, require_enabled: bool = True) -> list:
+    return _password_visible_playwright(driver, selector, require_enabled=require_enabled) if _is_playwright_page(driver) else _password_visible_selenium(driver, selector, require_enabled=require_enabled)
 
 
 def _password_click_playwright(driver, field, selectors: str) -> bool:
@@ -1258,82 +1279,185 @@ def _password_click_selenium(driver, field) -> bool:
         return False
 
 
-def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -> bool:
+def _password_code_page_state(driver, body: str, fields: list, password_fields: list) -> dict:
+    """Classify the current challenge without returning page text or credentials."""
+    path = urlparse(_password_page_url(driver)).path
+    allowed_paths = {"/email-verification", "/password", "/totp", "/log-in/password", "/create-account/password"}
+    code_error = bool(_PASSWORD_CODE_REJECTION_RE.search(body))
+    visible_code_controls = len(fields) if fields else len(_password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR, require_enabled=False))
+    page_error = None
+    if not visible_code_controls and not password_fields:
+        if _BROWSER_CHALLENGE_RE.search(body):
+            page_error = "auth_challenge"
+        elif _PASSWORD_PAGE_ERROR_RE.search(body) and not code_error:
+            page_error = "auth_page_error"
+    return {
+        "path": path if path in allowed_paths else "other",
+        "code_controls": len(fields), "visible_code_controls": visible_code_controls, "password_controls": len(password_fields),
+        "code_error": code_error, "page_error": page_error,
+    }
+
+
+def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -> dict:
     code = str(code or "").strip()
-    if not re.fullmatch(r"\d{6}", code):
-        return False
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
     entered = False
+    entered_at = None
+    clicked_at = None
     initial_body = _password_body_text(driver)
+    initial_code_error = bool(_PASSWORD_CODE_REJECTION_RE.search(initial_body))
     initial_email = "email-verification" in _password_page_url(driver).lower() or bool(_PASSWORD_EMAIL_RE.search(initial_body))
     initial_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(initial_body)) and not initial_email
-    while time.monotonic() < deadline:
-        body = _password_body_text(driver)
-        if _PASSWORD_REJECTION_RE.search(body):
-            return False
-        # Only an observed next form confirms advancement. A missing/disabled
-        # OTP input or a changed URL alone is merely hydration/navigation.
-        if _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR):
-            return True
-        fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
-        if entered and fields:
-            is_email = "email-verification" in _password_page_url(driver).lower() or bool(_PASSWORD_EMAIL_RE.search(body))
-            is_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(body)) and not is_email
-            if (initial_authenticator and is_email) or (not initial_authenticator and is_authenticator):
-                # Auto-submit can lead to another OTP challenge, not only a
-                # password form. Let the caller acquire that challenge's code.
-                return True
-        last_key_attempted = False
+    activity = {"ids": set(), "status": None}
+    subscriptions = []
+    connection = None
+    observing = False
+    outcome = "submit_failed"
+    state = {"path": "other", "code_controls": 0, "password_controls": 0, "code_error": False, "page_error": None}
+
+    def observe(event):
+        # Only endpoint/method/request identity/status are read. No request or
+        # response body is retained, and the global performance log is untouched.
         try:
-            if fields and not entered:
-                split_fields = len(fields) >= 6
-                for index, char in enumerate(code):
-                    fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
-                    field = fields[-6:][index] if split_fields else fields[0]
-                    if split_fields or index == 0:
-                        if _is_playwright_page(driver):
-                            field.fill("", timeout=1000)
-                        else:
-                            field.clear()
+            if _is_playwright_page(driver):
+                response = event if hasattr(event, "status") else None
+                request = response.request if response is not None else event
+                request_id = str(id(request))
+            else:
+                response = getattr(event, "response", None)
+                request = getattr(event, "request", None)
+                request_id = str(event.request_id)
+            target = urlparse(str((response or request).url))
+            # Email has a known endpoint. For an authenticator challenge the
+            # server-selected accounts endpoint is not fixed here; conservatively
+            # treat any same-origin accounts POST as in-flight, never replay it.
+            relevant_path = target.path.startswith("/api/accounts/") if initial_authenticator else target.path == "/api/accounts/email-otp/validate"
+            if target.hostname != "auth.openai.com" or not relevant_path:
+                return
+            if response is not None:
+                if request_id in activity["ids"]:
+                    activity["status"] = int(response.status)
+            elif request is not None and str(request.method).upper() == "POST" and len(activity["ids"]) < 4:
+                activity["ids"].add(request_id)
+        except Exception:
+            pass
+
+    try:
+        try:
+            if _is_playwright_page(driver):
+                for event in ("request", "response"):
+                    driver.on(event, observe)
+                    subscriptions.append((event, observe))
+            else:
+                devtools, connection = driver.start_devtools()
+                for event in (devtools.network.RequestWillBeSent, devtools.network.ResponseReceived):
+                    subscriptions.append((event, connection.add_callback(event, observe)))
+                connection.execute(devtools.network.enable())
+            observing = True
+        except Exception:
+            pass
+        while re.fullmatch(r"\d{6}", code) and time.monotonic() < deadline:
+            body = _password_body_text(driver)
+            password_fields = _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR)
+            fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+            state = _password_code_page_state(driver, body, fields, password_fields)
+            if password_fields:
+                outcome = "advanced"
+                break
+            if state["page_error"] or (state["code_error"] and not state["visible_code_controls"] and not entered):
+                outcome = "page_error"
+                break
+            if activity["ids"]:
+                status = activity["status"]
+                if status is None:
+                    time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+                    continue
+                outcome = "rejected" if state["code_error"] and status in {400, 422} else "submitted"
+                if status is not None and status >= 400 and outcome != "rejected":
+                    outcome = "http_failed"
+                break
+            if entered and fields:
+                is_email = "email-verification" in _password_page_url(driver).lower() or bool(_PASSWORD_EMAIL_RE.search(body))
+                is_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(body)) and not is_email
+                if (initial_authenticator and is_email) or (not initial_authenticator and is_authenticator):
+                    outcome = "advanced"
+                    break
+            if clicked_at is not None:
+                if time.monotonic() - clicked_at >= 0.5:
+                    outcome = "submitted"
+                    break
+                time.sleep(0.1)
+                continue
+            last_key_attempted = False
+            try:
+                if fields and not entered:
+                    split_fields = len(fields) >= 6
+                    for index, char in enumerate(code):
                         fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
                         field = fields[-6:][index] if split_fields else fields[0]
-                    last_key_attempted = index == len(code) - 1
-                    if _is_playwright_page(driver):
-                        field.press(char, timeout=1000)
-                    else:
-                        field.send_keys(char)
-                    time.sleep(0.08)
-                entered = True
-                continue
-            if entered:
-                fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
-                if fields:
+                        if split_fields or index == 0:
+                            if _is_playwright_page(driver):
+                                field.fill("", timeout=1000)
+                            else:
+                                field.clear()
+                            fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+                            field = fields[-6:][index] if split_fields else fields[0]
+                        last_key_attempted = index == len(code) - 1
+                        if _is_playwright_page(driver):
+                            field.press(char, timeout=1000)
+                        else:
+                            field.send_keys(char)
+                        time.sleep(0.08)
+                    entered = True
+                    entered_at = time.monotonic()
+                    continue
+                if entered and fields:
                     fields = fields[-6:] if len(fields) >= 6 else fields[:1]
                     if _is_playwright_page(driver):
                         observed = "".join(str(field.input_value(timeout=1000) or "") for field in fields)
                     else:
                         observed = "".join(str(field.get_attribute("value") or "") for field in fields)
-                    if observed == code:
-                        if _is_playwright_page(driver):
-                            clicked = _password_click_playwright(
-                                driver, fields[0],
-                                'button[type="submit"], input[type="submit"], button[name="intent"]',
-                            )
-                        else:
-                            clicked = _password_click_selenium(driver, fields[0])
+                    if observed == code and observing and time.monotonic() - (entered_at or 0) >= 2.0:
+                        # Give last-digit auto-submit a settle window. A matching
+                        # request observed above always suppresses this click.
+                        clicked = _password_click_playwright(
+                            driver, fields[0], 'button[type="submit"], input[type="submit"], button[name="intent"]',
+                        ) if _is_playwright_page(driver) else _password_click_selenium(driver, fields[0])
                         if clicked:
-                            return True
-                    elif observed:
-                        # A stale last key can also mean it was never accepted.
-                        # Refill an observed partial value, never submit it.
+                            clicked_at = time.monotonic()
+                    elif observed and observed != code:
                         entered = False
-        except Exception as exc:
-            # The last real key may trigger auto-submit before WebDriver
-            # returns. Do not clear/retype that code; observe the next form.
-            entered = entered or last_key_attempted
-            logger.debug("[2FA][密码] 验证码输入瞬态：%s", type(exc).__name__)
-        time.sleep(0.5)
-    return False
+            except Exception as exc:
+                entered = entered or last_key_attempted
+                if entered and entered_at is None:
+                    entered_at = time.monotonic()
+                logger.debug("[2FA][密码] 验证码输入瞬态：%s", type(exc).__name__)
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+    finally:
+        for event, callback in subscriptions:
+            try:
+                if connection is None:
+                    driver.remove_listener(event, callback)
+                else:
+                    connection.remove_callback(event, callback)
+            except Exception:
+                logger.debug("[2FA][密码] OTP 观察器清理失败")
+    if outcome == "submit_failed" and entered and not observing:
+        outcome = "submit_unconfirmed"
+    if outcome == "submit_failed" and activity["ids"] and activity["status"] is None:
+        outcome = "request_pending"
+    if outcome in {"page_error", "rejected", "http_failed"}:
+        _password_screenshot(driver)
+    logger.info(
+        "[2FA][密码] OTP stage=%s path=%s code_controls=%s password_controls=%s post_count=%s http=%s error_type=%s",
+        outcome, state["path"], state["code_controls"], state["password_controls"],
+        len(activity["ids"]) if observing else "unknown", activity["status"] or "-",
+        state["page_error"] or ("code_error" if state["code_error"] else "none"),
+    )
+    return {
+        "ok": outcome in {"advanced", "submitted"}, "status": outcome,
+        "http_status": activity["status"], "initial_code_error": initial_code_error,
+    }
 
 
 def _password_submit_new_password(driver, fields: list, password: str) -> bool:
@@ -1450,11 +1574,11 @@ def _setup_password_with_driver(
         )
     try:
         if _is_playwright_page(driver):
-            reauth = driver.evaluate(reauth_js)
+            reauth = driver.evaluate(reauth_js, email)
         else:
             if not callable(getattr(driver, "execute_async_script", None)):
                 raise RuntimeError("driver_missing_execute_async_script")
-            reauth = driver.execute_async_script(reauth_selenium_js)
+            reauth = driver.execute_async_script(reauth_selenium_js, email)
     except Exception as exc:
         logger.warning("%s[2FA][密码] 重认证请求失败：%s", prefix, type(exc).__name__)
         return {
@@ -1493,6 +1617,7 @@ def _setup_password_with_driver(
     email_used = False
     totp_submitted_at = None
     email_submitted_at = None
+    initial_code_errors = {"email": False, "totp": False}
     resend_attempted = False
     password_submitted = False
     last_url = ""
@@ -1501,6 +1626,7 @@ def _setup_password_with_driver(
         last_url = _password_page_url(driver)
         password_fields = _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR)
         code_fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+        code_state = _password_code_page_state(driver, body, code_fields, password_fields)
         path = last_url.lower()
         is_email_challenge = "email-verification" in path or bool(_PASSWORD_EMAIL_RE.search(body))
         is_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(body))
@@ -1508,12 +1634,27 @@ def _setup_password_with_driver(
         if not code_fields and not is_email_challenge and not is_authenticator:
             challenge = "totp" if (totp_submitted_at or -1) > (email_submitted_at or -1) else "email"
         challenge_used = email_used if challenge == "email" else totp_used
+        if not challenge_used and not password_submitted and (
+            code_state["page_error"] or (code_state["code_error"] and not code_state["visible_code_controls"] and not password_fields)
+        ):
+            logger.warning("[2FA][密码] stage=before_submit path=%s code_controls=%s error_type=%s", code_state["path"],
+                           code_state["code_controls"], code_state["page_error"] or "code_error_without_form")
+            _password_screenshot(driver)
+            return {"ok": False, "status": "failed", "stage": f"password_{challenge}",
+                    "code": f"password_{challenge}_reauth_page_error", "message": "重认证页面异常，尚未提交验证码", "http_status": None}
         if challenge_used and not password_fields and not password_submitted:
             submitted_at = email_submitted_at if challenge == "email" else totp_submitted_at
-            if _PASSWORD_REJECTION_RE.search(body):
+            if not code_state["code_error"]:
+                initial_code_errors[challenge] = False
+            if code_state["page_error"] or (code_state["code_error"] and not initial_code_errors[challenge]):
+                page_error = bool(code_state["page_error"])
+                _password_screenshot(driver)
+                logger.warning("[2FA][密码] stage=%s path=%s code_controls=%s error_type=%s", challenge,
+                               code_state["path"], code_state["code_controls"], code_state["page_error"] or "code_error")
                 return {
                     "ok": False, "status": "failed", "stage": f"password_{challenge}",
-                    "code": f"password_{challenge}_reauth_rejected", "message": "重认证验证码被拒绝",
+                    "code": f"password_{challenge}_reauth_page_error" if page_error else f"password_{challenge}_reauth_rejected",
+                    "message": "重认证页面异常" if page_error else "重认证验证码被拒绝",
                     "http_status": None,
                 }
             if submitted_at is not None and time.monotonic() - submitted_at >= 45:
@@ -1536,59 +1677,73 @@ def _setup_password_with_driver(
                 if totp_secret:
                     _wait_for_totp_window(min_remaining=5.0)
                     code = pyotp.TOTP(normalize_totp_secret(totp_secret)).now()
-                    if not _password_submit_code(
+                    submission = _password_submit_code(
                         driver, code, timeout_seconds=min(45.0, max(0.0, deadline - time.monotonic())),
-                    ):
-                        rejected = bool(_PASSWORD_REJECTION_RE.search(_password_body_text(driver)))
+                    )
+                    if not submission["ok"]:
+                        reason = submission["status"]
                         return {
                             "ok": False, "status": "failed", "stage": "password_totp",
-                            "code": "password_totp_reauth_rejected" if rejected else "password_totp_reauth_submit_failed",
-                            "message": "TOTP 重认证验证码被拒绝" if rejected else "TOTP 重认证验证码提交失败",
-                            "http_status": None,
+                            "code": f"password_totp_reauth_{reason}",
+                            "message": "TOTP 重认证未完成", "http_status": submission["http_status"],
                         }
+                    initial_code_errors["totp"] = submission["initial_code_error"]
                     totp_used = True
                     totp_submitted_at = time.monotonic()
                     time.sleep(1.5)
                     continue
             if is_email_challenge or not is_authenticator:
+                from config import twofa as twofa_cfg
                 code_after = requested_at
-                if not resend_attempted:
-                    resend_attempted = True
-                    if _password_click_resend(driver):
-                        code_after = time.time()
-                try:
-                    from config import twofa as twofa_cfg
-                    code = wait_for_otp(
-                        email,
-                        after_ts=code_after,
-                        max_wait=max(10, int(getattr(twofa_cfg, "TWOFA_OTP_MAX_WAIT", 120) or 120)),
-                        poll_interval=max(1, int(getattr(twofa_cfg, "TWOFA_OTP_POLL_INTERVAL", 2) or 2)),
-                        settle_seconds=max(0, int(getattr(twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", 1) or 0)),
-                        exclude_codes=otp_history,
-                        exclude_message_ids=otp_message_ids,
-                    )
-                except Exception as exc:
-                    return {
-                        "ok": False, "status": "failed", "stage": "password_email",
-                        "code": "password_email_code_wait_failed", "message": type(exc).__name__,
-                        "http_status": None,
-                    }
-                if not _password_submit_code(
+                for mail_attempt in (1, 2):
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if remaining < 1:
+                        return {"ok": False, "status": "failed", "stage": "password_email",
+                                "code": "password_email_code_wait_failed", "message": "验证码等待总预算耗尽", "http_status": None}
+                    mail_budget = remaining / 2 if mail_attempt == 1 else max(1.0, remaining - 5)
+                    logger.info("[2FA][密码] 邮箱等待 reason=%s resend=%s", "initial_wait" if mail_attempt == 1 else "mail_timeout", int(resend_attempted))
+                    try:
+                        code = wait_for_otp(
+                            email, after_ts=code_after,
+                            max_wait=min(max(1, int(getattr(twofa_cfg, "TWOFA_OTP_MAX_WAIT", 120) or 120)), max(1, int(mail_budget))),
+                            poll_interval=max(1, int(getattr(twofa_cfg, "TWOFA_OTP_POLL_INTERVAL", 2) or 2)),
+                            settle_seconds=max(0, int(getattr(twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", 1) or 0)),
+                            exclude_codes=otp_history, exclude_message_ids=otp_message_ids,
+                        )
+                        break
+                    except Exception as exc:
+                        from core.generic_api_mail_client import GenericApiTransportError
+                        detail = str(exc)
+                        mailbox_timeout = bool(re.match(r"等待.*(?:验证码|OTP).*超时", detail)) and not (
+                            isinstance(exc, GenericApiTransportError)
+                            or re.search(r"stage=|http_status=|HTTP [345]\d\d|invalid_json|ConnectionError|ConnectTimeout|ReadTimeout", detail, re.I)
+                        )
+                        current_body = _password_body_text(driver)
+                        current_fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+                        current_passwords = _password_visible_inputs(driver, _PASSWORD_INPUT_SELECTOR)
+                        current_state = _password_code_page_state(driver, current_body, current_fields, current_passwords)
+                        same_challenge = _password_page_url(driver) == last_url and current_fields and not current_passwords and not current_state["page_error"] and not current_state["code_error"]
+                        if mailbox_timeout and not resend_attempted and same_challenge and deadline - time.monotonic() >= 6:
+                            resend_attempted = True
+                            code_after = time.time()
+                            if _password_click_resend(driver):
+                                logger.info("[2FA][密码] 邮箱重发 reason=mail_timeout path=%s resend=1", current_state["path"])
+                                continue
+                        logger.warning("[2FA][密码] stage=email_wait path=%s code_controls=%s error_type=%s resend=%s",
+                                       current_state["path"], current_state["code_controls"], type(exc).__name__, int(resend_attempted))
+                        return {"ok": False, "status": "failed", "stage": "password_email",
+                                "code": "password_email_code_wait_failed", "message": type(exc).__name__, "http_status": None}
+                submission = _password_submit_code(
                     driver, code, timeout_seconds=min(45.0, max(0.0, deadline - time.monotonic())),
-                ):
-                    rejected = bool(_PASSWORD_REJECTION_RE.search(_password_body_text(driver)))
-                    logger.warning(
-                        "%s[2FA][密码] 邮箱验证码未完成提交：actionable_code_inputs=%s rejected=%s",
-                        prefix,
-                        len(_password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)),
-                        rejected,
-                    )
+                )
+                if not submission["ok"]:
+                    reason = submission["status"]
                     return {
                         "ok": False, "status": "failed", "stage": "password_email",
-                        "code": "password_email_reauth_rejected" if rejected else "password_email_reauth_submit_failed",
-                        "message": "邮箱重认证验证码被拒绝" if rejected else "邮箱重认证验证码提交失败",
-                        "http_status": None,
+                        "code": f"password_email_reauth_{reason}",
+                        "message": "邮箱重认证未完成", "http_status": submission["http_status"],
                     }
+                initial_code_errors["email"] = submission["initial_code_error"]
                 email_used = True
                 email_submitted_at = time.monotonic()
                 time.sleep(1.5)
@@ -1606,18 +1761,18 @@ def _setup_password_with_driver(
             continue
 
         if password_submitted:
-            if _PASSWORD_REJECTION_RE.search(body) and not _PASSWORD_SUCCESS_RE.search(body):
-                return {
-                    "ok": False, "status": "failed", "stage": "password_setup",
-                    "code": "password_settings_rejected", "message": "新密码被服务端拒绝",
-                    "http_status": None,
-                }
             if _PASSWORD_SUCCESS_RE.search(body) or _password_done_callback(last_url):
                 return {
                     "ok": True, "status": "success", "stage": "password_done",
                     "code": "password_setup_success", "message": "密码已补设", "http_status": None,
                     "password": password, "email_reauth_used": email_used,
                     "totp_reauth_used": totp_used,
+                }
+            if _PASSWORD_REJECTION_RE.search(body):
+                return {
+                    "ok": False, "status": "failed", "stage": "password_setup",
+                    "code": "password_settings_rejected", "message": "新密码被服务端拒绝",
+                    "http_status": None,
                 }
         time.sleep(0.5)
 

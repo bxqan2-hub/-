@@ -35,6 +35,14 @@ def test_security_checkpoint_runtime_files_are_gitignored() -> None:
     assert "注册安全凭据待完成.lock" in patterns
 
 
+def test_default_test_database_paths_never_target_the_runtime_tree() -> None:
+    runtime_root = Path(db.__file__).resolve().parents[1]
+    paths = [value for name, value in vars(db).items() if name.startswith("_") and isinstance(value, Path)]
+    assert len(paths) >= 24
+    assert all(value.is_relative_to(db._PROJECT_ROOT) for value in paths)
+    assert all(not value.is_relative_to(runtime_root) for value in paths)
+
+
 def _isolate_storage(monkeypatch, tmp_path) -> None:
     paths = {
         "_DATA_DIR": tmp_path,
@@ -421,3 +429,124 @@ def test_activated_totp_checkpoint_retries_and_exposes_failure(monkeypatch) -> N
         "fresh-token",
     ) is False
     assert len(calls) == 3
+
+
+def test_atomic_json_retries_windows_busy_without_rewriting_temp(monkeypatch, tmp_path):
+    _isolate_storage(monkeypatch, tmp_path)
+    path = tmp_path / "accounts.json"
+    path.write_text("[]", encoding="utf-8")
+    original_replace = Path.replace
+    attempts, waits, sources = [], [], []
+
+    def replace(source, target):
+        attempts.append(target)
+        sources.append((source, source.read_bytes()))
+        if len(attempts) <= 3:
+            assert path.read_text(encoding="utf-8") == "[]"
+            error = PermissionError("synthetic Windows sharing failure")
+            error.winerror = (5, 32, 33)[len(attempts) - 1]
+            raise error
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(db.time, "sleep", waits.append)
+    db._write_json(path, [{"id": 1}])
+    assert json.loads(path.read_text(encoding="utf-8")) == [{"id": 1}]
+    assert len(attempts) == 4 and waits == [0.05, 0.1, 0.2]
+    assert len(set(sources)) == 1
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_json_permanent_busy_preserves_account_and_checkpoint(monkeypatch, tmp_path):
+    import pytest
+
+    _isolate_storage(monkeypatch, tmp_path)
+    db.save_security_checkpoint("user@example.test", registration_password="confirmed-password", totp_secret="JBSWY3DPEHPK3PXP", access_token="confirmed-token")
+    path = tmp_path / "accounts.json"
+    original = b"[ ]\n"
+    path.write_bytes(original)
+    calls, waits = [], []
+    error = PermissionError("synthetic permanent Windows sharing failure")
+    error.winerror = 5
+
+    def replace(source, target):
+        calls.append(target)
+        raise error
+
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(db.time, "sleep", waits.append)
+    with pytest.raises(PermissionError) as caught:
+        db.insert_account(email="user@example.test", access_token="confirmed-token")
+    assert caught.value is error
+    assert len(calls) == 6 and len(waits) == 5 and sum(waits) == 1.55
+    assert path.read_bytes() == original
+    assert db.get_security_checkpoint("user@example.test")["totp_secret"] == "JBSWY3DPEHPK3PXP"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_json_other_errors_and_cleanup_keep_original_failure(monkeypatch, tmp_path):
+    import errno
+    import pytest
+
+    _isolate_storage(monkeypatch, tmp_path)
+    path = tmp_path / "accounts.json"
+    path.write_text("[]", encoding="utf-8")
+    waits = []
+    monkeypatch.setattr(db.time, "sleep", waits.append)
+    original_unlink = Path.unlink
+    for error in (PermissionError("non-Windows permission failure"), OSError(errno.ENOSPC, "disk full")):
+        calls = []
+
+        def replace(source, target):
+            calls.append(target)
+            raise error
+
+        def unlink(source, **kwargs):
+            raise PermissionError("synthetic cleanup failure")
+
+        monkeypatch.setattr(Path, "replace", replace)
+        monkeypatch.setattr(Path, "unlink", unlink)
+        with pytest.raises(type(error)) as caught:
+            db._write_json(path, [{"id": 1}])
+        assert caught.value is error and len(calls) == 1 and waits == []
+        assert path.read_text(encoding="utf-8") == "[]"
+        for temporary in tmp_path.glob("*.tmp"):
+            original_unlink(temporary)
+
+
+def test_atomic_json_recovers_after_real_windows_delete_share_lock(monkeypatch, tmp_path):
+    import ctypes
+    import os
+    import pytest
+    from ctypes import wintypes
+
+    if os.name != "nt":
+        pytest.skip("Windows file sharing semantics")
+    _isolate_storage(monkeypatch, tmp_path)
+    path = tmp_path / "accounts.json"
+    path.write_text("[]", encoding="utf-8")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 3, None, 3, 128, None)
+    assert handle != ctypes.c_void_p(-1).value
+    waits = []
+
+    def release(delay):
+        nonlocal handle
+        waits.append(delay)
+        assert path.read_text(encoding="utf-8") == "[]"
+        assert kernel.CloseHandle(handle)
+        handle = None
+
+    monkeypatch.setattr(db.time, "sleep", release)
+    try:
+        db._write_json(path, [{"id": 1}])
+    finally:
+        if handle is not None:
+            kernel.CloseHandle(handle)
+    assert waits == [0.05]
+    assert json.loads(path.read_text(encoding="utf-8")) == [{"id": 1}]
+    assert list(tmp_path.glob("*.tmp")) == []

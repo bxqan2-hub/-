@@ -1732,6 +1732,12 @@ def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -
             self.last_fill = ""
             self.evaluate_calls = []
 
+        def on(self, event, callback):
+            pass
+
+        def remove_listener(self, event, callback):
+            pass
+
         def evaluate(self, script, *args):
             self.evaluate_calls.append(script)
             if "api/auth/session" in script:
@@ -1830,7 +1836,8 @@ def password_reauth_driver(monkeypatch):
                 raise StaleElementReferenceException("fixture middle key rerender")
             if len("".join(self.owner.values)) == 6 and self.owner.auto_submit:
                 self.owner.submit_code()
-                raise StaleElementReferenceException("fixture last key auto-submit")
+                if self.owner.auto_submit_stale:
+                    raise StaleElementReferenceException("fixture last key auto-submit")
 
         def find_element(self, *_args):
             self.check_live()
@@ -1857,11 +1864,16 @@ def password_reauth_driver(monkeypatch):
         def __init__(self, *, disabled_after_fetch=0.0, advance_after=0.0, auto_submit=False,
                      stale_midway=False, reject=False, reject_on_fetch=False,
                      disable_after_submit=False, split_fields=False, hide_after_fetch=False,
-                     confirm_password=True, challenge="email", second_challenge=None, stale_before_final=False):
+                     confirm_password=True, challenge="email", second_challenge=None, stale_before_final=False,
+                     auto_submit_stale=True, observation=True, response_status=200, old_error=False, body_suffix=""):
             self.second_challenge, self.stale_before_final = second_challenge, stale_before_final
             self.disabled_after_fetch, self.advance_after = disabled_after_fetch, advance_after
             self.auto_submit, self.stale_midway, self.reject = auto_submit, stale_midway, reject
-            self.reject_on_fetch, self.disable_after_submit = reject_on_fetch, disable_after_submit or auto_submit
+            self.reject_on_fetch, self.disable_after_submit = reject_on_fetch, disable_after_submit or (auto_submit and auto_submit_stale)
+            self.auto_submit_stale, self.observation, self.response_status = auto_submit_stale, observation, response_status
+            self.old_error, self.body_suffix = old_error, body_suffix
+            self.callbacks = {"request": [(0, lambda event: None)], "response": [(0, lambda event: None)]}
+            self.removed_callbacks, self.observer_commands, self.mail_budgets = [], [], []
             self.hide_after_fetch, self.confirm_password, self.challenge = hide_after_fetch, confirm_password, challenge
             self.values = [""] * (6 if split_fields else 1)
             self.keys, self.password_values, self.screenshots = [], [], []
@@ -1890,20 +1902,42 @@ def password_reauth_driver(monkeypatch):
             path = "email-verification" if self.stage == "email" else self.stage
             return f"https://auth.openai.com/{path}?token=secret-query&email=user@example.test"
 
-        def execute_async_script(self, _script):
+        def execute_async_script(self, _script, *args):
             return {"ok": True, "status": 200, "url": self.current_url}
 
         def execute_script(self, script, *_args):
             if "document.body" in script:
-                if self.reject_on_fetch and self.mail_calls or self.reject and self.submitted_at is not None:
+                if self.reject_on_fetch and self.mail_calls or self.reject and self.submitted_at is not None or self.old_error and not self.keys:
                     return "Invalid verification code"
                 return {
                     "email": "Enter the verification code sent to your email",
                     "totp": "Enter your authenticator code",
                     "password": "Set a password",
                     "done": "Password updated" if self.confirm_password else "Working",
-                }[self.stage]
+                }[self.stage] + self.body_suffix
             return False
+
+        def start_devtools(self):
+            if not self.observation:
+                raise AttributeError("observation not available")
+            return SimpleNamespace(network=SimpleNamespace(
+                RequestWillBeSent="request", ResponseReceived="response", enable=lambda: "Network.enable",
+            )), self
+
+        def add_callback(self, event, callback):
+            ident = len(self.callbacks[event]) + 1
+            self.callbacks[event].append((ident, callback))
+            return ident
+
+        def remove_callback(self, event, ident):
+            self.removed_callbacks.append((event, ident))
+            self.callbacks[event] = [(key, callback) for key, callback in self.callbacks[event] if key != ident]
+
+        def execute(self, command):
+            self.observer_commands.append(command)
+
+        def get_log(self, kind):
+            raise AssertionError("OTP helpers must not consume performance logs")
 
         def find_elements(self, _by, selector):
             if "password" in selector:
@@ -1925,8 +1959,18 @@ def password_reauth_driver(monkeypatch):
             self.submitted_codes.append((challenge, value))
             self.submit_calls += 1
             self.submitted_at = clock.now
+            request_id = f"otp-{self.submit_calls}"
+            endpoint = "/api/accounts/mfa/totp/fixture-validate" if challenge == "totp" else "/api/accounts/email-otp/validate"
+            request = SimpleNamespace(url="https://auth.openai.com" + endpoint, method="POST")
+            for _, callback in list(self.callbacks["request"]):
+                callback(SimpleNamespace(request_id=request_id, request=request))
+            if self.response_status is not None:
+                response = SimpleNamespace(url=request.url, status=400 if self.reject else self.response_status)
+                for _, callback in list(self.callbacks["response"]):
+                    callback(SimpleNamespace(request_id=request_id, response=response))
 
         def fetch_code(self, *_args, **_kwargs):
+            self.mail_budgets.append(_kwargs)
             self.mail_calls += 1
             self.disabled_until = clock.now + self.disabled_after_fetch
             return "012345"
@@ -1986,7 +2030,7 @@ def test_password_reauth_waits_boundedly_without_false_success(password_reauth_d
     )
     assert result["ok"] is False
     assert result["code"] == "password_email_reauth_not_advanced"
-    assert 45 <= driver.clock.now < 47
+    assert 45 <= driver.clock.now - driver.submitted_at < 47
     assert driver.mail_calls == driver.submit_calls == 1
     assert driver.password_values == []
     assert "password" not in result
@@ -1995,7 +2039,7 @@ def test_password_reauth_waits_boundedly_without_false_success(password_reauth_d
 @pytest.mark.parametrize("options, expected", [
     ({"disabled_after_fetch": 100.0}, "password_email_reauth_submit_failed"),
     ({"hide_after_fetch": True}, "password_email_reauth_submit_failed"),
-    ({"disabled_after_fetch": 3.0, "reject_on_fetch": True}, "password_email_reauth_rejected"),
+    ({"hide_after_fetch": True, "reject_on_fetch": True}, "password_email_reauth_page_error"),
 ])
 def test_password_reauth_missing_inputs_never_confirm_advancement(password_reauth_driver, options, expected, caplog) -> None:
     driver = password_reauth_driver(**options)
@@ -2101,3 +2145,289 @@ def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypat
     assert result.password_setup["code"] == "password_already_configured"
     assert called == []
     assert password_checkpoints == [("user@example.com", "Existing-pass-1!")]
+
+
+@pytest.mark.parametrize("label", ["Resend code", "Gửi lại mã"])
+def test_password_initial_email_never_resends_existing_code(password_reauth_driver, monkeypatch, caplog, label):
+    driver = password_reauth_driver(body_suffix=" " + label)
+    resend = Mock(return_value=True)
+    monkeypatch.setattr(account_export, "_password_click_resend", resend)
+    with caplog.at_level("INFO"):
+        result = account_export._setup_password_with_driver(
+            driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+        )
+    assert result["ok"] is True
+    assert driver.mail_calls == driver.submit_calls == 1
+    resend.assert_not_called()
+    assert "reason=initial_wait resend=0" in caplog.text
+
+
+@pytest.mark.parametrize("second_timeout", [False, True])
+def test_password_email_timeout_resends_once_with_preclick_timestamp(password_reauth_driver, monkeypatch, second_timeout):
+    from core.generic_api_mail_client import GenericApiMailError
+    import core.email_provider
+
+    driver = password_reauth_driver()
+    fetches, clicks = [], []
+    original = driver.fetch_code
+
+    def fetch(*args, **kwargs):
+        fetches.append(dict(kwargs))
+        if len(fetches) == 1 or second_timeout:
+            driver.clock.now += kwargs["max_wait"]
+            raise GenericApiMailError("等待通用 API 验证码超时: fixture; HTTP 200 但未提取到 6 位验证码")
+        assert kwargs["after_ts"] == clicks[0]
+        assert kwargs["after_ts"] < account_export.time.time()
+        return original(*args, **kwargs)
+
+    def resend(_driver):
+        clicks.append(account_export.time.time())
+        driver.clock.now += 0.25
+        return True
+
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", fetch)
+    monkeypatch.setattr(account_export, "_password_click_resend", resend)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert len(fetches) == 2 and len(clicks) == 1
+    assert fetches[0]["after_ts"] < fetches[1]["after_ts"]
+    assert driver.clock.now <= 60
+    assert result["ok"] is (not second_timeout)
+    if second_timeout:
+        assert result["code"] == "password_email_code_wait_failed"
+        assert driver.submit_calls == 0
+
+
+@pytest.mark.parametrize("failure", ["transport", "api", "timeout_with_http_error", "raw_timeout"])
+def test_password_mail_transport_and_api_errors_never_resend(password_reauth_driver, monkeypatch, failure):
+    import core.email_provider
+    from core.generic_api_mail_client import GenericApiMailError, GenericApiTransportError
+
+    errors = {
+        "transport": GenericApiTransportError("mail transport failure"),
+        "api": GenericApiMailError("stage=mail_fetch http_status=503"),
+        "timeout_with_http_error": GenericApiMailError("等待通用 API 验证码超时: fixture; stage=mail_fetch http_status=503"),
+        "raw_timeout": TimeoutError("network request timed out"),
+    }
+    driver = password_reauth_driver()
+    fetch = Mock(side_effect=errors[failure])
+    resend = Mock(return_value=True)
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", fetch)
+    monkeypatch.setattr(account_export, "_password_click_resend", resend)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["code"] == "password_email_code_wait_failed"
+    fetch.assert_called_once()
+    resend.assert_not_called()
+    assert driver.submit_calls == 0
+
+
+@pytest.mark.parametrize("form_state", ["disabled", "gone", "changed", "deadline", "code_error"])
+def test_password_email_timeout_requires_same_actionable_challenge(password_reauth_driver, monkeypatch, form_state):
+    import core.email_provider
+    from core.generic_api_mail_client import GenericApiMailError
+
+    driver = password_reauth_driver()
+    resend = Mock(return_value=True)
+
+    def fetch(*args, **kwargs):
+        driver.mail_calls += 1
+        driver.clock.now += 60 if form_state == "deadline" else kwargs["max_wait"]
+        if form_state == "disabled":
+            driver.disabled_until = 1000
+        elif form_state == "gone":
+            driver.hide_after_fetch = True
+        elif form_state == "changed":
+            driver.challenge = "totp"
+        elif form_state == "code_error":
+            driver.reject_on_fetch = True
+        raise GenericApiMailError("等待通用 API 验证码超时: fixture; HTTP 200 但未提取到 6 位验证码")
+
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", fetch)
+    monkeypatch.setattr(account_export, "_password_click_resend", resend)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["ok"] is False and driver.submit_calls == 0
+    resend.assert_not_called()
+    assert driver.clock.now <= 60
+
+
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("observation", [False, True])
+def test_password_auto_submit_never_double_posts_while_controls_enabled(password_reauth_driver, stale, observation):
+    driver = password_reauth_driver(auto_submit=True, auto_submit_stale=stale, advance_after=10, observation=observation)
+    driver.disable_after_submit = False
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["ok"] is True
+    assert driver.submit_calls == 1 and driver.explicit_code_clicks == 0
+    assert all([ident for ident, _ in rows] == [0] for rows in driver.callbacks.values())
+
+
+def test_password_unobserved_idle_form_stops_without_guessing_post(password_reauth_driver, caplog):
+    driver = password_reauth_driver(observation=False)
+    with caplog.at_level("INFO"):
+        result = account_export._setup_password_with_driver(
+            driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=30,
+        )
+    assert result["code"] == "password_email_reauth_submit_unconfirmed"
+    assert driver.submit_calls == driver.explicit_code_clicks == 0
+    assert driver.clock.now <= 30
+    assert "post_count=unknown" in caplog.text
+
+
+@pytest.mark.parametrize("status", [None, 403, 429, 503])
+def test_password_otp_observer_classifies_response_and_cleans_only_own_callbacks(password_reauth_driver, status):
+    driver = password_reauth_driver(response_status=status, advance_after=None)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=30,
+    )
+    assert result["code"] == ("password_email_reauth_request_pending" if status is None else "password_email_reauth_http_failed")
+    assert result["http_status"] == status
+    assert driver.submit_calls == 1
+    assert len(driver.removed_callbacks) == 2
+    assert all([ident for ident, _ in rows] == [0] for rows in driver.callbacks.values())
+    assert driver.observer_commands == ["Network.enable"]
+    assert driver.clock.now <= 30
+
+
+def test_password_otp_observer_ignores_untracked_and_get_responses(password_reauth_driver, monkeypatch):
+    driver = password_reauth_driver()
+    original = driver.execute
+
+    def execute(command):
+        original(command)
+        url = "https://auth.openai.com/api/accounts/email-otp/validate"
+        for _, callback in list(driver.callbacks["response"]):
+            callback(SimpleNamespace(request_id="old", response=SimpleNamespace(url=url, status=400)))
+        for _, callback in list(driver.callbacks["request"]):
+            callback(SimpleNamespace(request_id="get", request=SimpleNamespace(url=url, method="GET")))
+        for _, callback in list(driver.callbacks["response"]):
+            callback(SimpleNamespace(request_id="get", response=SimpleNamespace(url=url, status=503)))
+
+    monkeypatch.setattr(driver, "execute", execute)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["ok"] is True
+    assert driver.submit_calls == driver.explicit_code_clicks == 1
+
+
+@pytest.mark.parametrize("options", [
+    {"body_suffix": " Did not receive a code? Try again."},
+    {"disabled_after_fetch": 3, "body_suffix": " Did not receive a code? Try again."},
+    {"old_error": True},
+    {"auto_submit": True, "body_suffix": " Error messages are shown below."},
+])
+def test_password_ignores_initial_or_unrelated_errors(password_reauth_driver, options):
+    driver = password_reauth_driver(**options)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["ok"] is True
+    assert driver.submit_calls == 1 and len(driver.password_values) == 1
+
+
+@pytest.mark.parametrize("runtime", ["selenium", "playwright"])
+def test_password_disabled_control_is_not_an_error_page(runtime):
+    field = SimpleNamespace(is_displayed=lambda: True, is_visible=lambda **kwargs: True, is_enabled=lambda **kwargs: False)
+    if runtime == "selenium":
+        driver = SimpleNamespace(current_url="https://auth.openai.com/email-verification", find_elements=lambda *args: [field])
+    else:
+        driver = SimpleNamespace(url="https://auth.openai.com/email-verification", evaluate=lambda *args: None,
+                                 locator=lambda selector: SimpleNamespace(count=lambda: 1, nth=lambda index: field))
+    fields = account_export._password_visible_inputs(driver, account_export._PASSWORD_CODE_SELECTOR)
+    state = account_export._password_code_page_state(driver, "Enter email code. Did not receive it? Try again.", fields, [])
+    assert state["code_controls"] == 0 and state["visible_code_controls"] == 1
+    assert state["page_error"] is None
+
+
+@pytest.mark.parametrize("runtime", ["selenium", "playwright"])
+@pytest.mark.parametrize("matched", [False, True])
+def test_password_reauth_javascript_checks_target_before_signin(runtime, matched):
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the browser fixture")
+    source = account_export._PASSWORD_REAUTH_SELENIUM_JS if runtime == "selenium" else account_export._PASSWORD_REAUTH_JS
+    script = """
+const {source,runtime,matched} = JSON.parse(require('fs').readFileSync(0,'utf8'));
+const calls=[];
+global.document={cookie:'oai-did=fixture-device'};
+global.fetch=async (url,options={})=>{
+ const path=new URL(url,'https://chatgpt.com').pathname; calls.push(path);
+ const value=path.endsWith('/session')?{accessToken:'private-token',user:{email:matched?'user@example.test':'other@example.test'}}:
+   path.endsWith('/csrf')?{csrfToken:'csrf-fixture'}:{url:'https://auth.openai.com/email-verification'};
+ return {ok:true,status:200,json:async()=>value};
+};
+const run=runtime==='selenium'?new Promise(resolve=>new Function(source)('user@example.test',resolve)):
+ eval(`(${source})`)('user@example.test');
+run.then(result=>process.stdout.write(JSON.stringify({result,calls})));
+"""
+    result = json.loads(subprocess.run([node, "-e", script], input=json.dumps({"source": source, "runtime": runtime, "matched": matched}),
+                                      text=True, capture_output=True, check=True, timeout=10).stdout)
+    assert result["calls"] == (["/api/auth/session", "/api/auth/csrf", "/api/auth/signin/openai"] if matched else ["/api/auth/session"])
+    assert result["result"]["ok"] is matched
+    if not matched:
+        assert result["result"]["stage"] == "session_account_mismatch"
+    assert "private-token" not in str(result)
+
+
+def test_password_timeout_resend_javascript_matches_english_and_vietnamese():
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the browser fixture")
+    script = """
+const source=JSON.parse(require('fs').readFileSync(0,'utf8')).source;
+global.getComputedStyle=()=>({visibility:'visible',display:'block'});
+function check(label){let clicked=0;const el={innerText:label,textContent:label,disabled:false,offsetWidth:100,offsetHeight:30,
+ getAttribute:()=>'',scrollIntoView:()=>{},click:()=>clicked++};global.document={querySelectorAll:()=>[el]};
+ const returned=eval(`(${source})`)();return {returned,clicked};}
+process.stdout.write(JSON.stringify({english:check('Resend code'),vietnamese:check('Gửi lại mã')}));
+"""
+    result = json.loads(subprocess.run([node, "-e", script], input=json.dumps({"source": account_export._PASSWORD_RESEND_JS}),
+                                      text=True, capture_output=True, check=True, timeout=10).stdout)
+    assert result == {"english": {"returned": True, "clicked": 1}, "vietnamese": {"returned": True, "clicked": 1}}
+
+
+def test_password_totp_auto_submit_uses_synthetic_accounts_endpoint_without_double_post(password_reauth_driver):
+    # This endpoint is synthetic; no real TOTP endpoint was inferred from logs.
+    driver = password_reauth_driver(challenge="totp", auto_submit=True, auto_submit_stale=False, advance_after=10)
+    driver.disable_after_submit = False
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123",
+        totp_secret="JBSWY3DPEHPK3PXP", timeout_seconds=60,
+    )
+    assert result["ok"] is True and result["totp_reauth_used"] is True
+    assert driver.submit_calls == 1 and driver.explicit_code_clicks == 0
+    assert driver.mail_calls == 0
+
+
+@pytest.mark.parametrize("message, expected", [
+    (" Did not receive it? Try again.", "password_email_reauth_submit_failed"),
+    (" Something went wrong. Please try again.", "password_email_reauth_page_error"),
+])
+def test_password_missing_form_separates_generic_hint_from_error_page(password_reauth_driver, message, expected, caplog):
+    driver = password_reauth_driver(hide_after_fetch=True, body_suffix=message)
+    with caplog.at_level("INFO"):
+        result = account_export._setup_password_with_driver(
+            driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+        )
+    assert result["code"] == expected
+    assert driver.submit_calls == 0 and driver.password_values == []
+    if expected.endswith("page_error"):
+        assert len(driver.screenshots) == 1
+        assert "error_type=auth_page_error" in caplog.text
+    for sensitive in ("user@example.test", "012345", "secret-query", "Ab3!cdefgh123"):
+        assert sensitive not in caplog.text
