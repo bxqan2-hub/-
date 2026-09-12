@@ -1141,7 +1141,7 @@ def check_account_plan(
                         "http_status": http_status,
                         "error": "AT已过期/失效，请手动查活刷新" if is_auth_expired else f"HTTP {http_status}",
                         "response_preview": response_text[:500],
-                        "retryable": _retryable_plan_error(http_status),
+                        "retryable": http_status == 403 or _retryable_plan_error(http_status),
                         "token_expired": True if is_auth_expired else claims.get("token_expired"),
                         "needs_live_check": True if is_auth_expired else False,
                         "account_unusable_code": None,

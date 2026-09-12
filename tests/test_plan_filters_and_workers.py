@@ -535,11 +535,12 @@ class PlanCheckWorkerTests(unittest.TestCase):
         self.assertEqual([item["acc_id"] for item in persisted], [1, 2])
         self.assertEqual(requests, ["Bearer " + token_bad] * 3 + ["Bearer " + token_good])
 
-    def test_authoritative_auth_failure_does_not_rotate_or_retry(self):
-        for status in (401, 403):
-            with self.subTest(status=status):
-                response = MagicMock(status_code=status, text="{}")
-                response.json.return_value = {}
+    def test_conclusive_auth_failure_does_not_rotate_or_retry(self):
+        for status, data in ((401, {}), (403, {"error": {"code": "token_expired"}}),
+                             (403, {"error": {"code": "account_deactivated"}})):
+            with self.subTest(status=status, data=data):
+                response = MagicMock(status_code=status, text=json.dumps(data))
+                response.json.return_value = data
                 session = MagicMock()
                 session.session.get.return_value = response
                 with patch.object(chatgpt_plan, "BrowserSession", return_value=session), \
@@ -552,6 +553,54 @@ class PlanCheckWorkerTests(unittest.TestCase):
                 self.assertEqual(session.session.get.call_count, 1)
                 rotate.assert_not_called()
                 sleep.assert_not_called()
+
+    def test_plain_403_rotates_pool_proxy_within_existing_budget(self):
+        token = AccountPlanFilterTests._token("acct-current")
+        proxies = ["http://one.example:80", "http://two.example:80", "http://three.example:80"]
+        for body, statuses in (("{}", [403, 200]), ("<html>Forbidden</html>", [403, 200]),
+                               ("{}", [403, 403, 403])):
+            with self.subTest(body=body, statuses=statuses):
+                responses = []
+                for status in statuses:
+                    response = MagicMock(status_code=status, text=body if status == 403 else "{}", headers={})
+                    response.json.return_value = {}
+                    if status == 403 and body.startswith("<"):
+                        response.json.side_effect = ValueError("not JSON")
+                    responses.append(response)
+                session = MagicMock()
+                session.session.get.side_effect = responses
+                session._get_common_headers.side_effect = lambda: {}
+                with patch.object(chatgpt_plan, "BrowserSession", return_value=session) as sessions, \
+                     patch.object(chatgpt_plan, "parse_accounts_check", return_value={"ok": True, "current_plan_type": "free", "plus_trial_eligible": True}), \
+                     patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_MAX_ATTEMPTS", 3), \
+                     patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_RETRY_DELAY", 0), \
+                     patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", side_effect=["VN|" + proxy for proxy in proxies]), \
+                     patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True), \
+                     patch.object(plan_check_service.db, "get_account", return_value={"plan_check_status": "running"}), \
+                     patch.object(plan_check_service.db, "update_account_plan_check") as update, \
+                     patch.object(plan_check_service, "_wait_for_rate_slot") as rate_slot:
+                    plan_check_service._QUEUE_SLOTS.acquire()
+                    result = plan_check_service._run_plan_check(account_id=1, email="fixture@example.test", access_token=token,
+                                                               trigger="manual", proxy=None, timezone_offset_min="-")
+                self.assertEqual(result["ok"], statuses[-1] == 200)
+                self.assertEqual(result["http_status"], statuses[-1])
+                self.assertEqual(result["attempt_count"], len(statuses))
+                self.assertEqual(result["max_attempts"], 3)
+                self.assertEqual([call.kwargs["proxy"] for call in sessions.call_args_list], proxies[:len(statuses)])
+                self.assertEqual(session.session.get.call_count, len(statuses))
+                self.assertEqual(session.session.close.call_count, len(statuses))
+                self.assertEqual(rate_slot.call_count, len(statuses))
+                self.assertEqual([call.kwargs["headers"]["authorization"] for call in session.session.get.call_args_list],
+                                 ["Bearer " + token] * len(statuses))
+                self.assertFalse(result.get("token_expired"))
+                self.assertFalse(result.get("needs_live_check"))
+                self.assertFalse(result.get("account_unusable_code"))
+                if result["ok"]:
+                    self.assertTrue(result["plus_trial_eligible"])
+                else:
+                    self.assertNotIn("current_plan_type", result)
+                    self.assertNotIn("plus_trial_eligible", result)
+                update.assert_called_once()
 
     def test_plan_probe_persists_country_of_retry_proxy(self):
         def check_with_retry(*_args, **kwargs):
