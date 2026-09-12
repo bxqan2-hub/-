@@ -262,7 +262,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_STATIC_CACHE", "file": "roxybrowser.py", "type": "bool", "group": "Roxy流量优化",
-        "label": "共享公开不可变JS/CSS缓存", "help": "仅缓存公开CDN无凭据、无查询参数、带哈希名且声明public immutable的JS/CSS；ChatGPT同源资源正常请求，进入session阶段后停止共享缓存",
+        "label": "共享公开版本化JS/CSS缓存", "help": "仅缓存明确静态路由的版本化public JS/CSS，包括chatgpt.com/cdn/assets/；不要求immutable，登录后继续缓存公共文件；Cookie不保存/回放，设置Cookie的响应、认证和动态配置正常联网",
     },
     {
         "key": "ROXY_TRAFFIC_CAPTURE", "file": "roxybrowser.py", "type": "bool", "group": "Roxy流量优化",
@@ -274,11 +274,11 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_CACHE_DIR", "file": "roxybrowser.py", "type": "str", "group": "Roxy流量优化",
-        "label": "公开缓存目录", "help": "只保存通过隔离校验的公开不可变JS/CSS；Profile自身缓存独立管理，不要指向账号、Cookie或Profile目录",
+        "label": "公开缓存目录", "help": "只保存通过隔离校验的公开版本化JS/CSS；Profile自身缓存独立管理，不要指向账号、Cookie或Profile目录",
     },
     {
         "key": "ROXY_CACHE_MAX_AGE", "file": "roxybrowser.py", "type": "int", "group": "Roxy流量优化",
-        "label": "缓存有效期秒", "help": "默认604800秒（7天）",
+        "label": "缓存有效期秒", "help": "默认86400秒（1天）；同时受服务器max-age/s-maxage剩余有效期约束，避免批次之间重复冷启动",
     },
     {
         "key": "ROXY_CACHE_MAX_ITEM_BYTES", "file": "roxybrowser.py", "type": "int", "group": "Roxy流量优化",

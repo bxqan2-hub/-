@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import base64
 import json
 import tempfile
 import unittest
@@ -19,9 +20,11 @@ from core.browser_traffic import (
 
 ASSET_URL = "https://cdn.openai.com/assets/app.0123456789abcdef.js"
 CSS_URL = "https://cdn.openai.com/assets/site-0123456789abcdef.css"
+APP_ASSET_URL = "https://chatgpt.com/cdn/assets/conversation-small-h1dtzoris1y9588z.js"
+APP_CSS_URL = "https://chatgpt.com/cdn/assets/root-exiuv0yn.css"
 
 
-def _public_headers(mime="application/javascript", cache_control="public, immutable, max-age=3600"):
+def _public_headers(mime="application/javascript", cache_control="public, max-age=3600"):
     return [
         {"name": "Content-Type", "value": mime},
         {"name": "Cache-Control", "value": cache_control},
@@ -141,21 +144,30 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(block_reason("https://chatgpt.com" + path, resource, session_only=True), "")
 
-    def test_install_uses_exact_fetch_media_filter_and_clears_legacy_globs(self):
-        for static_cache, low_traffic, expected_resources in [
-            (True, False, ("SCRIPT", "STYLESHEET")),
-            (False, True, ("MEDIA",)),
-            (True, True, ("SCRIPT", "STYLESHEET", "MEDIA")),
-        ]:
+    def test_install_uses_exact_fetch_asset_and_media_filters_and_clears_legacy_globs(self):
+        for static_cache, low_traffic in ((True, False), (False, True), (True, True)):
             with self.subTest(static_cache=static_cache, low_traffic=low_traffic):
                 optimizer = _optimizer(static_cache=static_cache, low_traffic=low_traffic)
                 optimizer.install()
                 optimizer.driver.execute_cdp_cmd.assert_any_call("Network.setBlockedURLs", {"urls": []})
+                expected = []
+                if static_cache:
+                    for url_pattern in (
+                        "https://cdn.openai.com/assets/*", "https://cdn.openai.com/cdn/assets/*",
+                        "https://cdn.openai.com/_next/static/*", "https://cdn.openai.com/unauth-mweb/assets/*",
+                        "https://chatgpt.com/cdn/assets/*",
+                    ):
+                        for resource in ("SCRIPT", "STYLESHEET"):
+                            expected.append((url_pattern, getattr(optimizer._devtools.network.ResourceType, resource)))
+                if low_traffic:
+                    expected.append(("https://cdn.openai.com/assets/*", optimizer._devtools.network.ResourceType.MEDIA))
                 patterns = optimizer._devtools.fetch.RequestPattern.call_args_list
-                self.assertEqual(len(patterns), len(expected_resources))
-                for pattern, resource in zip(patterns, expected_resources):
-                    self.assertEqual(pattern.kwargs["resource_type"], getattr(optimizer._devtools.network.ResourceType, resource))
-                    self.assertEqual(pattern.kwargs["url_pattern"], "https://cdn.openai.com/assets/*" if resource == "MEDIA" else "https://cdn.openai.com/*")
+                self.assertCountEqual(
+                    [(pattern.kwargs["url_pattern"], pattern.kwargs["resource_type"]) for pattern in patterns],
+                    expected,
+                )
+                for pattern in patterns:
+                    self.assertEqual(pattern.kwargs["request_stage"], optimizer._devtools.fetch.RequestStage.REQUEST)
                 self.assertTrue(optimizer._fetch_enabled)
 
     def test_optional_media_handler_blocks_only_exact_media_request(self):
@@ -170,10 +182,19 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
         optimizer._devtools.fetch.fail_request.assert_not_called()
         optimizer._devtools.fetch.continue_request.assert_called_once_with("fixture-request")
 
-    def test_cache_scope_is_exact_content_addressed_public_cdn(self):
-        self.assertTrue(is_cacheable_request(ASSET_URL, "GET", "script"))
-        self.assertTrue(is_cacheable_request(CSS_URL, "GET", "stylesheet"))
-        self.assertTrue(is_cacheable_request("https://cdn.openai.com:443/_next/static/app.01234567.js", "GET", "script"))
+    def test_cache_scope_is_exact_versioned_public_asset_paths(self):
+        for url, resource in [
+            (ASSET_URL, "script"), (CSS_URL, "stylesheet"),
+            (APP_ASSET_URL, "script"), (APP_CSS_URL, "stylesheet"),
+            ("https://cdn.openai.com:443/_next/static/app.01234567.js", "script"),
+            (APP_ASSET_URL.replace("chatgpt.com", "chatgpt.com:443"), "script"),
+            ("https://chatgpt.com/cdn/assets/a5f68020-e8hhtychj8o2dcvt.js", "script"),
+            ("https://chatgpt.com/cdn/assets/app.01234567.js", "script"),
+            ("https://chatgpt.com/cdn/assets/settings-h1dtzoris1y9588z.js", "script"),
+            ("https://chatgpt.com/cdn/assets/app." + "a" * 64 + ".js", "script"),
+        ]:
+            with self.subTest(url=url, resource=resource):
+                self.assertTrue(is_cacheable_request(url, "GET", resource))
         rejected = [
             ASSET_URL.replace("cdn.openai.com", "chatgpt.com"),
             ASSET_URL.replace("cdn.openai.com", "auth.openai.com"),
@@ -192,36 +213,67 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
             ASSET_URL.replace("app.0123456789abcdef.js", "app.js"),
             ASSET_URL.replace("app.0123456789abcdef.js", "app.0123456.js"),
             ASSET_URL.replace("app.0123456789abcdef.js", "app0123456789abcdef.js"),
+            ASSET_URL.replace("app.0123456789abcdef.js", "app.0123456789abcdef.runtime.js"),
             ASSET_URL.replace("app.0123456789abcdef.js", "service-worker.0123456789abcdef.js"),
+            APP_ASSET_URL.replace("chatgpt.com", "www.chatgpt.com"),
+            APP_ASSET_URL.replace("chatgpt.com", "sub.chatgpt.com"),
+            APP_ASSET_URL.replace("chatgpt.com", "chatgpt.com:8443"),
+            APP_ASSET_URL.replace("/cdn/assets/", "/assets/"),
+            APP_ASSET_URL.replace("/cdn/assets/", "/_next/static/"),
+            APP_ASSET_URL.replace("/cdn/assets/", "/api/auth/"),
+            APP_ASSET_URL.replace("/cdn/assets/", "/backend-api/"),
+            APP_ASSET_URL.replace("/cdn/assets/", "/cdn/assets/../api/"),
+            APP_ASSET_URL.replace("/cdn/assets/", "/cdn/assets/%2e%2e/api/"),
+            APP_ASSET_URL.replace("/cdn/assets/", "/cdn/assets/challenge/"),
+            APP_ASSET_URL + "?identity=fixture", APP_ASSET_URL + "?", APP_ASSET_URL + "#fixture", APP_ASSET_URL + "#",
+            APP_ASSET_URL.replace("h1dtzoris1y9588z", "h1dtzoris1y9588"),
+            APP_ASSET_URL.replace("h1dtzoris1y9588z", "H1DTZORIS1Y9588Z"),
+            APP_ASSET_URL.replace("h1dtzoris1y9588z", "a" * 65),
+            APP_ASSET_URL.replace("conversation-small-h1dtzoris1y9588z.js", "settings.js"),
+            APP_ASSET_URL.replace("conversation-small-h1dtzoris1y9588z.js", "features.js"),
+            APP_ASSET_URL.replace("conversation-small-h1dtzoris1y9588z.js", "manifest.js"),
+            APP_ASSET_URL.replace("conversation-small-h1dtzoris1y9588z.js", "sentinel.js"),
+            APP_ASSET_URL.replace("conversation-small-h1dtzoris1y9588z.js", "h1dtzoris1y9588z.js"),
+            APP_ASSET_URL.replace("h1dtzoris1y9588z", "settings"),
+            APP_ASSET_URL.replace("conversation-small", "sentinel"),
+            APP_ASSET_URL.replace("conversation-small", "captcha"),
+            APP_ASSET_URL.replace("conversation-small", "challenge"),
         ]
         for url in rejected:
             with self.subTest(url=url):
                 self.assertFalse(is_cacheable_request(url, "GET", "script"))
-        self.assertFalse(is_cacheable_request(ASSET_URL, "POST", "script"))
+        for url, resource in ((ASSET_URL, "script"), (APP_ASSET_URL, "script"), (APP_CSS_URL, "stylesheet")):
+            with self.subTest(url=url):
+                self.assertFalse(is_cacheable_request(url, "POST", resource))
+                self.assertFalse(is_cacheable_request(url, "GET", "fetch"))
         self.assertFalse(is_cacheable_request(ASSET_URL, "GET", "stylesheet"))
         self.assertFalse(is_cacheable_request(CSS_URL, "GET", "script"))
-        self.assertFalse(is_cacheable_request(ASSET_URL, "GET", "fetch"))
+        self.assertFalse(is_cacheable_request(APP_ASSET_URL, "GET", "stylesheet"))
+        self.assertFalse(is_cacheable_request(APP_CSS_URL, "GET", "script"))
 
-    def test_credential_conditional_range_and_identity_headers_stay_live(self):
-        for name, value in [
-            ("Cookie", "sid=fixture-A"), ("Authorization", "Bearer fixture"),
-            ("Proxy-Authorization", "Basic fixture"), ("Range", "bytes=0-1"),
-            ("If-None-Match", '"fixture"'), ("If-Modified-Since", "fixture"),
-            ("If-Range", '"fixture"'), ("X-Device-ID", "fixture-A"),
-            ("X-Session-ID", "fixture-A"), ("X-OpenAI-Token", "fixture-A"),
-            ("Cache-Control", "no-cache"), ("Cache-Control", "no-store"),
-            ("Cache-Control", "max-age=0"), ("Cache-Control", 'max-age = "0"'),
-            ("Pragma", "no-cache"),
-        ]:
-            with self.subTest(header=name, value=value):
-                self.assertFalse(is_cacheable_request(ASSET_URL, "GET", "script", {name: value}))
+    def test_only_cookie_is_permitted_on_already_qualified_public_assets(self):
+        for url in (ASSET_URL, APP_ASSET_URL):
+            self.assertTrue(is_cacheable_request(url, "GET", "script", {"Cookie": "sid=fixture-A"}))
+            for name, value in [
+                ("Authorization", "Bearer fixture"), ("Proxy-Authorization", "Basic fixture"),
+                ("Range", "bytes=0-1"), ("If-None-Match", '"fixture"'), ("If-Modified-Since", "fixture"),
+                ("If-Range", '"fixture"'), ("X-Device-ID", "fixture-A"),
+                ("X-Session-ID", "fixture-A"), ("X-OpenAI-Token", "fixture-A"),
+                ("Cache-Control", "no-cache"), ("Cache-Control", "no-store"),
+                ("Cache-Control", "max-age=0"), ("Cache-Control", 'max-age = "0"'),
+                ("Pragma", "no-cache"),
+            ]:
+                with self.subTest(url=url, header=name, value=value):
+                    self.assertFalse(is_cacheable_request(url, "GET", "script", {"Cookie": "sid=fixture-A", name: value}))
 
-    def test_public_immutable_fresh_mime_and_nonvarying_response_required(self):
+    def test_public_fresh_mime_and_nonvarying_response_required(self):
         self.assertTrue(is_cacheable_response(_public_headers(), resource_type="script"))
+        self.assertTrue(is_cacheable_response(_public_headers(cache_control="public, max-age=2592000"), resource_type="script"))
+        self.assertTrue(is_cacheable_response(_public_headers(cache_control="public, immutable, max-age=3600"), resource_type="script"))
         self.assertTrue(is_cacheable_response(_public_headers("text/css; charset=utf-8"), resource_type="stylesheet"))
         self.assertTrue(is_cacheable_response(_public_headers() + [{"name": "Vary", "value": "Accept-Encoding"}]))
         for control in [
-            "public, max-age=3600", "immutable, max-age=3600", "public, immutable",
+            "max-age=3600", "immutable, max-age=3600", "public, immutable", "public",
             "public, immutable, max-age=0", "public, immutable, max-age=-1",
             "public, immutable, max-age=fixture", "public, immutable, max-age=3600, s-maxage=0",
             "public, immutable, max-age=3600, private", "public, immutable, max-age=3600, no-store",
@@ -267,19 +319,24 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
 
 
 class StaticCacheTests(unittest.TestCase):
-    def test_cookie_bearing_requests_never_read_or_join_shared_cache(self):
-        for fixture in ("fixture-A", "fixture-B"):
-            with self.subTest(profile=fixture):
+    def test_dynamic_cookie_or_authorization_requests_never_read_or_join_shared_cache(self):
+        for url, headers in [
+            ("https://chatgpt.com/api/auth/session", {"Cookie": "sid=fixture-A"}),
+            ("https://chatgpt.com/backend-api/accounts/check", {"Cookie": "sid=fixture-B"}),
+            (APP_ASSET_URL, {"Cookie": "sid=fixture-A", "Authorization": "Bearer fixture"}),
+            (APP_ASSET_URL + "?session=fixture", {"Cookie": "sid=fixture-B"}),
+        ]:
+            with self.subTest(url=url, headers=headers):
                 optimizer = _optimizer()
                 optimizer.cache = MagicMock()
-                optimizer._on_request_paused(_event(headers={"Cookie": "sid=" + fixture}, request_id=fixture))
+                optimizer._on_request_paused(_event(url, headers=headers))
                 optimizer.cache.read.assert_not_called()
                 optimizer.cache.claim_load.assert_not_called()
                 optimizer.cache.wait_for_load.assert_not_called()
                 optimizer._devtools.fetch.fulfill_request.assert_not_called()
-                optimizer._devtools.fetch.continue_request.assert_called_once_with(fixture)
+                optimizer._devtools.fetch.continue_request.assert_called_once_with("fixture-request")
 
-    def test_application_origin_never_replays_even_when_cdp_omits_cookie(self):
+    def test_application_nonasset_paths_never_replay_even_when_cdp_omits_cookie(self):
         optimizer = _optimizer()
         optimizer.cache = MagicMock()
         optimizer._on_request_paused(_event(ASSET_URL.replace("cdn.openai.com", "chatgpt.com")))
@@ -298,12 +355,42 @@ class StaticCacheTests(unittest.TestCase):
         for call in optimizer._devtools.fetch.continue_request.call_args_list:
             self.assertTrue(call.kwargs["intercept_response"])
 
-    def test_cache_instances_share_only_fresh_immutable_public_bytes(self):
+    def test_cache_instances_share_only_fresh_public_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             first = StaticResourceCache(Path(tmp), max_age=3600, max_item_bytes=1024)
             second = StaticResourceCache(Path(tmp), max_age=3600, max_item_bytes=1024)
             self.assertTrue(first.write(ASSET_URL, status=200, phrase="OK", headers=_public_headers(), body=b"public-fixture"))
             self.assertEqual(second.read(ASSET_URL)["body"], b"public-fixture")
+
+    def test_distinct_profile_cookies_share_only_validated_public_versioned_bytes(self):
+        for url, resource, mime, body in (
+            (APP_ASSET_URL, "script", "application/javascript", b"console.log('public bundle');"),
+            (APP_CSS_URL, "stylesheet", "text/css; charset=utf-8", b".public-shell{display:block}"),
+        ):
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as tmp:
+                first = _optimizer(tmp)
+                second = _optimizer(tmp)
+                first_cookie = {"Cookie": "sid=profile-A; __cf_bm=fixture-A"}
+                second_cookie = {"Cookie": "sid=profile-B; __cf_bm=fixture-B"}
+                headers = _public_headers(mime, "public, max-age=2592000")
+                first._on_request_paused(_event(url, request_id="profile-A", headers=first_cookie, resource=resource))
+                first._devtools.fetch.continue_request.assert_called_once_with("profile-A", intercept_response=True)
+                self.assertEqual(first._loading_requests, {"profile-A": url})
+                first._connection.execute.return_value = (body.decode("utf-8"), False)
+                first._on_request_paused(_event(url, request_id="profile-A", headers=first_cookie, resource=resource, response_headers=headers))
+                self.assertEqual(first._stats["cache_writes"], 1)
+                self.assertEqual(first._loading_requests, {})
+                second._on_request_paused(_event(url, request_id="profile-B", headers=second_cookie, resource=resource))
+                self.assertEqual(second._stats["cache_hits"], 1)
+                self.assertEqual(second._stats["cache_misses"], 0)
+                second._devtools.fetch.continue_request.assert_not_called()
+                replay = second._devtools.fetch.fulfill_request.call_args.kwargs
+                self.assertEqual(base64.b64decode(replay["body"]), body)
+                replay_headers = {item["name"].lower(): item["value"] for item in replay["response_headers"]}
+                self.assertEqual(replay_headers, {"content-type": mime, "cache-control": "no-store"})
+                metadata = next(Path(tmp).glob("*.json")).read_text(encoding="utf-8")
+                for identity in ("profile-A", "profile-B", "fixture-A", "fixture-B", "__cf_bm"):
+                    self.assertNotIn(identity, metadata)
 
     def test_cache_miss_waiter_receives_only_validated_public_asset(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -395,7 +482,7 @@ class StaticCacheTests(unittest.TestCase):
                     {"status": 404}, {"saved_at": 1001}, {"expires_at": 1e20}, {"expires_at": float("nan")},
                     {"headers": _public_headers("text/html")},
                     {"headers": _public_headers("text/css")},
-                    {"headers": _public_headers(cache_control="public, max-age=3600")},
+                    {"headers": _public_headers(cache_control="max-age=3600")},
                     {"headers": _public_headers() + [{"name": "Vary", "value": "Cookie"}]},
                     {"headers": _public_headers() + [{"name": "Set-Cookie", "value": "sid=fixture"}]},
                 ]
@@ -441,23 +528,50 @@ class StaticCacheTests(unittest.TestCase):
                 optimizer.cache.write.assert_not_called()
                 optimizer._devtools.fetch.continue_response.assert_called_once_with("fixture-request")
 
-    def test_session_only_stops_shared_reads_writes_and_releases_load(self):
-        optimizer = _optimizer()
-        optimizer.cache = MagicMock()
-        optimizer._loading_requests["pending"] = ASSET_URL
-        optimizer.set_session_only(True)
-        optimizer.cache.release_load.assert_called_once_with(ASSET_URL)
-        optimizer.driver.execute_cdp_cmd.assert_not_called()
-        optimizer._on_request_paused(_event())
-        optimizer.cache.read.assert_not_called()
-        optimizer.cache.claim_load.assert_not_called()
-        optimizer._devtools.fetch.continue_request.assert_called_once_with("fixture-request")
-        optimizer._on_request_paused(_event(response_headers=_public_headers()))
-        optimizer._devtools.fetch.get_response_body.assert_not_called()
-        optimizer.cache.write.assert_not_called()
-        optimizer._devtools.fetch.continue_response.assert_called_once_with("fixture-request")
+    def test_cookie_setting_public_response_stays_in_its_profile(self):
+        for cookie in ("sid=fixture-A", "__cf_bm=fixture-A; Path=/; Secure; HttpOnly"):
+            with self.subTest(cookie=cookie), tempfile.TemporaryDirectory() as tmp:
+                optimizer = _optimizer(tmp)
+                optimizer._on_request_paused(_event(APP_ASSET_URL))
+                self.assertEqual(optimizer._loading_requests, {"fixture-request": APP_ASSET_URL})
+                optimizer._on_request_paused(_event(
+                    APP_ASSET_URL,
+                    response_headers=_public_headers(cache_control="public, max-age=2592000") + [
+                        {"name": "Set-Cookie", "value": cookie},
+                    ],
+                ))
+                optimizer._devtools.fetch.get_response_body.assert_not_called()
+                optimizer._devtools.fetch.fulfill_request.assert_not_called()
+                optimizer._devtools.fetch.continue_response.assert_called_once_with("fixture-request")
+                self.assertEqual(optimizer._stats["cache_writes"], 0)
+                self.assertEqual(optimizer._loading_requests, {})
+                self.assertIsNone(optimizer.cache.read(APP_ASSET_URL))
+                self.assertFalse(list(Path(tmp).glob("*.bin")))
 
-    def test_session_only_transition_during_wait_never_replays(self):
+    def test_session_only_keeps_public_cache_reads_writes_and_pending_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            optimizer = _optimizer(tmp)
+            optimizer._on_request_paused(_event(APP_ASSET_URL, headers={"Cookie": "sid=fixture-A"}))
+            self.assertEqual(optimizer._loading_requests, {"fixture-request": APP_ASSET_URL})
+            optimizer.set_session_only(True)
+            self.assertTrue(optimizer._session_only)
+            self.assertEqual(optimizer._loading_requests, {"fixture-request": APP_ASSET_URL})
+            self.assertFalse(optimizer.cache.claim_load(APP_ASSET_URL))
+            optimizer.driver.execute_cdp_cmd.assert_not_called()
+            optimizer._connection.execute.return_value = ("public-fixture", False)
+            optimizer._on_request_paused(_event(APP_ASSET_URL, headers={"Cookie": "sid=fixture-A"}, response_headers=_public_headers()))
+            self.assertEqual(optimizer._stats["cache_writes"], 1)
+            self.assertEqual(optimizer._loading_requests, {})
+            self.assertEqual(optimizer.cache.read(APP_ASSET_URL)["body"], b"public-fixture")
+            optimizer._on_request_paused(_event(APP_ASSET_URL, request_id="session-asset", headers={"Cookie": "sid=fixture-A"}))
+            self.assertEqual(optimizer._stats["cache_hits"], 1)
+            optimizer._devtools.fetch.continue_request.reset_mock()
+            optimizer._devtools.fetch.fulfill_request.reset_mock()
+            optimizer._on_request_paused(_event("https://chatgpt.com/api/auth/session", request_id="session-api", headers={"Cookie": "sid=fixture-A"}, resource="fetch"))
+            optimizer._devtools.fetch.fulfill_request.assert_not_called()
+            optimizer._devtools.fetch.continue_request.assert_called_once_with("session-api")
+
+    def test_session_only_transition_during_wait_preserves_public_asset_replay(self):
         optimizer = _optimizer()
         optimizer.cache = MagicMock()
         optimizer.cache.read.return_value = None
@@ -466,12 +580,12 @@ class StaticCacheTests(unittest.TestCase):
             optimizer.set_session_only(True)
             return {"body": b"public-fixture", "headers": _public_headers(), "status": 200, "phrase": "OK", "expires_at": 1e20}
         optimizer.cache.wait_for_load.side_effect = wait
-        optimizer._on_request_paused(_event())
-        optimizer._devtools.fetch.fulfill_request.assert_not_called()
-        optimizer._devtools.fetch.continue_request.assert_called_once_with("fixture-request")
-        self.assertEqual(optimizer._stats["cache_hits"], 0)
+        optimizer._on_request_paused(_event(APP_ASSET_URL, headers={"Cookie": "sid=fixture-A"}))
+        optimizer._devtools.fetch.fulfill_request.assert_called_once()
+        optimizer._devtools.fetch.continue_request.assert_not_called()
+        self.assertEqual(optimizer._stats["cache_hits"], 1)
 
-    def test_session_only_transition_during_body_read_prevents_write(self):
+    def test_session_only_transition_during_body_read_preserves_public_asset_write(self):
         optimizer = _optimizer()
         optimizer.cache = MagicMock()
         marker = object()
@@ -481,8 +595,8 @@ class StaticCacheTests(unittest.TestCase):
                 optimizer.set_session_only(True)
                 return "public-fixture", False
         optimizer._connection.execute.side_effect = execute
-        optimizer._on_request_paused(_event(response_headers=_public_headers()))
-        optimizer.cache.write.assert_not_called()
+        optimizer._on_request_paused(_event(APP_ASSET_URL, headers={"Cookie": "sid=fixture-A"}, response_headers=_public_headers()))
+        optimizer.cache.write.assert_called_once_with(APP_ASSET_URL, status=200, phrase="OK", headers=_public_headers(), body=b"public-fixture")
         optimizer._devtools.fetch.continue_response.assert_called_once_with("fixture-request")
 
     def test_entry_expiring_during_wait_continues_live(self):
@@ -511,57 +625,63 @@ class StaticCacheTests(unittest.TestCase):
         optimizer._devtools.fetch.continue_response.assert_called_once_with("fixture-request")
         optimizer.cache.release_load.assert_called_once_with(ASSET_URL)
 
-    def test_finalize_prevents_late_callbacks_from_rebuilding_leases(self):
-        optimizer = _optimizer()
-        optimizer.cache = MagicMock()
-        optimizer._loading_requests["pending"] = ASSET_URL
-        optimizer.finalize()
-        self.assertFalse(optimizer._fetch_enabled)
-        optimizer.cache.release_load.assert_called_once_with(ASSET_URL)
-        optimizer._on_request_paused(_event())
-        optimizer._on_request_paused(_event(response_headers=_public_headers()))
-        optimizer.cache.read.assert_not_called()
-        optimizer.cache.claim_load.assert_not_called()
-        optimizer.cache.write.assert_not_called()
-        optimizer._devtools.fetch.fulfill_request.assert_not_called()
-        optimizer._devtools.fetch.get_response_body.assert_not_called()
-        self.assertEqual(optimizer._loading_requests, {})
-
-    def test_finalize_during_wait_prevents_late_cache_replay_or_continue(self):
-        cached = {"body": b"public-fixture", "headers": _public_headers(), "status": 200, "phrase": "OK", "expires_at": 1e20}
-        for wait_result in (cached, None):
-            with self.subTest(cache_hit=wait_result is not None):
+    def test_shutdown_prevents_late_callbacks_from_rebuilding_leases(self):
+        for shutdown in ("finalize", "recovery"):
+            with self.subTest(shutdown=shutdown):
                 optimizer = _optimizer()
                 optimizer.cache = MagicMock()
-                optimizer.cache.read.return_value = None
-                optimizer.cache.claim_load.return_value = False
-                def wait(*args, **kwargs):
-                    optimizer.finalize()
-                    return wait_result
-                optimizer.cache.wait_for_load.side_effect = wait
+                optimizer._loading_requests["pending"] = ASSET_URL
+                optimizer.finalize() if shutdown == "finalize" else optimizer.disable_for_recovery("fixture_recovery")
+                self.assertFalse(optimizer._fetch_enabled)
+                optimizer.cache.release_load.assert_called_once_with(ASSET_URL)
                 optimizer._on_request_paused(_event())
+                optimizer._on_request_paused(_event(response_headers=_public_headers()))
+                optimizer.cache.read.assert_not_called()
+                optimizer.cache.claim_load.assert_not_called()
+                optimizer.cache.write.assert_not_called()
                 optimizer._devtools.fetch.fulfill_request.assert_not_called()
-                optimizer._devtools.fetch.continue_request.assert_not_called()
-                optimizer._devtools.fetch.continue_response.assert_not_called()
-                optimizer._connection.execute.assert_called_once_with(optimizer._devtools.fetch.disable.return_value)
-                self.assertEqual(optimizer._stats["cache_hits"], 0)
+                optimizer._devtools.fetch.get_response_body.assert_not_called()
                 self.assertEqual(optimizer._loading_requests, {})
 
-    def test_finalize_during_body_read_prevents_write_or_continue(self):
-        optimizer = _optimizer()
-        optimizer.cache = MagicMock()
-        marker = object()
-        optimizer._devtools.fetch.get_response_body.return_value = marker
-        def execute(command):
-            if command is marker:
-                optimizer.finalize()
-                return "public-fixture", False
-        optimizer._connection.execute.side_effect = execute
-        optimizer._on_request_paused(_event(response_headers=_public_headers()))
-        optimizer.cache.write.assert_not_called()
-        optimizer._devtools.fetch.continue_response.assert_not_called()
-        self.assertEqual(optimizer._connection.execute.call_count, 2)
-        self.assertFalse(optimizer._fetch_enabled)
+    def test_shutdown_during_wait_prevents_late_cache_replay_or_continue(self):
+        for shutdown in ("finalize", "recovery"):
+            with self.subTest(shutdown=shutdown):
+                cached = {"body": b"public-fixture", "headers": _public_headers(), "status": 200, "phrase": "OK", "expires_at": 1e20}
+                for wait_result in (cached, None):
+                    with self.subTest(cache_hit=wait_result is not None):
+                        optimizer = _optimizer()
+                        optimizer.cache = MagicMock()
+                        optimizer.cache.read.return_value = None
+                        optimizer.cache.claim_load.return_value = False
+                        def wait(*args, **kwargs):
+                            optimizer.finalize() if shutdown == "finalize" else optimizer.disable_for_recovery("fixture_recovery")
+                            return wait_result
+                        optimizer.cache.wait_for_load.side_effect = wait
+                        optimizer._on_request_paused(_event())
+                        optimizer._devtools.fetch.fulfill_request.assert_not_called()
+                        optimizer._devtools.fetch.continue_request.assert_not_called()
+                        optimizer._devtools.fetch.continue_response.assert_not_called()
+                        optimizer._connection.execute.assert_called_once_with(optimizer._devtools.fetch.disable.return_value)
+                        self.assertEqual(optimizer._stats["cache_hits"], 0)
+                        self.assertEqual(optimizer._loading_requests, {})
+
+    def test_shutdown_during_body_read_prevents_write_or_continue(self):
+        for shutdown in ("finalize", "recovery"):
+            with self.subTest(shutdown=shutdown):
+                optimizer = _optimizer()
+                optimizer.cache = MagicMock()
+                marker = object()
+                optimizer._devtools.fetch.get_response_body.return_value = marker
+                def execute(command):
+                    if command is marker:
+                        optimizer.finalize() if shutdown == "finalize" else optimizer.disable_for_recovery("fixture_recovery")
+                        return "public-fixture", False
+                optimizer._connection.execute.side_effect = execute
+                optimizer._on_request_paused(_event(response_headers=_public_headers()))
+                optimizer.cache.write.assert_not_called()
+                optimizer._devtools.fetch.continue_response.assert_not_called()
+                self.assertEqual(optimizer._connection.execute.call_count, 2)
+                self.assertFalse(optimizer._fetch_enabled)
 
 
 class PerformanceSummaryTests(unittest.TestCase):

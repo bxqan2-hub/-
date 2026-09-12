@@ -28,7 +28,7 @@ REPLAY_ALLOWED_HEADERS = {
     "cross-origin-resource-policy", "x-content-type-options",
 }
 CACHE_SCHEMA_VERSION = 3
-CACHE_PRIVATE_REQUEST_HEADERS = {"authorization", "cookie", "proxy-authorization", "range"}
+CACHE_PRIVATE_REQUEST_HEADERS = {"authorization", "proxy-authorization", "range"}
 CACHE_PRIVATE_RESPONSE_HEADERS = {
     "set-cookie", "www-authenticate", "authentication-info", "proxy-authenticate",
     "proxy-authentication-info", "clear-site-data", "accept-ch", "critical-ch",
@@ -44,12 +44,10 @@ SAFE_VARY_HEADERS = {"accept-encoding"}
 # workers and Profile/browser concurrency remain unchanged.  A short timeout
 # lets a stalled Profile fall back to its own live request.
 CACHE_LOAD_WAIT_SECONDS = 8.0
-PUBLIC_STATIC_PATH_PREFIXES = (
-    "/assets/",
-    "/cdn/assets/",
-    "/_next/static/",
-    "/unauth-mweb/assets/",
-)
+PUBLIC_STATIC_PATH_PREFIXES = {
+    PUBLIC_CDN_HOST: ("/assets/", "/cdn/assets/", "/_next/static/", "/unauth-mweb/assets/"),
+    "chatgpt.com": ("/cdn/assets/",),
+}
 
 # Chromium keeps Network-domain event data until the DevTools client drains
 # it.  A registration Profile only needs small request metadata and the
@@ -111,18 +109,19 @@ def block_reason(url: str, resource_type: str = "", *, session_only: bool = Fals
 
 
 def is_cacheable_request(url: str, method: str, resource_type: str, headers=None) -> bool:
-    """Share only credential-free, content-addressed files on the exact public CDN.
+    """Share only versioned public JS/CSS on explicit static asset routes.
 
-    Same-origin app/auth scripts, config, challenges and authenticated traffic
-    stay in their own Profile's network stack and native HTTP cache. Identical
-    public source bytes do not imply identical per-browser execution state.
+    Ambient Cookie headers alone do not make a public file private; neither
+    request cookies nor response state enter the cache. Response public/TTL,
+    MIME, Set-Cookie and Vary gates must pass before any body is shared.
+    Authentication, configuration and every other same-origin path stay live.
     """
     resource = _resource_name(resource_type)
     if str(method or "").upper() != "GET" or resource not in STATIC_RESOURCE_MIME_TYPES:
         return False
     try:
         parsed = urlparse(str(url or ""))
-        if (parsed.scheme != "https" or parsed.hostname != PUBLIC_CDN_HOST
+        if (parsed.scheme != "https" or parsed.hostname not in PUBLIC_STATIC_PATH_PREFIXES
                 or parsed.port not in (None, 443) or parsed.username is not None
                 or parsed.password is not None or parsed.query or parsed.fragment):
             return False
@@ -132,14 +131,14 @@ def is_cacheable_request(url: str, method: str, resource_type: str, headers=None
     if ("%" in path or "\\" in path or "?" in str(url) or "#" in str(url)
             or any(segment in {".", "..", "sentinel", "recaptcha", "hcaptcha", "captcha", "challenge"} for segment in path.lower().split("/"))
             or "/cdn-cgi/challenge-platform/" in path.lower()
-            or not path.startswith(PUBLIC_STATIC_PATH_PREFIXES)):
+            or not path.startswith(PUBLIC_STATIC_PATH_PREFIXES[parsed.hostname])):
         return False
     extension = ".js" if resource == "script" else ".css"
     filename = path.rsplit("/", 1)[-1]
     if (not filename.endswith(extension)
-            or not re.search(r"(?:^|[._-])[0-9a-fA-F]{8,}(?=[._-]|$)", filename[:-len(extension)])):
+            or not re.search(r"(?:^|[._-])[0-9a-fA-F]{8,64}$|[._-](?=[a-z0-9]*[0-9])(?:[a-z0-9]{8}|[a-z0-9]{16})$", filename[:-len(extension)])):
         return False
-    if any(marker in filename.lower() for marker in ("service-worker", "serviceworker", "sw.")):
+    if any(marker in filename.lower() for marker in ("service-worker", "serviceworker", "sw.", "sentinel", "captcha", "challenge")):
         return False
     request_headers = _header_values(headers)
     if (set(request_headers) & CACHE_PRIVATE_REQUEST_HEADERS
@@ -163,7 +162,7 @@ def _cache_freshness_seconds(headers, *, now: float | None = None) -> float:
         if not name or name in directives:
             return 0.0
         directives[name] = value.strip().strip('"')
-    if (not {"public", "immutable"}.issubset(directives)
+    if ("public" not in directives
             or set(directives) & {"private", "no-cache", "no-store", "must-revalidate", "proxy-revalidate"}):
         return 0.0
     lifetime = directives.get("s-maxage", directives.get("max-age", ""))
@@ -186,7 +185,7 @@ def _cache_freshness_seconds(headers, *, now: float | None = None) -> float:
 
 
 def is_cacheable_response(headers, *, resource_type: str = "") -> bool:
-    """Require an immutable, fresh, non-varying JS/CSS public representation."""
+    """Require a fresh, non-varying JS/CSS public representation."""
     values = _header_values(headers)
     if set(values) & CACHE_PRIVATE_RESPONSE_HEADERS or _cache_freshness_seconds(headers) <= 0:
         return False
@@ -523,13 +522,10 @@ class RoxyTrafficOptimizer:
             self._install_fetch_cache()
 
     def set_session_only(self, enabled: bool = True) -> None:
-        # Keep the application shell available for session/password/MFA steps.
-        # This existing phase marker now stops shared cache reads and writes.
+        # Only a phase marker: password/MFA still need the application shell.
+        # Public versioned files remain reusable; session APIs never qualify.
         with self._lock:
             self._session_only = bool(enabled)
-            pending = list(self._loading_requests) if enabled else []
-        for request_id in pending:
-            self._release_loading_request(request_id)
 
     def disable_for_recovery(self, reason: str) -> None:
         """Restore normal networking when optimization correlates with a flow failure."""
@@ -563,11 +559,13 @@ class RoxyTrafficOptimizer:
             devtools, connection = self.driver.start_devtools()
             patterns = []
             if self.static_cache_enabled:
-                for resource in (devtools.network.ResourceType.SCRIPT, devtools.network.ResourceType.STYLESHEET):
-                    patterns.append(devtools.fetch.RequestPattern(
-                        url_pattern="https://cdn.openai.com/*", resource_type=resource,
-                        request_stage=devtools.fetch.RequestStage.REQUEST,
-                    ))
+                for host, prefixes in PUBLIC_STATIC_PATH_PREFIXES.items():
+                    for prefix in prefixes:
+                        for resource in (devtools.network.ResourceType.SCRIPT, devtools.network.ResourceType.STYLESHEET):
+                            patterns.append(devtools.fetch.RequestPattern(
+                                url_pattern=f"https://{host}{prefix}*", resource_type=resource,
+                                request_stage=devtools.fetch.RequestStage.REQUEST,
+                            ))
             if self.low_traffic:
                 patterns.append(devtools.fetch.RequestPattern(
                     url_pattern="https://cdn.openai.com/assets/*", resource_type=devtools.network.ResourceType.MEDIA,
@@ -610,7 +608,7 @@ class RoxyTrafficOptimizer:
             if self.low_traffic and block_reason(url, resource):
                 connection.execute(devtools.fetch.fail_request(request_id, devtools.network.ErrorReason.BLOCKED_BY_CLIENT))
                 return
-            if (self._session_only or not self.static_cache_enabled or not self._fetch_enabled
+            if (not self.static_cache_enabled or not self._fetch_enabled
                     or not is_cacheable_request(url, method, resource, getattr(event.request, "headers", None))):
                 connection.execute(devtools.fetch.continue_request(request_id))
                 return
@@ -637,7 +635,7 @@ class RoxyTrafficOptimizer:
                 if not self._fetch_enabled:
                     self._release_loading_request(request_id, claimed_url)
                     return
-                if self._session_only or not self.static_cache_enabled:
+                if not self.static_cache_enabled:
                     self._release_loading_request(request_id, claimed_url)
                     connection.execute(devtools.fetch.continue_request(request_id))
                     return
@@ -664,7 +662,7 @@ class RoxyTrafficOptimizer:
             if not self._fetch_enabled:
                 return
             # Phase changes/expiry may happen during disk I/O or a cold wait.
-            if (self._session_only or not self.static_cache_enabled
+            if (not self.static_cache_enabled
                     or time.time() >= cached["expires_at"]):
                 connection.execute(devtools.fetch.continue_request(request_id))
                 return
@@ -701,14 +699,14 @@ class RoxyTrafficOptimizer:
             method = str(getattr(event.request, "method", "") or "")
             resource = _resource_name(event.resource_type)
             status = int(event.response_status_code or 0)
-            if (not self._session_only and self.static_cache_enabled and self._fetch_enabled and status == 200
+            if (self.static_cache_enabled and self._fetch_enabled and status == 200
                     and is_cacheable_request(url, method, resource, getattr(event.request, "headers", None))
                     and is_cacheable_response(event.response_headers or [], resource_type=resource)):
                 payload, encoded = connection.execute(devtools.fetch.get_response_body(request_id))
                 body = base64.b64decode(payload) if encoded else str(payload).encode("utf-8")
                 with self._lock:
                     # Recheck after get_response_body yields to another callback.
-                    if not self._session_only and self.static_cache_enabled and self._fetch_enabled:
+                    if self.static_cache_enabled and self._fetch_enabled:
                         if self.cache.write(
                             url,
                             status=status,

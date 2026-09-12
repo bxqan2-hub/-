@@ -341,3 +341,11 @@
 - 删除粗粒度 URL 黑名单，用已有 Fetch handler 精确处理公共 CDN 可选媒体；不再整域拦截 Statsig/feature gates、身份提供方、图片/字体/manifest。session 标记只停止共享缓存，不阻断后续密码/MFA 应用壳；不修改独立 Profile/指纹/出口边界。
 - 此节取代此前“Cookie 公共候选可共享”及宽域静态缓存的当前实现说明；2026-09-03 报告保留为历史证据。密码成功 checkpoint、邮箱匹配、同窗 Token、enroll/activate 成功确认与只读校验分离已复核。
 - Finding → Path、上游 hash、验证与八项交付自检见 `docs/2026-09-12_流量缓存会话隔离修复-report.md`。
+
+## 本次按教程恢复折中公共静态缓存（2026-09-12 下午）
+
+- 已读取用户 `注册流量优化复现与使用教程.docx`，把附件作为技术参考；采用公开静态分层、冷/热对照和计量，不照搬其动态配置/字体/图片整类拦截及登录后应用壳屏蔽。
+- 重新获取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的流量、Roxy 配置和注册文件，均 HTTP 200，版本不变。本地现场 7 条汇总为零候选，主要流量来自被上一版排除的 `chatgpt.com/cdn/assets/`，响应 public/max-age 但无 immutable。
+- 原路径恢复该精确静态前缀的版本化 JS/CSS 缓存；Cookie 只作为公共请求的环境头，不保存/回放；Set-Cookie、私有、变体、认证与动态配置保持实时。登录阶段仍共享已校验公共文件，恢复/终态边界保留。现有 TTL 从运行值 399 秒调为 86400 秒，源站剩余 TTL 仍约束。
+- 真实双独立浏览器环境 3 文件冷写成功、热命中 3/3：网络 1,871,666 → 0 字节；只验证公共资源，不自动注册。全量 `992 passed, 1 deselected, 1 warning, 284 subtests passed`，密码/MFA边界复核。
+- 此节取代上午仅 cdn.openai.com/必须 immutable/session 停缓存的当前策略说明；完整证据、hash、加载结果与 R8 见 `docs/2026-09-12_公共静态缓存折中优化-report.md`。
