@@ -258,11 +258,11 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_LOW_TRAFFIC", "file": "roxybrowser.py", "type": "bool", "group": "Roxy流量优化",
-        "label": "省流模式", "help": "拦截明确非必要的遥测、重资源和可选登录入口；安全验证与未知请求默认放行",
+        "label": "轻量省流模式", "help": "仅拦截公共CDN静态音视频：https://cdn.openai.com/assets/ 下无查询参数的.mp3/.mp4/.ogg/.webm；遥测、功能配置、登录入口、字体、图片和安全验证正常请求，流量会高于旧策略",
     },
     {
         "key": "ROXY_STATIC_CACHE", "file": "roxybrowser.py", "type": "bool", "group": "Roxy流量优化",
-        "label": "共享公开JS/CSS缓存", "help": "仅缓存一方公开GET脚本/样式，不共享Cookie、Session或Profile",
+        "label": "共享公开不可变JS/CSS缓存", "help": "仅缓存公开CDN无凭据、无查询参数、带哈希名且声明public immutable的JS/CSS；ChatGPT同源资源正常请求，进入session阶段后停止共享缓存",
     },
     {
         "key": "ROXY_TRAFFIC_CAPTURE", "file": "roxybrowser.py", "type": "bool", "group": "Roxy流量优化",
@@ -274,7 +274,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_CACHE_DIR", "file": "roxybrowser.py", "type": "str", "group": "Roxy流量优化",
-        "label": "公开缓存目录", "help": "只保存公开JS/CSS的缓存文件；不要指向账号、Cookie或Profile目录",
+        "label": "公开缓存目录", "help": "只保存通过隔离校验的公开不可变JS/CSS；Profile自身缓存独立管理，不要指向账号、Cookie或Profile目录",
     },
     {
         "key": "ROXY_CACHE_MAX_AGE", "file": "roxybrowser.py", "type": "int", "group": "Roxy流量优化",
@@ -286,7 +286,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_CACHE_REFRESH_RATE", "file": "roxybrowser.py", "type": "float", "group": "Roxy流量优化",
-        "label": "缓存随机刷新比例", "help": "默认0.12；只刷新小对象，避免永久复用旧资源",
+        "label": "缓存随机刷新比例", "help": "默认0.12；仅刷新已满足隔离条件的小对象，随机刷新不是账号或会话隔离机制",
     },
     {
         "key": "ROXY_CACHE_REFRESH_BUDGET_BYTES", "file": "roxybrowser.py", "type": "int", "group": "Roxy流量优化",

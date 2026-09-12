@@ -333,3 +333,11 @@
 - `fetch_latest_otp` 的总等待 deadline 优先于末次单个请求的快速失败阈值，保留 mail_list/mail_detail/HTTP 分类；精确 Route Error (4xx/5xx) 在原 OTP 状态 helper 中独立终止，标注渲染页 page_status，不增加验证码重放。
 - 独立安全 worker 复用既有 stage/error 字段保留密码/Session 错误阶段、code、HTTP 状态，删除原始异常正文/traceback 输出。密码终态 checkpoint、当前 Token 与身份匹配、activate `success is True`、只读校验分离均保留。
 - 批次结束并核对无待执行注册、安全设置与浏览器后，仅重启 5001 服务为 PID 42452；账号/任务/首页 HTTP 200，18794 与 50000 服务保持原 PID。证据、完整回归、八项自检和未完成项见 `docs/2026-09-12_近期失败日志与OTP时间水位修复-report.md`。
+
+## 本次流量共享边界与会话隔离修复（2026-09-12）
+
+- 修改前在内存重新读取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 browser_traffic、config/roxybrowser、roxy_registration、roxybrowser_client 四文件，均 HTTP 200；锁定版本不变，hash 与差异见本次报告。
+- 上游默认关闭低流量，且缺少本站已有的响应私有性/完整性门禁，未照搬其宽缓存和登录后应用壳拦截。本站仅共享精确公共 CDN 的无凭据/hash 名/public immutable JS/CSS；ChatGPT 同源、动态配置、认证与 Cookie 请求走各自 Profile。schema 3 自动忽略旧缓存；响应头白名单、MIME、原始 freshness 和 session/finalize 状态共同约束回放。
+- 删除粗粒度 URL 黑名单，用已有 Fetch handler 精确处理公共 CDN 可选媒体；不再整域拦截 Statsig/feature gates、身份提供方、图片/字体/manifest。session 标记只停止共享缓存，不阻断后续密码/MFA 应用壳；不修改独立 Profile/指纹/出口边界。
+- 此节取代此前“Cookie 公共候选可共享”及宽域静态缓存的当前实现说明；2026-09-03 报告保留为历史证据。密码成功 checkpoint、邮箱匹配、同窗 Token、enroll/activate 成功确认与只读校验分离已复核。
+- Finding → Path、上游 hash、验证与八项交付自检见 `docs/2026-09-12_流量缓存会话隔离修复-report.md`。

@@ -91,7 +91,12 @@ ROXY_SESSION_WAIT_TIMEOUT: int = 25
 ROXY_SESSION_AUTO_JUMP_WAIT: int = 8
 ROXY_SESSION_REQUEST_TIMEOUT: int = 6
 ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS: int = 2
-# Conservative registration traffic optimization for Roxy/Selenium.
+# Roxy 省流仅拦截公共 CDN 静态音视频：精确 https://cdn.openai.com/assets/
+# 下无查询参数的 .mp3/.mp4/.ogg/.webm；遥测、功能配置、登录入口、
+# 字体、图片及安全验证均按当前 Profile 正常请求，流量会高于旧策略。
+# 共享缓存仅接收公开 CDN 的无凭据、带哈希名、声明 public immutable 的 JS/CSS；
+# ChatGPT 同源资源不进入共享缓存，浏览器自身缓存仍由独立 Profile 管理。
+# 进入 session 阶段后停止共享缓存读写，不阻断应用页面初始化请求。
 ROXY_LOW_TRAFFIC: bool = True
 ROXY_STATIC_CACHE: bool = True
 ROXY_TRAFFIC_CAPTURE: bool = True
@@ -99,6 +104,7 @@ ROXY_TRAFFIC_BUDGET_BYTES: int = 3145728
 ROXY_CACHE_DIR: str = "data/browser_static_cache"
 ROXY_CACHE_MAX_AGE: int = 604800
 ROXY_CACHE_MAX_ITEM_BYTES: int = 8388608
+# 随机刷新只用于已满足隔离条件的公开小资源，不承担账号/会话隔离。
 ROXY_CACHE_REFRESH_RATE: float = 0.12
 ROXY_CACHE_REFRESH_BUDGET_BYTES: int = 262144
 ROXY_CACHE_REFRESH_MAX_ITEM_BYTES: int = 65536

@@ -6,91 +6,38 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
+import re
 import secrets
 import threading
 import time
 from collections import Counter, defaultdict
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-SECURITY_SUFFIXES = (
-    "arkoselabs.com",
-    "challenges.cloudflare.com",
-    "hcaptcha.com",
-    "recaptcha.net",
-    "recaptcha.google.com",
-    "sentinel.openai.com",
-)
-TELEMETRY_SUFFIXES = (
-    "browser-intake-datadoghq.com",
-    "statsigapi.net",
-    "featuregates.org",
-    "segment.io",
-    "segment.com",
-    "sentry.io",
-)
-TELEMETRY_PATH_MARKERS = (
-    "/rum",
-    "/analytics",
-    "/telemetry",
-)
-OPTIONAL_IDENTITY_SUFFIXES = (
-    "accounts.google.com",
-    "appleid.apple.com",
-    "login.microsoftonline.com",
-)
-FIRST_PARTY_CACHE_SUFFIXES = (
-    "chatgpt.com",
-    "cdn.openai.com",
-)
-SESSION_REQUIRED_PREFIXES = (
-    "/api/auth/callback/",
-    "/api/auth/session",
-    "/backend-api/accounts/check",
-)
-HEAVY_EXTENSIONS = (
-    ".avif", ".gif", ".ico", ".jpeg", ".jpg", ".mp3", ".mp4",
-    ".ogg", ".otf", ".png", ".svg", ".ttf", ".webm", ".webp", ".woff", ".woff2",
-)
-REPLAY_STRIPPED_HEADERS = {
-    "content-encoding",
-    "content-length",
-    "set-cookie",
-    "transfer-encoding",
-    # Edge/timing identifiers belong to the original response, not the
-    # immutable asset. Replaying them across Profiles creates stale shared
-    # cache metadata and an avoidable correlation signal.
-    "age",
-    "alt-svc",
-    "cf-cache-status",
-    "cf-ray",
-    "date",
-    "etag",
-    "expires",
-    "last-modified",
-    "nel",
-    "report-to",
-    "request-id",
-    "server-timing",
-    "server",
-    "timing-allow-origin",
-    "traceparent",
-    "tracestate",
-    "via",
-    "x-cache",
-    "x-cache-hits",
-    "x-ms-request-id",
-    "x-ms-request-priority",
-    "x-request-id",
-    "x-correlation-id",
-    "x-served-by",
+PUBLIC_CDN_HOST = "cdn.openai.com"
+OPTIONAL_MEDIA_EXTENSIONS = (".mp3", ".mp4", ".ogg", ".webm")
+# Only body/representation headers are replayable, never origin/profile state,
+# tracing identifiers, CSP nonces, or client-hint negotiation.
+REPLAY_ALLOWED_HEADERS = {
+    "content-type", "cache-control", "access-control-allow-origin",
+    "cross-origin-resource-policy", "x-content-type-options",
 }
-CACHE_SCHEMA_VERSION = 2
-CACHE_PRIVATE_REQUEST_HEADERS = {"authorization", "cookie", "proxy-authorization"}
-CACHE_PRIVATE_RESPONSE_HEADERS = {"set-cookie", "www-authenticate"}
+CACHE_SCHEMA_VERSION = 3
+CACHE_PRIVATE_REQUEST_HEADERS = {"authorization", "cookie", "proxy-authorization", "range"}
+CACHE_PRIVATE_RESPONSE_HEADERS = {
+    "set-cookie", "www-authenticate", "authentication-info", "proxy-authenticate",
+    "proxy-authentication-info", "clear-site-data", "accept-ch", "critical-ch",
+    "origin-trial", "content-security-policy", "content-security-policy-report-only",
+}
+STATIC_RESOURCE_MIME_TYPES = {
+    "script": {"application/javascript", "text/javascript", "application/x-javascript"},
+    "stylesheet": {"text/css"},
+}
 SAFE_VARY_HEADERS = {"accept-encoding"}
 # A cold cache can make every concurrent Profile request the same large public
 # bundle.  Single-flight only the validated public asset load; registration
@@ -116,11 +63,6 @@ _NETWORK_ENABLE_LIMITS = {
     "maxResourceBufferSize": 512 * 1024,
     "maxPostDataSize": 4 * 1024,
 }
-
-
-def _host_matches(host: str, suffixes: tuple[str, ...]) -> bool:
-    host = str(host or "").lower().rstrip(".")
-    return any(host == suffix or host.endswith("." + suffix) for suffix in suffixes)
 
 
 def _resource_name(resource_type) -> str:
@@ -149,122 +91,126 @@ def _header_values(headers) -> dict[str, str]:
 
 
 def block_reason(url: str, resource_type: str = "", *, session_only: bool = False) -> str:
-    """Return an explicit block reason; an empty string means allow."""
+    """Block only optional CDN media, never configuration/authentication traffic."""
     try:
         parsed = urlparse(str(url or ""))
-    except Exception:
-        return ""
-    host = str(parsed.hostname or "").lower()
-    path = str(parsed.path or "/").lower()
-    resource = _resource_name(resource_type)
-
-    # Authentication and challenge traffic always wins over optimization rules.
-    if _host_matches(host, SECURITY_SUFFIXES):
-        return ""
-    if "/cdn-cgi/challenge-platform/" in path or "/sentinel/" in path:
-        return ""
-    if _host_matches(host, TELEMETRY_SUFFIXES):
-        return "telemetry"
-    if host == "auth.openai.com" and any(marker in path for marker in TELEMETRY_PATH_MARKERS):
-        return "telemetry"
-    if _host_matches(host, OPTIONAL_IDENTITY_SUFFIXES):
-        return "optional_identity"
-    if resource in {"image", "media", "font", "manifest"}:
-        return resource
-    if session_only and host in {"chatgpt.com", "www.chatgpt.com"}:
-        if resource == "document" or path.startswith(SESSION_REQUIRED_PREFIXES):
+        if (parsed.scheme != "https" or parsed.hostname != PUBLIC_CDN_HOST
+                or parsed.port not in (None, 443) or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment):
             return ""
-        return "post_auth_" + (resource or "other")
-    return ""
+    except ValueError:
+        return ""
+    path = parsed.path
+    if _resource_name(resource_type) != "media" or not path.startswith("/assets/"):
+        return ""
+    if ("%" in path or "\\" in path or "?" in str(url) or "#" in str(url)
+            or any(segment in {".", "..", "sentinel", "recaptcha", "hcaptcha", "captcha", "challenge"} for segment in path.lower().split("/"))
+            or "/cdn-cgi/challenge-platform/" in path.lower()):
+        return ""
+    return "optional_media" if path.endswith(OPTIONAL_MEDIA_EXTENSIONS) else ""
 
 
 def is_cacheable_request(url: str, method: str, resource_type: str, headers=None) -> bool:
-    """Return whether Roxy may replay the request from the shared cache.
+    """Share only credential-free, content-addressed files on the exact public CDN.
 
-    Authentication pages deliberately stay on the normal network path.  In
-    production Roxy runs, replaying ``auth.openai.com`` / ``oaistatic.com``
-    bundles under high concurrency intermittently left OTP/profile pages with
-    only browser-default styling or incomplete interactive DOM.  ChatGPT's
-    post-auth application shell remains cacheable because an appearance issue
-    there cannot prevent registration or access-token acquisition.
+    Same-origin app/auth scripts, config, challenges and authenticated traffic
+    stay in their own Profile's network stack and native HTTP cache. Identical
+    public source bytes do not imply identical per-browser execution state.
     """
-    if str(method or "").upper() != "GET":
-        return False
-    if _resource_name(resource_type) not in {"script", "stylesheet"}:
+    resource = _resource_name(resource_type)
+    if str(method or "").upper() != "GET" or resource not in STATIC_RESOURCE_MIME_TYPES:
         return False
     try:
         parsed = urlparse(str(url or ""))
-    except Exception:
+        if (parsed.scheme != "https" or parsed.hostname != PUBLIC_CDN_HOST
+                or parsed.port not in (None, 443) or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment):
+            return False
+    except ValueError:
         return False
-    host = str(parsed.hostname or "").lower()
-    path = str(parsed.path or "").lower()
-    if parsed.scheme not in {"http", "https"} or not _host_matches(host, FIRST_PARTY_CACHE_SUFFIXES):
+    path = parsed.path
+    if ("%" in path or "\\" in path or "?" in str(url) or "#" in str(url)
+            or any(segment in {".", "..", "sentinel", "recaptcha", "hcaptcha", "captcha", "challenge"} for segment in path.lower().split("/"))
+            or "/cdn-cgi/challenge-platform/" in path.lower()
+            or not path.startswith(PUBLIC_STATIC_PATH_PREFIXES)):
         return False
-    if path.endswith("/service-worker.js") or path.endswith("/sw.js"):
+    extension = ".js" if resource == "script" else ".css"
+    filename = path.rsplit("/", 1)[-1]
+    if (not filename.endswith(extension)
+            or not re.search(r"(?:^|[._-])[0-9a-fA-F]{8,}(?=[._-]|$)", filename[:-len(extension)])):
+        return False
+    if any(marker in filename.lower() for marker in ("service-worker", "serviceworker", "sw.")):
         return False
     request_headers = _header_values(headers)
-    private_headers = set(request_headers) & CACHE_PRIVATE_REQUEST_HEADERS
-    # A public static asset may arrive with ambient Cookie state. The cookie
-    # is never part of the URL key or replay headers; auth credentials remain
-    # on the live path.
-    if private_headers - {"cookie"}:
+    if (set(request_headers) & CACHE_PRIVATE_REQUEST_HEADERS
+            or any(name.startswith(("if-", "x-")) for name in request_headers)):
         return False
     request_cache_control = request_headers.get("cache-control", "").lower()
-    if any(token in request_cache_control for token in (
-        "no-cache", "no-store", "private", "max-age=0", "s-maxage=0",
-    )):
-        return False
-    if "no-cache" in request_headers.get("pragma", "").lower():
-        return False
-    decoded_path = unquote(path)
-    if any(segment in {".", ".."} for segment in decoded_path.split("/")) or "\\" in decoded_path:
-        return False
-    # The shared cache is intentionally narrower than the traffic allow-list:
-    # only immutable public asset prefixes may be replayed across profiles.
-    # This excludes challenge/Sentinel and ``/backend-api`` scripts. The
-    # response gate below requires an explicit public cache directive and no
-    # profile-varying response; ambient Cookie state is never stored or
-    # included in the replay response.
-    if not path.startswith(PUBLIC_STATIC_PATH_PREFIXES):
+    if (any(token in request_cache_control for token in ("no-cache", "no-store", "private"))
+            or re.search(r'(?:s-maxage|max-age)\s*=\s*"?0(?:"|\s|,|$)', request_cache_control)
+            or "no-cache" in request_headers.get("pragma", "").lower()):
         return False
     return True
 
 
-def is_cacheable_response(headers) -> bool:
-    """Accept only responses that cannot carry account-specific state."""
+def _cache_freshness_seconds(headers, *, now: float | None = None) -> float:
+    """Remaining origin freshness; reject ambiguous/expired shared directives."""
     values = _header_values(headers)
-    if set(values) & CACHE_PRIVATE_RESPONSE_HEADERS:
+    directives = {}
+    for part in values.get("cache-control", "").lower().split(","):
+        name, _, value = part.strip().partition("=")
+        name = name.strip()
+        if not name or name in directives:
+            return 0.0
+        directives[name] = value.strip().strip('"')
+    if (not {"public", "immutable"}.issubset(directives)
+            or set(directives) & {"private", "no-cache", "no-store", "must-revalidate", "proxy-revalidate"}):
+        return 0.0
+    lifetime = directives.get("s-maxage", directives.get("max-age", ""))
+    age = values.get("age", "0").strip()
+    if not re.fullmatch(r"[0-9]+", lifetime) or not re.fullmatch(r"[0-9]+", age):
+        return 0.0
+    try:
+        freshness = float(lifetime)
+        current_age = float(age)
+        if "date" in values:
+            date = parsedate_to_datetime(values["date"])
+            if date.tzinfo is None:
+                return 0.0
+            current_age = max(current_age, (time.time() if now is None else now) - date.timestamp())
+        if not math.isfinite(freshness) or not math.isfinite(current_age):
+            return 0.0
+        return max(0.0, freshness - current_age)
+    except (ValueError, TypeError, OverflowError):
+        return 0.0
+
+
+def is_cacheable_response(headers, *, resource_type: str = "") -> bool:
+    """Require an immutable, fresh, non-varying JS/CSS public representation."""
+    values = _header_values(headers)
+    if set(values) & CACHE_PRIVATE_RESPONSE_HEADERS or _cache_freshness_seconds(headers) <= 0:
         return False
-    cache_control = values.get("cache-control", "").lower()
-    if any(token in cache_control for token in (
-        "private", "no-store", "no-cache", "must-revalidate", "proxy-revalidate", "max-age=0", "s-maxage=0",
-    )):
+    mime = values.get("content-type", "").split(";", 1)[0].strip().lower()
+    resource = _resource_name(resource_type)
+    if resource and resource not in STATIC_RESOURCE_MIME_TYPES:
         return False
-    directives = {part.split("=", 1)[0].strip() for part in cache_control.split(",") if part.strip()}
-    if "public" not in directives:
+    allowed_mimes = STATIC_RESOURCE_MIME_TYPES.get(resource, set().union(*STATIC_RESOURCE_MIME_TYPES.values()))
+    if mime not in allowed_mimes:
+        return False
+    if (values.get("access-control-allow-origin", "*").strip() != "*"
+            or values.get("access-control-allow-credentials", "false").strip().lower() != "false"):
         return False
     vary = {part.strip().lower() for part in values.get("vary", "").split(",") if part.strip()}
-    # A URL-only cache cannot safely represent a response that varies with a
-    # browser/profile attribute. Accept-Encoding is normalized away before
-    # replay; every other Vary token, including '*', stays on the live path.
+    # Decoded bodies normalize Accept-Encoding; other variants remain live.
     return not (vary - SAFE_VARY_HEADERS)
 
 
 def _sanitize_headers(headers) -> list[dict[str, str]]:
-    cleaned: list[dict[str, str]] = []
-    for header in headers or []:
-        if isinstance(header, dict):
-            name = str(header.get("name") or "")
-            value = str(header.get("value") or "")
-        else:
-            name = str(getattr(header, "name", "") or "")
-            value = str(getattr(header, "value", "") or "")
-        lower_name = name.lower()
-        if lower_name.startswith(("x-envoy-", "x-amzn-", "x-azure-")):
-            continue
-        if name and lower_name not in REPLAY_STRIPPED_HEADERS:
-            cleaned.append({"name": name, "value": value})
-    return cleaned
+    return [
+        {"name": name, "value": value}
+        for name, value in _header_values(headers).items()
+        if name in REPLAY_ALLOWED_HEADERS
+    ]
 
 
 class StaticResourceCache:
@@ -291,6 +237,9 @@ class StaticResourceCache:
         return self.root / f"{key}.json", self.root / f"{key}.bin"
 
     def read(self, url: str) -> dict | None:
+        resource = "stylesheet" if str(url).endswith(".css") else "script"
+        if not is_cacheable_request(url, "GET", resource):
+            return None
         meta_path, body_path = self._paths(url)
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -299,7 +248,12 @@ class StaticResourceCache:
             status = int(meta.get("status") or 0)
             if status != 200:
                 return None
-            if self.max_age and time.time() - float(meta.get("saved_at") or 0) > self.max_age:
+            now = time.time()
+            saved_at = float(meta.get("saved_at") or 0)
+            expires_at = float(meta.get("expires_at") or 0)
+            if (not all(math.isfinite(value) for value in (saved_at, expires_at))
+                    or saved_at > now or expires_at <= saved_at or now >= expires_at
+                    or (self.max_age and now - saved_at >= self.max_age)):
                 return None
             body = body_path.read_bytes()
             if len(body) > self.max_item_bytes:
@@ -309,21 +263,31 @@ class StaticResourceCache:
             if str(meta.get("url") or "") != str(url):
                 return None
             headers = meta.get("headers") or []
-            if not is_cacheable_response(headers):
+            if (not is_cacheable_response(headers, resource_type=resource)
+                    or expires_at > saved_at + _cache_freshness_seconds(headers, now=saved_at)):
                 return None
             return {
                 "status": status,
                 "phrase": str(meta.get("phrase") or "OK"),
                 "headers": _sanitize_headers(headers),
                 "body": body,
-                "saved_at": float(meta.get("saved_at") or 0),
+                "saved_at": saved_at,
+                "expires_at": expires_at,
             }
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
 
     def write(self, url: str, *, status: int, phrase: str, headers, body: bytes) -> bool:
-        headers = list(headers or [])
-        if status != 200 or not is_cacheable_response(headers) or not body or len(body) > self.max_item_bytes:
+        resource = "stylesheet" if str(url).endswith(".css") else "script"
+        if (status != 200 or not is_cacheable_request(url, "GET", resource)
+                or not is_cacheable_response(headers, resource_type=resource)
+                or not body or len(body) > self.max_item_bytes):
+            return False
+        saved_at = time.time()
+        freshness = _cache_freshness_seconds(headers, now=saved_at)
+        if self.max_age:
+            freshness = min(freshness, self.max_age)
+        if freshness <= 0:
             return False
         meta_path, body_path = self._paths(url)
         token = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
@@ -335,7 +299,8 @@ class StaticResourceCache:
             "status": int(status or 200),
             "phrase": str(phrase or "OK"),
             "headers": _sanitize_headers(headers),
-            "saved_at": time.time(),
+            "saved_at": saved_at,
+            "expires_at": saved_at + freshness,
             "body_sha256": hashlib.sha256(body).hexdigest(),
             "body_bytes": len(body),
         }
@@ -549,51 +514,36 @@ class RoxyTrafficOptimizer:
                     self.driver.get_log("performance")
                 except Exception as exc:
                     self._install_errors.append(f"performance_log: {type(exc).__name__}: {exc}")
-            if self.low_traffic:
-                self._apply_blocked_urls()
+            # Remove legacy broad URL globs. Precise media filtering uses the
+            # existing Fetch request handler, which parses path/type/query.
+            self.driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": []})
         except Exception as exc:
             self._install_errors.append(f"network_cdp: {type(exc).__name__}: {exc}")
-        if self.static_cache_enabled:
+        if self.static_cache_enabled or self.low_traffic:
             self._install_fetch_cache()
 
-    def _base_block_patterns(self) -> list[str]:
-        patterns = []
-        for host in TELEMETRY_SUFFIXES:
-            patterns.extend([f"*://{host}/*", f"*://*.{host}/*"])
-        patterns.extend(f"*://{host}/*" for host in OPTIONAL_IDENTITY_SUFFIXES)
-        for host in ("chatgpt.com", "www.chatgpt.com", "cdn.openai.com", "oaistatic.com"):
-            patterns.extend(f"*://{host}/*{extension}*" for extension in HEAVY_EXTENSIONS)
-        patterns.extend(f"*://auth.openai.com/*{extension}*" for extension in (".woff", ".woff2", ".ttf", ".otf"))
-        patterns.append("*://auth.openai.com/awe/api/v2/rum*")
-        return patterns
-
-    def _apply_blocked_urls(self) -> None:
-        patterns = self._base_block_patterns()
-        if self._session_only:
-            patterns.extend([
-                "*://chatgpt.com/_next/static/*",
-                "*://www.chatgpt.com/_next/static/*",
-                "*://chatgpt.com/cdn/assets/*",
-                "*://www.chatgpt.com/cdn/assets/*",
-                "*://chatgpt.com/unauth-mweb/assets/*",
-                "*://www.chatgpt.com/unauth-mweb/assets/*",
-            ])
-        self.driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": sorted(set(patterns))})
-
     def set_session_only(self, enabled: bool = True) -> None:
-        self._session_only = bool(enabled)
-        if self.low_traffic:
-            try:
-                self._apply_blocked_urls()
-            except Exception as exc:
-                self._install_errors.append(f"session_only: {type(exc).__name__}: {exc}")
+        # Keep the application shell available for session/password/MFA steps.
+        # This existing phase marker now stops shared cache reads and writes.
+        with self._lock:
+            self._session_only = bool(enabled)
+            pending = list(self._loading_requests) if enabled else []
+        for request_id in pending:
+            self._release_loading_request(request_id)
 
     def disable_for_recovery(self, reason: str) -> None:
         """Restore normal networking when optimization correlates with a flow failure."""
         reason = str(reason or "registration_recovery").strip()[:200]
         self._degraded_reason = reason
-        self._session_only = False
-        if self._fetch_enabled and self._devtools and self._connection:
+        with self._lock:
+            self._session_only = False
+            self.static_cache_enabled = False
+            was_fetch_enabled = self._fetch_enabled
+            self._fetch_enabled = False
+            pending = list(self._loading_requests)
+        for request_id in pending:
+            self._release_loading_request(request_id)
+        if was_fetch_enabled and self._devtools and self._connection:
             try:
                 self._connection.execute(self._devtools.fetch.disable())
             except Exception as exc:
@@ -611,23 +561,26 @@ class RoxyTrafficOptimizer:
     def _install_fetch_cache(self) -> None:
         try:
             devtools, connection = self.driver.start_devtools()
-            patterns = [
-                devtools.fetch.RequestPattern(
-                    url_pattern="*", resource_type=devtools.network.ResourceType.SCRIPT,
+            patterns = []
+            if self.static_cache_enabled:
+                for resource in (devtools.network.ResourceType.SCRIPT, devtools.network.ResourceType.STYLESHEET):
+                    patterns.append(devtools.fetch.RequestPattern(
+                        url_pattern="https://cdn.openai.com/*", resource_type=resource,
+                        request_stage=devtools.fetch.RequestStage.REQUEST,
+                    ))
+            if self.low_traffic:
+                patterns.append(devtools.fetch.RequestPattern(
+                    url_pattern="https://cdn.openai.com/assets/*", resource_type=devtools.network.ResourceType.MEDIA,
                     request_stage=devtools.fetch.RequestStage.REQUEST,
-                ),
-                devtools.fetch.RequestPattern(
-                    url_pattern="*", resource_type=devtools.network.ResourceType.STYLESHEET,
-                    request_stage=devtools.fetch.RequestStage.REQUEST,
-                ),
-            ]
+                ))
             self._devtools = devtools
             self._connection = connection
             connection.add_callback(devtools.fetch.RequestPaused, self._on_request_paused)
-            connection.execute(devtools.fetch.enable(patterns=patterns, handle_auth_requests=False))
             self._fetch_enabled = True
+            connection.execute(devtools.fetch.enable(patterns=patterns, handle_auth_requests=False))
         except Exception as exc:
-            self._install_errors.append(f"static_cache: {type(exc).__name__}: {exc}")
+            self._fetch_enabled = False
+            self._install_errors.append(f"traffic_fetch: {type(exc).__name__}: {exc}")
 
     def _should_refresh(self, url: str, body_bytes: int) -> bool:
         if not self.refresh_rate or body_bytes > self.refresh_max_item:
@@ -643,18 +596,22 @@ class RoxyTrafficOptimizer:
     def _on_request_paused(self, event) -> None:
         devtools = self._devtools
         connection = self._connection
-        if not devtools or not connection:
+        if not devtools or not connection or not self._fetch_enabled:
             return
         request_id = event.request_id
         claimed_url = ""
         try:
-            if event.response_status_code is not None:
+            if event.response_status_code is not None or getattr(event, "response_error_reason", None) is not None:
                 self._handle_response(event)
                 return
             url = str(getattr(event.request, "url", "") or "")
             method = str(getattr(event.request, "method", "") or "")
             resource = _resource_name(event.resource_type)
-            if not is_cacheable_request(url, method, resource, getattr(event.request, "headers", None)):
+            if self.low_traffic and block_reason(url, resource):
+                connection.execute(devtools.fetch.fail_request(request_id, devtools.network.ErrorReason.BLOCKED_BY_CLIENT))
+                return
+            if (self._session_only or not self.static_cache_enabled or not self._fetch_enabled
+                    or not is_cacheable_request(url, method, resource, getattr(event.request, "headers", None))):
                 connection.execute(devtools.fetch.continue_request(request_id))
                 return
             with self._lock:
@@ -677,12 +634,21 @@ class RoxyTrafficOptimizer:
                 with self._lock:
                     self._loading_requests[str(request_id)] = url
             with self._lock:
+                if not self._fetch_enabled:
+                    self._release_loading_request(request_id, claimed_url)
+                    return
+                if self._session_only or not self.static_cache_enabled:
+                    self._release_loading_request(request_id, claimed_url)
+                    connection.execute(devtools.fetch.continue_request(request_id))
+                    return
                 self._stats["cache_misses"] += 1
-            connection.execute(devtools.fetch.continue_request(request_id, intercept_response=True))
+                connection.execute(devtools.fetch.continue_request(request_id, intercept_response=True))
         except Exception:
             if claimed_url:
                 self._release_loading_request(request_id, claimed_url)
             with self._lock:
+                if not self._fetch_enabled:
+                    return
                 self._stats["cache_errors"] += 1
             try:
                 connection.execute(devtools.fetch.continue_request(request_id))
@@ -694,15 +660,29 @@ class RoxyTrafficOptimizer:
         connection = self._connection
         if not devtools or not connection:
             raise RuntimeError("Fetch cache is not connected")
-        headers = [devtools.fetch.HeaderEntry(name=item["name"], value=item["value"]) for item in cached["headers"]]
-        connection.execute(devtools.fetch.fulfill_request(
-            request_id,
-            response_code=cached["status"],
-            response_headers=headers,
-            body=base64.b64encode(cached["body"]).decode("ascii"),
-            response_phrase=cached["phrase"],
-        ))
         with self._lock:
+            if not self._fetch_enabled:
+                return
+            # Phase changes/expiry may happen during disk I/O or a cold wait.
+            if (self._session_only or not self.static_cache_enabled
+                    or time.time() >= cached["expires_at"]):
+                connection.execute(devtools.fetch.continue_request(request_id))
+                return
+            headers = [
+                devtools.fetch.HeaderEntry(name=item["name"], value=item["value"])
+                for item in _sanitize_headers(cached["headers"])
+                if item["name"] != "cache-control"
+            ]
+            # Do not restart origin max-age in the Profile's native cache.
+            # Live responses retain their original HTTP caching/compression.
+            headers.append(devtools.fetch.HeaderEntry(name="cache-control", value="no-store"))
+            connection.execute(devtools.fetch.fulfill_request(
+                request_id,
+                response_code=cached["status"],
+                response_headers=headers,
+                body=base64.b64encode(cached["body"]).decode("ascii"),
+                response_phrase=cached["phrase"],
+            ))
             self._stats["cache_hits"] += 1
             self._stats["cached_bytes"] += len(cached["body"])
             if network_id:
@@ -713,7 +693,7 @@ class RoxyTrafficOptimizer:
     def _handle_response(self, event) -> None:
         devtools = self._devtools
         connection = self._connection
-        if not devtools or not connection:
+        if not devtools or not connection or not self._fetch_enabled:
             return
         request_id = event.request_id
         try:
@@ -721,24 +701,31 @@ class RoxyTrafficOptimizer:
             method = str(getattr(event.request, "method", "") or "")
             resource = _resource_name(event.resource_type)
             status = int(event.response_status_code or 0)
-            if status == 200 and is_cacheable_request(url, method, resource, getattr(event.request, "headers", None)) and is_cacheable_response(event.response_headers or []):
+            if (not self._session_only and self.static_cache_enabled and self._fetch_enabled and status == 200
+                    and is_cacheable_request(url, method, resource, getattr(event.request, "headers", None))
+                    and is_cacheable_response(event.response_headers or [], resource_type=resource)):
                 payload, encoded = connection.execute(devtools.fetch.get_response_body(request_id))
                 body = base64.b64decode(payload) if encoded else str(payload).encode("utf-8")
-                if self.cache.write(
-                    url,
-                    status=status,
-                    phrase=str(event.response_status_text or "OK"),
-                    headers=event.response_headers or [],
-                    body=body,
-                ):
-                    with self._lock:
-                        self._stats["cache_writes"] += 1
-                else:
-                    with self._lock:
-                        self._stats["cache_errors"] += 1
-            connection.execute(devtools.fetch.continue_response(request_id))
+                with self._lock:
+                    # Recheck after get_response_body yields to another callback.
+                    if not self._session_only and self.static_cache_enabled and self._fetch_enabled:
+                        if self.cache.write(
+                            url,
+                            status=status,
+                            phrase=str(event.response_status_text or "OK"),
+                            headers=event.response_headers or [],
+                            body=body,
+                        ):
+                            self._stats["cache_writes"] += 1
+                        else:
+                            self._stats["cache_errors"] += 1
+            with self._lock:
+                if self._fetch_enabled:
+                    connection.execute(devtools.fetch.continue_response(request_id))
         except Exception:
             with self._lock:
+                if not self._fetch_enabled:
+                    return
                 self._stats["cache_errors"] += 1
             try:
                 connection.execute(devtools.fetch.continue_response(request_id))
@@ -755,10 +742,12 @@ class RoxyTrafficOptimizer:
 
     def finalize(self) -> dict:
         with self._lock:
+            was_fetch_enabled = self._fetch_enabled
+            self._fetch_enabled = False
             loading_request_ids = list(self._loading_requests)
         for request_id in loading_request_ids:
             self._release_loading_request(request_id)
-        if self._fetch_enabled and self._devtools and self._connection:
+        if was_fetch_enabled and self._devtools and self._connection:
             try:
                 self._connection.execute(self._devtools.fetch.disable())
             except Exception as exc:
