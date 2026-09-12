@@ -349,3 +349,11 @@
 - 原路径恢复该精确静态前缀的版本化 JS/CSS 缓存；Cookie 只作为公共请求的环境头，不保存/回放；Set-Cookie、私有、变体、认证与动态配置保持实时。登录阶段仍共享已校验公共文件，恢复/终态边界保留。现有 TTL 从运行值 399 秒调为 86400 秒，源站剩余 TTL 仍约束。
 - 真实双独立浏览器环境 3 文件冷写成功、热命中 3/3：网络 1,871,666 → 0 字节；只验证公共资源，不自动注册。全量 `992 passed, 1 deselected, 1 warning, 284 subtests passed`，密码/MFA边界复核。
 - 此节取代上午仅 cdn.openai.com/必须 immutable/session 停缓存的当前策略说明；完整证据、hash、加载结果与 R8 见 `docs/2026-09-12_公共静态缓存折中优化-report.md`。
+
+## 本次 2FA 补密码邮箱参数漏传修复（2026-09-12 晚）
+
+- 修改前重新在内存读取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 account_export、roxy_registration、email_provider 与 outlook_client，均 HTTP 200；版本不变。上游无本地 `post_login_add_password` 扩展，保持本地身份匹配、历史邮件水位和同窗 MFA 边界。
+- Job 814/816 的补密码邮箱阶段在第一次 `mail_list ReadTimeout` 后提前失败。只读实查两邮箱的新登录邮件均在水位后且可被现有解析器提取，邮件收到时间早于任务退出；当前查询不用于推断当时列表的可见时刻。
+- 原 `_setup_password_with_driver` 漏传三项既有 `TWOFA_GENERIC_API_*`，误用普通注册运行值 5/3/1。现在与既有协议重认证分支一样显式传入 12/8/2（可配置），总等待预算、旧码/旧消息过滤与传输错误不重发规则不变。
+- 终止错误仅从异常提取白名单邮件阶段、错误类型与 HTTP 状态至现有 message/http_status，删除仅保留异常类名而丢失阶段的诊断；不保存原始异常 URL、邮件正文或 OTP。
+- Job 802 已读到验证码但页面未推进，独立列为后续页面提交问题，本轮不重放 OTP。证据、上游 hash、验证、安全核对和 R8 自检见 `docs/2026-09-12_2FA邮箱取件提前失败修复-report.md`。

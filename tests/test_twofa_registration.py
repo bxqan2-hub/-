@@ -2149,6 +2149,11 @@ def test_setup_2fa_does_not_repeat_password_when_signup_already_set_it(monkeypat
 
 @pytest.mark.parametrize("label", ["Resend code", "Gửi lại mã"])
 def test_password_initial_email_never_resends_existing_code(password_reauth_driver, monkeypatch, caplog, label):
+    from config import twofa
+
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_REQUEST_TIMEOUT", 13)
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_RETRY_TIMEOUT", 7)
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", 3)
     driver = password_reauth_driver(body_suffix=" " + label)
     resend = Mock(return_value=True)
     monkeypatch.setattr(account_export, "_password_click_resend", resend)
@@ -2160,13 +2165,20 @@ def test_password_initial_email_never_resends_existing_code(password_reauth_driv
     assert driver.mail_calls == driver.submit_calls == 1
     resend.assert_not_called()
     assert "reason=initial_wait resend=0" in caplog.text
+    assert driver.mail_budgets[0]["request_timeout"] == 13
+    assert driver.mail_budgets[0]["retry_timeout"] == 7
+    assert driver.mail_budgets[0]["max_consecutive_errors"] == 3
 
 
 @pytest.mark.parametrize("second_timeout", [False, True])
 def test_password_email_timeout_resends_once_with_preclick_timestamp(password_reauth_driver, monkeypatch, second_timeout):
+    from config import twofa
     from core.generic_api_mail_client import GenericApiMailError
     import core.email_provider
 
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_REQUEST_TIMEOUT", 13)
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_RETRY_TIMEOUT", 7)
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", 3)
     driver = password_reauth_driver()
     fetches, clicks = [], []
     original = driver.fetch_code
@@ -2191,6 +2203,10 @@ def test_password_email_timeout_resends_once_with_preclick_timestamp(password_re
         driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
     )
     assert len(fetches) == 2 and len(clicks) == 1
+    for kwargs in fetches:
+        assert kwargs["request_timeout"] == 13
+        assert kwargs["retry_timeout"] == 7
+        assert kwargs["max_consecutive_errors"] == 3
     assert fetches[0]["after_ts"] < fetches[1]["after_ts"]
     assert driver.clock.now <= 60
     assert result["ok"] is (not second_timeout)
@@ -2222,6 +2238,144 @@ def test_password_mail_transport_and_api_errors_never_resend(password_reauth_dri
     fetch.assert_called_once()
     resend.assert_not_called()
     assert driver.submit_calls == 0
+
+
+@pytest.mark.parametrize("outcome, old_code", [
+    ("recovered", "999999"), ("recovered", "012345"), ("deadline", "999999"), (401, "999999"), (403, "999999"),
+])
+def test_password_reauth_real_mail_provider_uses_isolated_retry_budget(
+    password_reauth_driver, monkeypatch, caplog, outcome, old_code,
+):
+    import time
+    from config import email as email_cfg, twofa
+    from core import db, email_provider, generic_api_mail_client as mail, registration_password
+
+    real_wait = email_provider.wait_for_otp
+    driver = password_reauth_driver()
+    monkeypatch.setattr(email_provider, "wait_for_otp", real_wait)
+    monkeypatch.setattr(email_provider, "resolve_email_source", lambda email: "generic_api")
+    monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
+    monkeypatch.setattr(email_cfg, "GENERIC_API_REQUEST_TIMEOUT", 5)
+    monkeypatch.setattr(email_cfg, "GENERIC_API_MAX_CONSECUTIVE_ERRORS", 1)
+    monkeypatch.setattr(twofa, "ENABLE_2FA", True)
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_REQUEST_TIMEOUT", 13)
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_RETRY_TIMEOUT", 7)
+    monkeypatch.setattr(twofa, "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", 3)
+    monkeypatch.setattr(twofa, "TWOFA_OTP_POLL_INTERVAL", 1)
+    monkeypatch.setattr(twofa, "TWOFA_OTP_SETTLE_SECONDS", 0)
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: {old_code})
+    monkeypatch.setattr(account_export, "_snapshot_otp_message_ids", lambda *args, **kwargs: {"history-id"})
+    monkeypatch.setattr(mail, "time", SimpleNamespace(
+        time=account_export.time.time, monotonic=account_export.time.monotonic,
+        sleep=account_export.time.sleep, strftime=time.strftime, localtime=time.localtime,
+    ))
+    account = mail.GenericApiEmailAccount(
+        "user@example.test", "https://mail.example.test/messages/private-mail-token/user@example.test",
+    )
+    monkeypatch.setattr(mail, "get_account_context", lambda email: account)
+    requests, details = [], []
+    old_messages = [
+        {"id": "history-id", "received_at": "2023-11-14T22:15:00Z"},
+        {"id": "old-timestamp", "received_at": "2023-11-14T22:12:00Z"},
+    ]
+
+    def get(url, **kwargs):
+        requests.append((url, kwargs["timeout"], driver.clock.now))
+        if "/api/messages/" in url:
+            if outcome in (401, 403):
+                return SimpleNamespace(status_code=outcome, text="private-response-token 012345")
+            if len(requests) == 1 or outcome == "deadline":
+                driver.clock.now += kwargs["timeout"]
+                raise mail.requests.exceptions.ReadTimeout(f"{url}?token=private-query-token code=012345")
+            driver.clock.now += 0.25
+            items = old_messages if len(requests) == 2 else [
+                *old_messages, {"id": "new-id", "received_at": "2023-11-14T22:13:25Z"},
+            ]
+            return SimpleNamespace(status_code=200, json=lambda: {"items": items, "has_more": False})
+        assert "/message/new-id/" in url, "historical IDs/timestamps must be excluded before reading a body"
+        details.append(url)
+        driver.clock.now += 0.25
+        return SimpleNamespace(status_code=200, json=lambda: {
+            "subject": "Your temporary ChatGPT verification code", "body": "Your code is 012345",
+            "receivedAt": "2023-11-14T22:13:25Z",
+        })
+
+    monkeypatch.setattr(mail.requests, "Session", lambda: SimpleNamespace(get=get))
+    resend, enroll, password_checkpoint, secret_checkpoint = Mock(), Mock(), Mock(), Mock()
+    monkeypatch.setattr(account_export, "_password_click_resend", resend)
+    monkeypatch.setattr(account_export, "_setup_totp_with_driver", enroll)
+    monkeypatch.setattr(registration_password, "persist_confirmed_registration_password", password_checkpoint)
+    monkeypatch.setattr(db, "save_security_checkpoint", secret_checkpoint)
+    with caplog.at_level("INFO", logger="core.account_export"):
+        if outcome in (401, 403):
+            session = SimpleNamespace()
+            with pytest.raises(account_export.TwoFASetupError) as caught:
+                account_export.setup_2fa_result(
+                    session, account.email, driver=driver, desired_password="Ab3!cdefgh123",
+                    authenticated_email=account.email,
+                )
+            assert caught.value.code == "password_email_code_wait_failed"
+            assert caught.value.stage == "password_email"
+            assert caught.value.http_status == outcome
+            assert f"stage=mail_list; type=http_error; http_status={outcome}" in str(caught.value)
+            assert session._twofa_last_error["http_status"] == outcome
+            assert len(requests) == 1
+            diagnostic = str(caught.value)
+        else:
+            result = account_export._setup_password_with_driver(
+                driver=driver, session=object(), email=account.email, password="Ab3!cdefgh123", timeout_seconds=60,
+            )
+            diagnostic = result["message"]
+            assert result["ok"] is (outcome == "recovered"), result
+            assert requests[0][1] == 13
+            if outcome == "recovered":
+                assert len(requests) == 4 and len(details) == 1
+                assert driver.submitted_codes == [("email", "012345")]
+                assert driver.password_values == ["Ab3!cdefgh123"]
+            else:
+                assert result["code"] == "password_email_code_wait_failed"
+                assert "stage=mail_list; type=ReadTimeout" in diagnostic
+                assert len(requests) == 3 and details == []
+                assert driver.submitted_codes == [] and driver.password_values == []
+                assert driver.clock.now == 30
+            assert all(start + budget <= 30 for _, budget, start in requests)
+    resend.assert_not_called()
+    enroll.assert_not_called()
+    password_checkpoint.assert_not_called()
+    secret_checkpoint.assert_not_called()
+    assert driver.clock.now <= 60
+    assert email_cfg.GENERIC_API_REQUEST_TIMEOUT == 5
+    assert email_cfg.GENERIC_API_MAX_CONSECUTIVE_ERRORS == 1
+    for sensitive in (account.email, "012345", "999999", "Ab3!cdefgh123", "private-mail-token", "private-query-token", "private-response-token"):
+        assert sensitive not in caplog.text
+        assert sensitive not in diagnostic
+
+
+@pytest.mark.parametrize("detail, expected, http_status", [
+    ("stage=mail_detail type=ReadTimeout", "stage=mail_detail; type=ReadTimeout", None),
+    ("stage=mail_inline http_status=503 type=http_error", "stage=mail_inline; type=http_error; http_status=503", 503),
+    ("stage=mail_fetch http_status=200 type=invalid_json", "stage=mail_fetch; type=invalid_json", None),
+    ("stage=private-stage type=private-type http_status=9999", "", None),
+])
+def test_password_mail_failure_exposes_only_allowlisted_diagnostics(
+    password_reauth_driver, monkeypatch, caplog, detail, expected, http_status,
+):
+    import core.email_provider
+    from core.generic_api_mail_client import GenericApiMailError
+
+    driver = password_reauth_driver()
+    secret_detail = "https://private-mail.test/messages/private-token/user@example.test OTP=012345 password=Ab3!cdefgh123"
+    monkeypatch.setattr(core.email_provider, "wait_for_otp", Mock(side_effect=GenericApiMailError(f"{detail}; {secret_detail}")))
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["code"] == "password_email_code_wait_failed"
+    assert result["http_status"] == http_status
+    assert result["message"] == "GenericApiMailError" + ("; " + expected if expected else "")
+    assert driver.submit_calls == 0 and driver.password_values == []
+    for sensitive in ("private-mail", "private-token", "user@example.test", "012345", "Ab3!cdefgh123", "private-stage", "private-type", "9999"):
+        assert sensitive not in caplog.text
+        assert sensitive not in result["message"]
 
 
 @pytest.mark.parametrize("form_state", ["disabled", "gone", "changed", "deadline", "code_error"])

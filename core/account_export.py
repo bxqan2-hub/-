@@ -1708,6 +1708,9 @@ def _setup_password_with_driver(
                             max_wait=min(max(1, int(getattr(twofa_cfg, "TWOFA_OTP_MAX_WAIT", 120) or 120)), max(1, int(mail_budget))),
                             poll_interval=max(1, int(getattr(twofa_cfg, "TWOFA_OTP_POLL_INTERVAL", 2) or 2)),
                             settle_seconds=max(0, int(getattr(twofa_cfg, "TWOFA_OTP_SETTLE_SECONDS", 1) or 0)),
+                            request_timeout=float(getattr(twofa_cfg, "TWOFA_GENERIC_API_REQUEST_TIMEOUT", 12) or 12),
+                            retry_timeout=float(getattr(twofa_cfg, "TWOFA_GENERIC_API_RETRY_TIMEOUT", 8) or 8),
+                            max_consecutive_errors=int(getattr(twofa_cfg, "TWOFA_GENERIC_API_MAX_CONSECUTIVE_ERRORS", 2) or 2),
                             exclude_codes=otp_history, exclude_message_ids=otp_message_ids,
                         )
                         break
@@ -1729,10 +1732,21 @@ def _setup_password_with_driver(
                             if _password_click_resend(driver):
                                 logger.info("[2FA][密码] 邮箱重发 reason=mail_timeout path=%s resend=1", current_state["path"])
                                 continue
-                        logger.warning("[2FA][密码] stage=email_wait path=%s code_controls=%s error_type=%s resend=%s",
-                                       current_state["path"], current_state["code_controls"], type(exc).__name__, int(resend_attempted))
+                        # Only retain provider diagnostic tokens, never raw URLs,
+                        # mailbox credentials, message bodies or OTPs from exceptions.
+                        mail_stage = re.search(r"(?:^|[;\s])stage=(mail_list|mail_detail|mail_inline|mail_fetch)(?=[;\s]|$)", detail)
+                        mail_type = re.search(r"(?:^|[;\s])type=(ReadTimeout|ConnectTimeout|Timeout|ConnectionError|deadline_exhausted|http_error|invalid_json|invalid_schema)(?=[;\s]|$)", detail)
+                        mail_http = re.search(r"(?:^|[;\s])http_status=([345]\d{2})(?=[;\s]|$)", detail)
+                        safe_reason = "; ".join([type(exc).__name__] + [
+                            f"{key}={match.group(1)}" for key, match in (
+                                ("stage", mail_stage), ("type", mail_type), ("http_status", mail_http),
+                            ) if match is not None
+                        ])
+                        logger.warning("[2FA][密码] stage=email_wait path=%s code_controls=%s reason=%s resend=%s",
+                                       current_state["path"], current_state["code_controls"], safe_reason, int(resend_attempted))
                         return {"ok": False, "status": "failed", "stage": "password_email",
-                                "code": "password_email_code_wait_failed", "message": type(exc).__name__, "http_status": None}
+                                "code": "password_email_code_wait_failed", "message": safe_reason,
+                                "http_status": int(mail_http.group(1)) if mail_http is not None else None}
                 submission = _password_submit_code(
                     driver, code, timeout_seconds=min(45.0, max(0.0, deadline - time.monotonic())),
                 )
