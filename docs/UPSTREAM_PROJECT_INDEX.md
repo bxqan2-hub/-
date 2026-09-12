@@ -368,3 +368,11 @@
 - Chrome 错误页从普通推进超时分离为 `email_navigation/browser_navigation_error`。出口占用、冷却及漂移保护保留，不以复用出口提高成功率。
 - 删除补密码敏感页原始截图，收窄相关异常原文/完整 URL 诊断；密码成功 checkpoint、同窗 Cookie/Token/邮箱匹配、activate 成功确认、只读 Token 校验分离均复核。
 - 本地回归与未验证范围见 `docs/2026-09-12_验证码提交确认与导航分类修复-report.md`。本次不启动真实账号注册或历史账号安全重试；运行加载结果单独记录，不将代码回归视为真实批次成功率。
+
+
+## 本次套餐查询卡顿与有界重试修复（2026-09-12 晚）
+
+- 锁定 commit 不变。重新通过 Git tree 确认旧索引套餐文件简写的完整路径为 `vendor/turb_gpt_free_register/paypal_global_rotation_source/gpt_account_plan.py`；该文件与 `vendor/turb_gpt_free_register/core/session.py` raw 均 HTTP 200。没有同步其中的支付写操作。
+- 当前套餐 VN 池 100 条不同配置共用一个网关，原逻辑已洗牌轮转，并非固定单条。两条不同配置只读对照同一账号：1.70 秒 TLS 失败 / 4.69 秒 HTTP 200；未检测实际出口 IP，结果不证明出口唯一。
+- 原账号 worker 强制 max_attempts=0，忽略有限配置；改为读取既有配置，探针默认最多 3 次/允许 1–5，旧 0 兼容为 3。当前及默认单次 timeout 15 秒，失败释放 worker并保留旧权益；重试沿原检测池选路并纳入原限速，退避支持停止。
+- 注册、密码、MFA、国家选择和身份隔离边界未改。完整证据、上游 hash、测试、交付自检及重启状态见 `docs/2026-09-12_套餐查询卡顿与有界重试优化-report.md`。

@@ -359,10 +359,10 @@ class AccountPlanFilterTests(unittest.TestCase):
 
 
 class PlanCheckWorkerTests(unittest.TestCase):
-    def test_zero_attempt_limit_means_retry_until_result(self):
+    def test_legacy_zero_attempt_limit_uses_bounded_default(self):
         timeout, attempts, delay = chatgpt_plan._plan_check_settings(30, 0, 1.5)
         self.assertEqual(timeout, 30)
-        self.assertEqual(attempts, 0)
+        self.assertEqual(attempts, 3)
         self.assertEqual(delay, 1.5)
 
     @patch.object(chatgpt_plan, "BrowserSession")
@@ -374,7 +374,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
         "proxy_used": None,
         "proxy_fallback_reason": None,
     })
-    def test_plan_probe_retries_transient_timeout_until_result(self, _route, session_cls):
+    def test_plan_probe_retries_transient_timeout_within_budget(self, _route, session_cls):
         timeout_error = TimeoutError("temporary timeout")
         response = MagicMock(status_code=200, text='{"accounts": {}}')
         response.json.return_value = {"accounts": {}}
@@ -394,7 +394,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["attempt_count"], 2)
-        self.assertTrue(result["retry_until_result"])
+        self.assertFalse(result["retry_until_result"])
         self.assertEqual(session_cls.return_value.session.get.call_count, 2)
 
     @patch.object(plan_check_service, "check_account_plan", return_value={"ok": True})
@@ -403,7 +403,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
     @patch.object(plan_check_service.detection_proxy, "infer_timezone_offset_min", return_value="-540")
     @patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True)
     @patch.object(plan_check_service.db, "update_account_plan_check")
-    def test_account_page_uses_fast_plan_probe_until_result(
+    def test_account_page_uses_configured_fast_plan_probe_budget(
         self,
         _update,
         _mark,
@@ -423,7 +423,7 @@ class PlanCheckWorkerTests(unittest.TestCase):
         )
         resolve.assert_called_once_with("JP|socks5h://proxy.example:1080")
         self.assertTrue(check.call_args.kwargs["fast_mode"])
-        self.assertEqual(check.call_args.kwargs["max_attempts"], 0)
+        self.assertNotIn("max_attempts", check.call_args.kwargs)
         self.assertEqual(check.call_args.kwargs["locale_country"], "JP")
         self.assertTrue(callable(check.call_args.kwargs["continue_check"]))
         self.assertTrue(callable(check.call_args.kwargs["retry_proxy_provider"]))
@@ -433,6 +433,125 @@ class PlanCheckWorkerTests(unittest.TestCase):
             _update.call_args.kwargs["result"]["plan_check_proxy_country"],
             "JP",
         )
+
+    def test_plan_attempt_settings_are_bounded_for_legacy_and_large_values(self):
+        for supplied, expected in ((None, 3), (0, 3), (-1, 3), (1, 1), (2, 2), (99, 5)):
+            with self.subTest(supplied=supplied), patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_MAX_ATTEMPTS", 3):
+                self.assertEqual(chatgpt_plan._plan_check_settings(15, supplied, 1.5)[1], expected)
+
+    def test_repeated_timeout_releases_worker_after_three_rotated_attempts(self):
+        from types import SimpleNamespace
+        clock = SimpleNamespace(now=0.0)
+        requests = []
+        rate_slots = []
+        def get(*_args, **kwargs):
+            requests.append(kwargs)
+            clock.now += kwargs["timeout"]
+            raise TimeoutError("private-token proxy-password")
+        session = MagicMock()
+        session.session.get.side_effect = get
+        token = AccountPlanFilterTests._token("acct-current")
+        with patch.object(chatgpt_plan, "BrowserSession", return_value=session) as sessions, \
+             patch.object(chatgpt_plan, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, "now", clock.now + seconds))), \
+             patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_MAX_ATTEMPTS", 3), \
+             patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_TIMEOUT", 15), \
+             patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_RETRY_DELAY", 1.5), \
+             patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", side_effect=["VN|http://one.example:80", "VN|http://two.example:80", "VN|http://three.example:80", "VN|http://four.example:80"]), \
+             patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True), \
+             patch.object(plan_check_service.db, "get_account", side_effect=lambda _id: {"plan_check_status": "running" if len(requests) < 4 else "failed"}), \
+             patch.object(plan_check_service.db, "update_account_plan_check") as update, \
+             patch.object(plan_check_service, "_wait_for_rate_slot", side_effect=lambda *_: rate_slots.append(clock.now)):
+            plan_check_service._QUEUE_SLOTS.acquire()
+            result = plan_check_service._run_plan_check(account_id=1, email="one@example.test", access_token=token,
+                                                       trigger="manual", proxy=None, timezone_offset_min="-")
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(result["attempt_count"], 3)
+        self.assertEqual(result["max_attempts"], 3)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["retry_until_result"])
+        self.assertEqual(clock.now, 49.5)
+        self.assertEqual(len(rate_slots), 3)
+        self.assertEqual([call.kwargs["proxy"] for call in sessions.call_args_list],
+                         ["http://one.example:80", "http://two.example:80", "http://three.example:80"])
+        self.assertEqual(session.session.close.call_count, 3)
+        update.assert_called_once()
+        self.assertNotIn("private-token", str(update.call_args))
+
+    def test_retry_after_wait_honors_stop_without_another_request(self):
+        from types import SimpleNamespace
+        clock = SimpleNamespace(now=0.0)
+        response = MagicMock(status_code=429, text="{}", headers={"retry-after": "30"})
+        response.json.return_value = {}
+        session = MagicMock()
+        session.session.get.return_value = response
+        with patch.object(chatgpt_plan, "BrowserSession", return_value=session), \
+             patch.object(chatgpt_plan, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, "now", clock.now + seconds))):
+            result = chatgpt_plan.check_account_plan(AccountPlanFilterTests._token("acct-current"), proxy="",
+                                                    max_attempts=3, fast_mode=True, continue_check=lambda: clock.now < 0.5)
+        self.assertTrue(result["stopped"])
+        self.assertLessEqual(clock.now, 0.75)
+        self.assertEqual(session.session.get.call_count, 1)
+
+    def test_bad_account_yields_single_worker_to_next_queued_account(self):
+        from concurrent.futures import ThreadPoolExecutor
+        requests = []
+        persisted = []
+        token_bad = AccountPlanFilterTests._token("bad-account")
+        token_good = AccountPlanFilterTests._token("good-account")
+        response = MagicMock(status_code=200, text='{"accounts": {}}')
+        response.json.return_value = {"accounts": {}}
+        def get(*_args, **kwargs):
+            token = kwargs["headers"]["authorization"]
+            requests.append(token)
+            if token == "Bearer " + token_bad:
+                raise TimeoutError("proxy temporary failure")
+            return response
+        session = MagicMock()
+        session.session.get.side_effect = get
+        session._get_common_headers.side_effect = lambda: {}
+        slots = plan_check_service.threading.BoundedSemaphore(2)
+        with patch.object(plan_check_service, "_QUEUE_SLOTS", slots), \
+             patch.object(plan_check_service, "_wait_for_rate_slot"), \
+             patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_MAX_ATTEMPTS", 3), \
+             patch.object(plan_check_service.proxy_cfg, "PLAN_CHECK_RETRY_DELAY", 0), \
+             patch.object(plan_check_service.detection_proxy, "configured_detection_proxy_spec", return_value=None), \
+             patch.object(plan_check_service.db, "mark_account_plan_check_running", return_value=True), \
+             patch.object(plan_check_service.db, "get_account", side_effect=lambda _id: {"plan_check_status": "running" if len(requests) < 5 else "failed"}), \
+             patch.object(plan_check_service.db, "update_account_plan_check", side_effect=lambda **kwargs: persisted.append(kwargs)), \
+             patch.object(chatgpt_plan, "BrowserSession", return_value=session), \
+             patch.object(chatgpt_plan, "parse_accounts_check", return_value={"ok": True, "current_plan_type": "free"}), \
+             ThreadPoolExecutor(max_workers=1) as executor:
+            futures = []
+            for account_id, token in ((1, token_bad), (2, token_good)):
+                self.assertTrue(slots.acquire(blocking=False))
+                futures.append(executor.submit(plan_check_service._run_plan_check, account_id=account_id,
+                                               email="fixture@example.test", access_token=token, trigger="manual_bulk",
+                                               proxy=None, timezone_offset_min="-"))
+            self.assertFalse(futures[0].result(timeout=2)["ok"])
+            self.assertTrue(futures[1].result(timeout=2)["ok"])
+            self.assertTrue(slots.acquire(blocking=False))
+            self.assertTrue(slots.acquire(blocking=False))
+            self.assertFalse(slots.acquire(blocking=False))
+        self.assertEqual([item["acc_id"] for item in persisted], [1, 2])
+        self.assertEqual(requests, ["Bearer " + token_bad] * 3 + ["Bearer " + token_good])
+
+    def test_authoritative_auth_failure_does_not_rotate_or_retry(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                response = MagicMock(status_code=status, text="{}")
+                response.json.return_value = {}
+                session = MagicMock()
+                session.session.get.return_value = response
+                with patch.object(chatgpt_plan, "BrowserSession", return_value=session), \
+                     patch.object(chatgpt_plan.time, "sleep") as sleep:
+                    rotate = MagicMock()
+                    result = chatgpt_plan.check_account_plan(AccountPlanFilterTests._token("acct-current"), proxy="",
+                                                            max_attempts=3, fast_mode=True, retry_proxy_provider=rotate)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["http_status"], status)
+                self.assertEqual(session.session.get.call_count, 1)
+                rotate.assert_not_called()
+                sleep.assert_not_called()
 
     def test_plan_probe_persists_country_of_retry_proxy(self):
         def check_with_retry(*_args, **kwargs):

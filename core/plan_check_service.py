@@ -142,20 +142,26 @@ def _run_plan_check(
         resolved_timezone = detection_proxy.infer_timezone_offset_min(selected_proxy, timezone_offset_min)
 
         def _retry_proxy() -> str | None:
+            nonlocal resolved_proxy
+            _wait_for_rate_slot(operation_generation if generation is not None else None)
+            account_operation_control.raise_if_cancelled(operation_generation)
             next_proxy = (
                 detection_proxy.configured_detection_proxy_spec("plan")
                 if proxy is None
                 else selected_proxy
             )
             proxy_country["value"] = detection_proxy.infer_detection_proxy_country(next_proxy)
-            return _resolve_plan_check_proxy(next_proxy, account_id)
+            next_resolved = _resolve_plan_check_proxy(next_proxy, account_id)
+            logger.info("[Plan] 重试选路: account_id=%s changed=%s country=%s",
+                        account_id, next_resolved != resolved_proxy, proxy_country["value"] or "default")
+            resolved_proxy = next_resolved
+            return resolved_proxy
 
         result = check_account_plan(
             access_token,
             proxy=resolved_proxy,
             timezone_offset_min=resolved_timezone,
             locale_country=proxy_country["value"],
-            max_attempts=0,
             fast_mode=True,
             continue_check=lambda: bool(
                 (db.get_account(account_id) or {}).get("plan_check_status") == "running"

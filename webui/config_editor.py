@@ -829,11 +829,11 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_TIMEOUT", "file": "proxy.py", "type": "float", "group": "代理池",
-        "label": "套餐/Agent单次超时(秒)", "help": "只限制单次网络请求，不是套餐检测总时长；套餐检测失败会继续重试到明确结果",
+        "label": "套餐/Agent单次超时(秒)", "help": "默认 15 秒/次；套餐失败按最大尝试次数结束并释放队列，不再无限占用",
     },
     {
         "key": "PLAN_CHECK_MAX_ATTEMPTS", "file": "proxy.py", "type": "int", "group": "代理池",
-        "label": "套餐最大尝试次数", "help": "0=持续检测到明确结果；大于 0 才限制尝试次数。账号页和 GC 的 AT 套餐检测固定使用持续模式",
+        "label": "套餐最大尝试次数", "help": "默认 3 次，支持 1–5；旧值 0 按默认 3 次处理。账号页使用此配置，失败保留上次成功套餐",
     },
     {
         "key": "PLAN_CHECK_RETRY_DELAY", "file": "proxy.py", "type": "float", "group": "代理池",

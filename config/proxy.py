@@ -113,10 +113,10 @@ PAYPAL_OAICS_PROXY_PROFILES = []
 PAYPAL_OAICS_PROXY_ACTIVE = ""
 PAYPAL_OAICS_WORKERS = 5
 
-# 套餐查询的 timeout 只限制单次网络请求；0 次数表示持续重试到取得明确结果。
-# Codex Agent Token 仍由自身队列采用有限重试，不会继承套餐查询的无限循环。
-PLAN_CHECK_TIMEOUT = 30.0
-PLAN_CHECK_MAX_ATTEMPTS = 0
+# 套餐查询采用有限重试，避免坏线路长期占用 worker；旧值 0 按默认 3 次处理。
+# 单次超时与尝试次数仍供 Agent 队列读取；套餐尝试次数限制在 1–5。
+PLAN_CHECK_TIMEOUT = 15.0
+PLAN_CHECK_MAX_ATTEMPTS = 3
 PLAN_CHECK_RETRY_DELAY = 1.5
 
 # 自动、手动和批量套餐查询共用同一个后台队列；Codex Agent Token 使用独立队列，

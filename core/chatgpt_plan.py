@@ -968,21 +968,23 @@ def _plan_check_settings(
     from config import proxy as proxy_cfg
 
     timeout_value = timeout if timeout is not None else getattr(proxy_cfg, "PLAN_CHECK_TIMEOUT", 15.0)
-    attempts_value = max_attempts if max_attempts is not None else getattr(proxy_cfg, "PLAN_CHECK_MAX_ATTEMPTS", 2)
+    attempts_value = max_attempts if max_attempts is not None else getattr(proxy_cfg, "PLAN_CHECK_MAX_ATTEMPTS", 3)
     delay_value = retry_delay if retry_delay is not None else getattr(proxy_cfg, "PLAN_CHECK_RETRY_DELAY", 1.5)
-    attempts_number = int(attempts_value if attempts_value is not None else 2)
+    attempts_number = int(attempts_value if attempts_value is not None else 3)
     return (
         max(1.0, min(120.0, float(timeout_value or 30.0))),
-        0 if attempts_number <= 0 else max(1, attempts_number),
+        3 if attempts_number <= 0 else min(5, max(1, attempts_number)),
         max(0.0, min(30.0, float(delay_value or 0.0))),
     )
 
 
 def _format_plan_request_error(exc: Exception, timeout_seconds: float) -> str:
     message = str(exc or "").strip()
-    if type(exc).__name__.lower().endswith("timeout") or "curl: (28)" in message.lower():
+    if "timeout" in type(exc).__name__.lower() or "curl: (28)" in message.lower():
         return f"套餐查询超时（{timeout_seconds:g} 秒）：专用代理节点响应过慢，请重试"
-    return f"{type(exc).__name__}: {message}"
+    if "ssl" in type(exc).__name__.lower() or "curl: (35)" in message.lower():
+        return "套餐查询 TLS 连接失败：检测代理链路握手异常"
+    return f"套餐查询网络请求失败（{type(exc).__name__}）"
 
 
 def _retryable_plan_error(http_status: int | None) -> bool:
@@ -1077,8 +1079,7 @@ def check_account_plan(
 
     last_result: dict | None = None
     attempt = 0
-    while True:
-        attempt += 1
+    for attempt in range(1, attempts + 1):
         if callable(continue_check) and not continue_check():
             return {
                 "ok": False,
@@ -1087,7 +1088,7 @@ def check_account_plan(
                 "retryable": False,
                 "stopped": True,
                 "attempt_count": attempt - 1,
-                "max_attempts": attempts or None,
+                "max_attempts": attempts,
                 **route_meta,
             }
         env = None
@@ -1163,8 +1164,8 @@ def check_account_plan(
                     parsed = parse_accounts_check(data, token=token)
                     parsed["http_status"] = http_status
                     parsed["attempt_count"] = attempt
-                    parsed["max_attempts"] = attempts or None
-                    parsed["retry_until_result"] = attempts == 0
+                    parsed["max_attempts"] = attempts
+                    parsed["retry_until_result"] = False
                     parsed["request_timeout"] = timeout_seconds
                     parsed["retryable"] = False
                     parsed["plan_check_locale_country"] = request_locale_country or None
@@ -1223,15 +1224,15 @@ def check_account_plan(
                         }
                     detected["http_status"] = http_status
                     detected["attempt_count"] = attempt
-                    detected["max_attempts"] = attempts or None
-                    detected["retry_until_result"] = attempts == 0
+                    detected["max_attempts"] = attempts
+                    detected["retry_until_result"] = False
                     detected["request_timeout"] = timeout_seconds
                     detected["plan_check_locale_country"] = request_locale_country or None
                     detected["plan_check_request_language"] = request_language or None
                     detected.update(route_meta)
                     return detected
         except Exception as exc:
-            logger.debug("套餐查询失败: %s: %s", type(exc).__name__, exc, exc_info=True)
+            logger.debug("套餐查询失败: %s", type(exc).__name__)
             last_result = {
                 "ok": False,
                 "checked_at": now_iso(),
@@ -1249,27 +1250,32 @@ def check_account_plan(
         last_result = last_result or {"ok": False, "checked_at": now_iso(), "error": "未知错误", "retryable": True}
         last_result.update({
             "attempt_count": attempt,
-            "max_attempts": attempts or None,
-            "retry_until_result": attempts == 0,
+            "max_attempts": attempts,
+            "retry_until_result": False,
             "request_timeout": timeout_seconds,
             "plan_check_locale_country": request_locale_country or None,
             "plan_check_request_language": request_language or None,
             **route_meta,
             **{k: v for k, v in claims.items() if k != "payload"},
         })
-        if not last_result.get("retryable") or (attempts > 0 and attempt >= attempts):
+        if not last_result.get("retryable") or attempt >= attempts:
             break
 
         wait_seconds = _retry_wait_seconds(resp, base_delay, attempt)
         logger.warning(
             "套餐查询临时失败，第 %s/%s 次，%.1fs 后重试: %s",
             attempt,
-            attempts or "∞",
+            attempts,
             wait_seconds,
             last_result.get("error"),
         )
         if wait_seconds > 0:
-            time.sleep(wait_seconds)
+            if callable(continue_check):
+                wait_until = time.monotonic() + wait_seconds
+                while time.monotonic() < wait_until and continue_check():
+                    time.sleep(min(0.25, max(0.0, wait_until - time.monotonic())))
+            else:
+                time.sleep(wait_seconds)
 
     if not fast_mode and not (last_result or {}).get("plan_terminal_code"):
         env = None
@@ -1291,8 +1297,8 @@ def check_account_plan(
                 "accounts_check_error": (last_result or {}).get("error"),
                 "accounts_check_http_status": (last_result or {}).get("http_status"),
                 "attempt_count": attempt,
-                "max_attempts": attempts or None,
-                "retry_until_result": attempts == 0,
+                "max_attempts": attempts,
+                "retry_until_result": False,
                 "request_timeout": timeout_seconds,
                 "plan_check_locale_country": request_locale_country or None,
                 "plan_check_request_language": request_language or None,
