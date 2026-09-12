@@ -1215,35 +1215,37 @@ def _password_visible_inputs(driver, selector: str, *, require_enabled: bool = T
 def _password_click_playwright(driver, field, selectors: str) -> bool:
     try:
         scope = field.locator("xpath=ancestor::form[1]")
-        button = scope.locator(selectors)
-        if button.count() and button.first.is_visible(timeout=500):
-            button.first.click(timeout=5000)
+        buttons = scope.locator(selectors)
+        for index in range(min(int(buttons.count()), 20)):
+            button = buttons.nth(index)
+            if (not button.is_visible(timeout=500) or not button.is_enabled(timeout=500)
+                    or str(button.get_attribute("aria-disabled", timeout=500) or "").lower() == "true"
+                    or str(button.get_attribute("value", timeout=500) or "").lower() == "resend"):
+                continue
+            try:
+                button.click(timeout=5000)
+            except Exception as exc:
+                # A click error may follow dispatch. Observe its result instead
+                # of issuing another click or Enter against an ambiguous write.
+                logger.debug("[2FA][密码] 提交动作待确认：%s", type(exc).__name__)
             return True
     except Exception:
         pass
-    try:
-        button = driver.locator(selectors)
-        if button.count() and button.first.is_visible(timeout=500):
-            button.first.click(timeout=5000)
-            return True
-    except Exception:
-        pass
-    try:
-        driver.keyboard.press("Enter")
-        return True
-    except Exception:
-        return False
+    return False
 
 
 def _password_find_submit_selenium(field):
     try:
         scope = field.find_element("xpath", "ancestor::form[1]")
-        submit = scope.find_element(
+        submits = scope.find_elements(
             "css selector",
             'button[type="submit"], input[type="submit"], button[name="intent"]',
         )
-        if submit.is_displayed() and submit.is_enabled():
-            return submit
+        for submit in submits[:20]:
+            if (submit.is_displayed() and submit.is_enabled()
+                    and str(submit.get_attribute("aria-disabled") or "").lower() != "true"
+                    and str(submit.get_attribute("value") or "").lower() != "resend"):
+                return submit
     except Exception:
         pass
     return None
@@ -1251,32 +1253,15 @@ def _password_find_submit_selenium(field):
 
 def _password_click_selenium(driver, field) -> bool:
     submit = _password_find_submit_selenium(field)
-    if submit is not None:
-        try:
-            submit.click()
-            return True
-        except Exception:
-            pass
-    try:
-        clicked = bool(driver.execute_script(
-            """
-            const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
-              && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-            const target = [...document.querySelectorAll('button[type="submit"]:not([disabled]), input[type="submit"]:not([disabled]), button[name="intent"]:not([disabled])')]
-              .find(visible); if (!target) return false; target.click(); return true;
-            """
-        ))
-        if clicked:
-            return True
-    except Exception:
-        pass
-    try:
-        from selenium.webdriver.common.keys import Keys
-
-        field.send_keys(Keys.ENTER)
-        return True
-    except Exception:
+    if submit is None:
         return False
+    try:
+        submit.click()
+    except Exception as exc:
+        logger.debug("[2FA][密码] 提交动作待确认：%s", type(exc).__name__)
+    # True means one action was attempted, not that the server accepted it.
+    # Callers must still observe a response or the successful page state.
+    return True
 
 
 def _password_code_page_state(driver, body: str, fields: list, password_fields: list) -> dict:
@@ -1308,7 +1293,8 @@ def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -
     initial_code_error = bool(_PASSWORD_CODE_REJECTION_RE.search(initial_body))
     initial_email = "email-verification" in _password_page_url(driver).lower() or bool(_PASSWORD_EMAIL_RE.search(initial_body))
     initial_authenticator = bool(_PASSWORD_AUTHENTICATOR_RE.search(initial_body)) and not initial_email
-    activity = {"ids": set(), "status": None}
+    activity = {"ids": set(), "status": None, "responses": {}}
+    activity_lock = threading.Lock()
     subscriptions = []
     connection = None
     observing = False
@@ -1334,11 +1320,19 @@ def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -
             relevant_path = target.path.startswith("/api/accounts/") if initial_authenticator else target.path == "/api/accounts/email-otp/validate"
             if target.hostname != "auth.openai.com" or not relevant_path:
                 return
-            if response is not None:
-                if request_id in activity["ids"]:
-                    activity["status"] = int(response.status)
-            elif request is not None and str(request.method).upper() == "POST" and len(activity["ids"]) < 4:
-                activity["ids"].add(request_id)
+            with activity_lock:
+                if response is not None:
+                    status = int(response.status)
+                    if request_id in activity["ids"]:
+                        activity["status"] = status
+                    elif len(activity["responses"]) < 8:
+                        # Selenium dispatches CDP callbacks on separate threads;
+                        # a response can be delivered before its request callback.
+                        activity["responses"][request_id] = status
+                elif request is not None and str(request.method).upper() == "POST" and len(activity["ids"]) < 4:
+                    activity["ids"].add(request_id)
+                    if request_id in activity["responses"]:
+                        activity["status"] = activity["responses"].pop(request_id)
         except Exception:
             pass
 
@@ -1367,8 +1361,9 @@ def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -
             if state["page_error"] or (state["code_error"] and not state["visible_code_controls"] and not entered):
                 outcome = "page_error"
                 break
-            if activity["ids"]:
-                status = activity["status"]
+            with activity_lock:
+                request_seen, status = bool(activity["ids"]), activity["status"]
+            if request_seen:
                 if status is None:
                     time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
                     continue
@@ -1383,10 +1378,9 @@ def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -
                     outcome = "advanced"
                     break
             if clicked_at is not None:
-                if time.monotonic() - clicked_at >= 0.5:
-                    outcome = "submitted"
-                    break
-                time.sleep(0.1)
+                # A DOM click is not a submission acknowledgement. Keep the
+                # observer alive for delayed requests/navigation, without replay.
+                time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
                 continue
             last_key_attempted = False
             try:
@@ -1442,21 +1436,21 @@ def _password_submit_code(driver, code: str, *, timeout_seconds: float = 45.0) -
                     connection.remove_callback(event, callback)
             except Exception:
                 logger.debug("[2FA][密码] OTP 观察器清理失败")
-    if outcome == "submit_failed" and entered and not observing:
+    with activity_lock:
+        post_count, status = len(activity["ids"]), activity["status"]
+    if outcome == "submit_failed" and entered:
         outcome = "submit_unconfirmed"
-    if outcome == "submit_failed" and activity["ids"] and activity["status"] is None:
+    if outcome in {"submit_failed", "submit_unconfirmed"} and post_count and status is None:
         outcome = "request_pending"
-    if outcome in {"page_error", "rejected", "http_failed"}:
-        _password_screenshot(driver)
     logger.info(
         "[2FA][密码] OTP stage=%s path=%s code_controls=%s password_controls=%s post_count=%s http=%s error_type=%s",
         outcome, state["path"], state["code_controls"], state["password_controls"],
-        len(activity["ids"]) if observing else "unknown", activity["status"] or "-",
+        post_count if observing else "unknown", status or "-",
         state["page_error"] or ("code_error" if state["code_error"] else "none"),
     )
     return {
         "ok": outcome in {"advanced", "submitted"}, "status": outcome,
-        "http_status": activity["status"], "initial_code_error": initial_code_error,
+        "http_status": status, "initial_code_error": initial_code_error,
     }
 
 
@@ -1487,19 +1481,6 @@ def _password_click_resend(driver) -> bool:
         return bool(driver.execute_script("return (" + _PASSWORD_RESEND_JS + ")();"))
     except Exception:
         return False
-
-
-def _password_screenshot(driver) -> None:
-    path = str(_PROJECT_ROOT / "run" / "password_setup_failed.png")
-    try:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        if _is_playwright_page(driver):
-            driver.screenshot(path=path)
-        else:
-            driver.save_screenshot(path)
-        logger.info("[2FA][密码] 失败截图已保存 %s", path)
-    except Exception:
-        pass
 
 
 def _setup_password_with_driver(
@@ -1639,7 +1620,6 @@ def _setup_password_with_driver(
         ):
             logger.warning("[2FA][密码] stage=before_submit path=%s code_controls=%s error_type=%s", code_state["path"],
                            code_state["code_controls"], code_state["page_error"] or "code_error_without_form")
-            _password_screenshot(driver)
             return {"ok": False, "status": "failed", "stage": f"password_{challenge}",
                     "code": f"password_{challenge}_reauth_page_error", "message": "重认证页面异常，尚未提交验证码", "http_status": None}
         if challenge_used and not password_fields and not password_submitted:
@@ -1648,7 +1628,6 @@ def _setup_password_with_driver(
                 initial_code_errors[challenge] = False
             if code_state["page_error"] or (code_state["code_error"] and not initial_code_errors[challenge]):
                 page_error = bool(code_state["page_error"])
-                _password_screenshot(driver)
                 logger.warning("[2FA][密码] stage=%s path=%s code_controls=%s error_type=%s", challenge,
                                code_state["path"], code_state["code_controls"], code_state["page_error"] or "code_error")
                 return {
@@ -1790,7 +1769,6 @@ def _setup_password_with_driver(
                 }
         time.sleep(0.5)
 
-    _password_screenshot(driver)
     return {
         "ok": False, "status": "failed", "stage": "password_setup",
         "code": "password_settings_timeout", "message": "补设密码流程超时，尚未确认密码成功终态",
@@ -1925,7 +1903,7 @@ def _follow_reauth_with_driver(
     raise TwoFASetupError(
         "totp_reauth",
         "totp_reauth_browser_timeout",
-        f"2FA 浏览器重认证超时 url={last_url}",
+        "2FA 浏览器重认证超时",
     )
 
 
@@ -1956,8 +1934,8 @@ def _validate_2fa_token(session: BrowserSession, access_token: str) -> int:
             "2FA 激活后 Token 校验失败",
             http_status=last_status,
         )
-    logger.debug("[2FA] Token 只读校验请求异常", exc_info=last_exc)
-    raise TwoFASetupError("totp_validate", "totp_token_validation_failed", "2FA 激活后 Token 校验请求失败") from last_exc
+    logger.debug("[2FA] Token 只读校验请求异常：%s", type(last_exc).__name__)
+    raise TwoFASetupError("totp_validate", "totp_token_validation_failed", "2FA 激活后 Token 校验请求失败") from None
 
 
 def _snapshot_otp_history(email: str, *, timeout: float = 2.0) -> set[str]:
@@ -1998,9 +1976,8 @@ def _snapshot_otp_history(email: str, *, timeout: float = 2.0) -> set[str]:
         code = str(snapshot_fn(email, timeout=max(1.0, float(timeout or 2.0))) or "").strip()
     except Exception as exc:
         logger.debug(
-            "[2FA] 历史 OTP 快照失败，继续正常取码：%s: %s",
+            "[2FA] 历史 OTP 快照失败，继续正常取码：%s",
             type(exc).__name__,
-            redact_otp_text(str(exc)[:160]),
         )
         return set()
     if len(code) == 6 and code.isdigit():
@@ -2134,8 +2111,8 @@ def _setup_2fa_result(
             raise TwoFASetupError(
                 "password_setup",
                 "password_setup_failed",
-                f"补设密码异常：{type(exc).__name__}: {str(exc)[:160]}",
-            ) from exc
+                f"补设密码异常：{type(exc).__name__}",
+            ) from None
         if not isinstance(password_setup, dict) or not bool(password_setup.get("ok")):
             failure = password_setup if isinstance(password_setup, dict) else {}
             configured_password = None

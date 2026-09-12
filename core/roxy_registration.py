@@ -1219,6 +1219,8 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     cleared_recover_done = False
     expected_email = str(email or "").strip().lower()
     while time.time() < end:
+        if _is_browser_navigation_error(driver):
+            raise RuntimeError("stage=email_navigation type=browser_navigation_error")
         if _has_access_token(driver):
             return "logged_in"
         if _is_login_password_page(driver):
@@ -1262,6 +1264,8 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
                 cleared_seen_at = None
             # 仍是当前邮箱页，继续短等。
         time.sleep(0.8)
+    if _is_browser_navigation_error(driver):
+        raise RuntimeError("stage=email_navigation type=browser_navigation_error")
     logger.info("%s 邮箱提交后等待下一步超时，最后邮箱页状态=%s", _log_prefix(driver), last)
     return "email_page" if _is_email_login_page_still_present(driver) else "unknown"
 
@@ -2084,13 +2088,15 @@ def _reload_and_resubmit_otp_once(driver, otp: str, *, timeout: int = 30) -> str
 
 def _click_continue(driver) -> None:
     """只点击 OTP 表单自己的提交按钮，禁止在跳转后的登录页误点第三方登录。"""
-    _click_any(driver, [
-        "button[data-dd-action-name='Continue']",
-        "form:has(input[autocomplete='one-time-code']) button[type='submit']",
-        "form:has(input[name='code']) button[type='submit']",
-        "//input[@name='code']/ancestor::form[1]//button[@type='submit']",
-        "//input[@autocomplete='one-time-code']/ancestor::form[1]//button[@type='submit']",
+    submit = _find_any(driver, [
+        "form:has(input[autocomplete='one-time-code']) button[type='submit']:not([value='resend'])",
+        "form:has(input[name='code']) button[type='submit']:not([value='resend'])",
+        "//input[@name='code']/ancestor::form[1]//button[@type='submit' and not(@value='resend')]",
+        "//input[@autocomplete='one-time-code']/ancestor::form[1]//button[@type='submit' and not(@value='resend')]",
     ], timeout=4)
+    # Target the live form control, not a delayed randomized screen coordinate.
+    # A click/navigation error is ambiguous; leave observation to the caller.
+    submit.click()
 
 
 def _maybe_accept(driver) -> None:
@@ -3403,7 +3409,7 @@ def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None)
             _click_continue(driver)
         outcome = _wait_after_email_otp_submit(
             driver,
-            timeout=max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 35) or 35)),
+            timeout=max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 45) or 45)),
         )
         if outcome not in {"accepted", "email_verified", "profile", "logged_in"}:
             raise RuntimeError(f"可见窗口 OTP 恢复未完成: {outcome}")
@@ -3899,12 +3905,12 @@ def run_roxy_registration(
             else:
                 logger.info("[Roxy注册][OTP] 输入后已离开验证码页，判定页面已自动提交")
 
-            otp_submit_timeout = max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 15) or 15))
+            otp_submit_timeout = max(5, int(getattr(_cfg, "ROXY_OTP_SUBMIT_TIMEOUT", 45) or 45))
             otp_submit_attempts = max(
                 1,
-                min(2, int(getattr(_cfg, "ROXY_OTP_SUBMIT_ATTEMPTS", 2) or 2)),
+                min(2, int(getattr(_cfg, "ROXY_OTP_SUBMIT_ATTEMPTS", 1) or 1)),
             )
-            pending_grace = max(0, int(getattr(_cfg, "ROXY_OTP_PENDING_GRACE", 10) or 0))
+            pending_grace = max(0, int(getattr(_cfg, "ROXY_OTP_PENDING_GRACE", 0) or 0))
             # Let the original submit and callback finish before destroying the DOM.
             outcome = _wait_after_email_otp_submit(driver, timeout=otp_submit_timeout)
             observed_seconds = otp_submit_timeout

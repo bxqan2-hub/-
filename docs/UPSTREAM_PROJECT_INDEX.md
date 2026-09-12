@@ -357,3 +357,14 @@
 - 原 `_setup_password_with_driver` 漏传三项既有 `TWOFA_GENERIC_API_*`，误用普通注册运行值 5/3/1。现在与既有协议重认证分支一样显式传入 12/8/2（可配置），总等待预算、旧码/旧消息过滤与传输错误不重发规则不变。
 - 终止错误仅从异常提取白名单邮件阶段、错误类型与 HTTP 状态至现有 message/http_status，删除仅保留异常类名而丢失阶段的诊断；不保存原始异常 URL、邮件正文或 OTP。
 - Job 802 已读到验证码但页面未推进，独立列为后续页面提交问题，本轮不重放 OTP。证据、上游 hash、验证、安全核对和 R8 自检见 `docs/2026-09-12_2FA邮箱取件提前失败修复-report.md`。
+
+
+## 本次验证码提交确认与导航分类修复（2026-09-12 晚）
+
+- 修改前重新在内存获取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 account_export 和 roxy_registration，均 HTTP 200；锁定版本不变。上游没有本地补密码 helper，不复制上游广域按钮选择或备用协议。
+- Job 802 已读码而 `submitted post_count=0`：删除补密码 OTP 点击后 0.5 秒伪确认，持续被动观察至原预算内真实响应/页面推进；Selenium CDP 线程回调乱序通过局部有界 request-id/status 关联处理。无确认/pending/HTTP错误分别记录，不盲目补点。
+- 密码/OTP 按钮限定当前字段所属表单，跳过隐藏、禁用、aria-disabled、resend；模糊点击异常不再接全页 JS/Enter。注册 OTP 也限定所属表单并使用单次原生控件点击。
+- 注册 OTP 当前 15 秒即刷新同码的设置改用既有 `ROXY_OTP_SUBMIT_TIMEOUT=45`、`ROXY_OTP_SUBMIT_ATTEMPTS=1`，连续观察、pending 停止，默认/示例/当前环境与帮助文案同步；不增加配置或第二套执行器。
+- Chrome 错误页从普通推进超时分离为 `email_navigation/browser_navigation_error`。出口占用、冷却及漂移保护保留，不以复用出口提高成功率。
+- 删除补密码敏感页原始截图，收窄相关异常原文/完整 URL 诊断；密码成功 checkpoint、同窗 Cookie/Token/邮箱匹配、activate 成功确认、只读 Token 校验分离均复核。
+- 本地回归与未验证范围见 `docs/2026-09-12_验证码提交确认与导航分类修复-report.md`。本次不启动真实账号注册或历史账号安全重试；运行加载结果单独记录，不将代码回归视为真实批次成功率。

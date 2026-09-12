@@ -256,6 +256,52 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertEqual(state, "otp")
         wait_next.assert_called_once_with(driver, "mail@example.test", timeout=17)
 
+    def test_email_submit_navigation_error_is_not_reported_as_unknown(self):
+        driver = MagicMock()
+        driver.current_url = "chrome-error://chromewebdata/"
+        with patch.object(roxy_registration, "_has_access_token", return_value=False) as read_token, \
+             patch.object(roxy_registration.time, "time", side_effect=[0.0, 0.0, 20.0]), \
+             patch.object(roxy_registration.time, "sleep") as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError, "stage=email_navigation type=browser_navigation_error"
+            ):
+                roxy_registration._wait_email_submit_next_state(
+                    driver, "mail@example.test", timeout=18
+                )
+        read_token.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_email_navigation_error_at_wait_deadline_still_keeps_its_stage(self):
+        driver = MagicMock()
+        driver.current_url = "chrome-error://chromewebdata/"
+        with patch.object(roxy_registration, "_email_input_value_state") as read_input:
+            with self.assertRaisesRegex(RuntimeError, "stage=email_navigation"):
+                roxy_registration._wait_email_submit_next_state(
+                    driver, "mail@example.test", timeout=0
+                )
+        read_input.assert_not_called()
+
+    def test_email_navigation_error_propagates_without_nextauth_or_email_replay(self):
+        driver = MagicMock()
+        error = RuntimeError("stage=email_navigation type=browser_navigation_error")
+        with patch.object(roxy_registration, "_is_email_verification_page", return_value=False), \
+             patch.object(roxy_registration, "_is_signup_password_page", return_value=False), \
+             patch.object(roxy_registration, "_has_access_token", return_value=False), \
+             patch.object(roxy_registration, "_type_email_address"), \
+             patch.object(roxy_registration, "_email_input_value_state", return_value={
+                 "inputs": [{"value": "mail@example.test"}]
+             }), \
+             patch.object(roxy_registration, "_submit_email_step") as submit, \
+             patch.object(roxy_registration, "_wait_email_submit_next_state", side_effect=error), \
+             patch.object(roxy_registration, "_submit_email_via_browser_nextauth") as fallback, \
+             patch.object(roxy_registration, "human_delay"):
+            with self.assertRaisesRegex(RuntimeError, "stage=email_navigation"):
+                roxy_registration._submit_email_and_wait_next(
+                    driver, "mail@example.test", attempts=3
+                )
+        submit.assert_called_once()
+        fallback.assert_not_called()
+
     def test_last_email_attempt_recovers_empty_intermediate_shell_with_nextauth(self):
         driver = MagicMock()
         driver.current_url = "https://chatgpt.com/auth/login?email=mail%40example.test"
@@ -581,6 +627,34 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             outcome = roxy_registration._wait_after_email_otp_submit(driver, timeout=0)
         self.assertEqual(outcome, "pending")
 
+    def test_otp_continue_clicks_form_control_directly_not_a_screen_coordinate(self):
+        driver = MagicMock()
+        control = MagicMock()
+        with patch.object(roxy_registration, "_find_any", return_value=control) as find, \
+             patch.object(roxy_registration, "_human_click") as coordinate_click:
+            roxy_registration._click_continue(driver)
+        control.click.assert_called_once_with()
+        coordinate_click.assert_not_called()
+        selectors = find.call_args.args[1]
+        self.assertTrue(selectors)
+        for selector in selectors:
+            self.assertIn("form", selector)
+            self.assertTrue("one-time-code" in selector or "name='code'" in selector)
+            self.assertIn("resend", selector)
+        self.assertEqual(find.call_args.kwargs["timeout"], 4)
+
+    def test_otp_continue_does_not_repeat_a_click_after_uncertain_driver_error(self):
+        driver = MagicMock()
+        control = MagicMock()
+        control.click.side_effect = RuntimeError("navigation after click")
+        with patch.object(roxy_registration, "_find_any", return_value=control), \
+             patch.object(roxy_registration, "_human_click") as coordinate_click:
+            with self.assertRaisesRegex(RuntimeError, "navigation after click"):
+                roxy_registration._click_continue(driver)
+        control.click.assert_called_once_with()
+        coordinate_click.assert_not_called()
+        driver.execute_script.assert_not_called()
+
     def test_pending_otp_submit_never_becomes_accepted(self):
         with self.assertRaisesRegex(RuntimeError, "without an acceptance signal"):
             roxy_registration._require_confirmed_otp_submit("pending", 20)
@@ -661,6 +735,73 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             self.assertEqual(roxy_registration._wait_after_email_otp_submit(driver, timeout=15), "accepted")
         self.assertEqual(driver.refresh_count, 0)
         self.assertGreaterEqual(driver.now, 12)
+
+    def test_otp_default_budget_observes_once_for_45_seconds(self):
+        import ast
+        from pathlib import Path
+
+        config_path = Path(roxy_registration._cfg.__file__)
+        declarations = ast.parse(config_path.read_text(encoding="utf-8"))
+        defaults = {
+            node.target.id: ast.literal_eval(node.value)
+            for node in declarations.body
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id in {
+                "ROXY_OTP_SUBMIT_TIMEOUT", "ROXY_OTP_SUBMIT_ATTEMPTS", "ROXY_OTP_PENDING_GRACE"
+            }
+        }
+        self.assertEqual(defaults, {
+            "ROXY_OTP_SUBMIT_TIMEOUT": 45,
+            "ROXY_OTP_SUBMIT_ATTEMPTS": 1,
+            "ROXY_OTP_PENDING_GRACE": 0,
+        })
+        example = (config_path.parent.parent / ".env.example").read_text(encoding="utf-8")
+        for key, value in defaults.items():
+            self.assertIn(f"{key}={value}", example.splitlines())
+
+    def test_registration_otp_observation_accepts_late_signal_without_refresh_or_replay(self):
+        import ast
+        import inspect
+        from types import SimpleNamespace
+
+        # Execute the existing registration observation block with a virtual page.
+        # Avoid launching a browser, creating an account, or copying the algorithm.
+        tree = ast.parse(inspect.getsource(roxy_registration.run_roxy_registration))
+        otp_loop = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name) and node.target.id == "otp_attempt"
+        )
+        start = next(
+            i for i, node in enumerate(otp_loop.body)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "otp_submit_timeout" for target in node.targets)
+        )
+        end = next(
+            i for i, node in enumerate(otp_loop.body)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name) and node.value.func.id == "_require_confirmed_otp_submit"
+        )
+        observation = compile(ast.Module(body=otp_loop.body[start:end + 1], type_ignores=[]), "otp_observation", "exec")
+        for advanced_at in (20, None):
+            for defaults_only in (True, False):
+                with self.subTest(advanced_at=advanced_at, defaults_only=defaults_only):
+                    driver = OtpNavigationDriver(advanced_at=advanced_at)
+                    config = SimpleNamespace() if defaults_only else SimpleNamespace(
+                        ROXY_OTP_SUBMIT_TIMEOUT=45, ROXY_OTP_SUBMIT_ATTEMPTS=1, ROXY_OTP_PENDING_GRACE=0
+                    )
+                    namespace = dict(vars(roxy_registration), driver=driver, _cfg=config, current_otp="001414")
+                    with patch.object(roxy_registration.time, "time", side_effect=lambda: driver.now), \
+                         patch.object(roxy_registration.time, "sleep", side_effect=driver.sleep):
+                        if advanced_at is None:
+                            with self.assertRaisesRegex(RuntimeError, "observed 45s without an acceptance signal"):
+                                exec(observation, namespace)
+                        else:
+                            exec(observation, namespace)
+                            self.assertEqual(namespace["outcome"], "accepted")
+                            self.assertEqual(driver.now, 20)
+                    self.assertEqual(driver.refresh_count, 0)
 
     def test_unknown_callback_is_pending_not_accepted(self):
         driver = OtpNavigationDriver(advanced_at=0, advanced="unknown")

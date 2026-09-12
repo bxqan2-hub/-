@@ -1461,6 +1461,84 @@ def test_setup_2fa_aborts_before_mfa_when_password_setup_fails(monkeypatch) -> N
     assert password_checkpoints == []
 
 
+@pytest.mark.parametrize("failure_stage", ["resolve", "snapshot"])
+def test_password_otp_history_exception_never_logs_mail_credentials(monkeypatch, caplog, failure_stage):
+    from core import email_provider, generic_api_mail_client
+
+    failure = RuntimeError("private-token user@example.test OTP=012345 password=Ab3!cdefgh123")
+    monkeypatch.setattr(email_provider, "resolve_email_source", Mock(
+        side_effect=failure if failure_stage == "resolve" else None, return_value="generic_api",
+    ))
+    monkeypatch.setattr(generic_api_mail_client, "snapshot_current_otp", Mock(side_effect=failure))
+    with caplog.at_level("DEBUG"):
+        result = account_export._snapshot_otp_history("user@example.test")
+    assert result == set()
+    assert "RuntimeError" in caplog.text
+    for sensitive in ("private-token", "user@example.test", "012345", "Ab3!cdefgh123"):
+        assert sensitive not in caplog.text
+
+
+def test_token_validation_exception_preserves_stage_without_credentials(monkeypatch, caplog):
+    monkeypatch.setattr(account_export.time, "sleep", lambda seconds: None)
+    session = SimpleNamespace(get_chatgpt_headers=lambda **kwargs: {}, get=Mock(
+        side_effect=RuntimeError("private-token user@example.test OTP=012345 password=Ab3!cdefgh123"),
+    ))
+    with caplog.at_level("DEBUG"), pytest.raises(account_export.TwoFASetupError) as caught:
+        account_export._validate_2fa_token(session, "private-token")
+    assert caught.value.stage == "totp_validate"
+    assert caught.value.code == "totp_token_validation_failed"
+    assert caught.value.http_status is None
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert session.get.call_count == 3
+    assert "RuntimeError" in caplog.text
+    for sensitive in ("private-token", "user@example.test", "012345", "Ab3!cdefgh123"):
+        assert sensitive not in caplog.text and sensitive not in str(caught.value)
+
+
+def test_password_setup_unexpected_exception_preserves_stage_without_credentials(monkeypatch, caplog):
+    from core import registration_password
+
+    monkeypatch.setattr(registration_password, "registration_password_required", lambda: True)
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", Mock(
+        side_effect=RuntimeError("private-token user@example.test OTP=012345 password=Ab3!cdefgh123"),
+    ))
+    checkpoint, enroll = Mock(), Mock()
+    monkeypatch.setattr(registration_password, "persist_confirmed_registration_password", checkpoint)
+    monkeypatch.setattr(account_export, "_setup_totp_with_driver", enroll)
+    session = SimpleNamespace()
+    with caplog.at_level("DEBUG"), pytest.raises(account_export.TwoFASetupError) as caught:
+        account_export.setup_2fa_result(
+            session, "user@example.test", driver=object(), desired_password="Ab3!cdefgh123",
+        )
+    assert caught.value.stage == "password_setup"
+    assert caught.value.code == "password_setup_failed"
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert session._twofa_last_error["stage"] == "password_setup"
+    assert "RuntimeError" in str(caught.value)
+    checkpoint.assert_not_called()
+    enroll.assert_not_called()
+    for sensitive in ("private-token", "user@example.test", "012345", "Ab3!cdefgh123"):
+        assert sensitive not in caplog.text and sensitive not in str(caught.value)
+        assert sensitive not in session._twofa_last_error["message"]
+
+
+def test_browser_reauth_timeout_does_not_expose_url_query(monkeypatch, caplog):
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(account_export, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, "now", clock.now + seconds),
+    ))
+    auth_url = "https://auth.openai.com/authorize?token=private-token&email=user@example.test&password=Ab3!cdefgh123"
+    driver = SimpleNamespace(current_url=auth_url, get=Mock(), execute_script=lambda *args: "Processing",
+                             find_elements=lambda *args: [])
+    with caplog.at_level("DEBUG"), pytest.raises(account_export.TwoFASetupError) as caught:
+        account_export._follow_reauth_with_driver(SimpleNamespace(), driver, auth_url, password=None, timeout_seconds=15)
+    assert caught.value.stage == "totp_reauth"
+    assert caught.value.code == "totp_reauth_browser_timeout"
+    assert clock.now == 15
+    for sensitive in ("private-token", "user@example.test", "Ab3!cdefgh123", auth_url):
+        assert sensitive not in caplog.text and sensitive not in str(caught.value)
+
+
 def test_password_setup_uses_selenium_async_callback_and_skips_totp_when_password_page_is_ready(monkeypatch) -> None:
     """Selenium/Cloak 分支必须等待异步重认证结果，且可直接提交密码页。"""
     monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *args, **kwargs: set())
@@ -1489,8 +1567,8 @@ def test_password_setup_uses_selenium_async_callback_and_skips_totp_when_passwor
         def __init__(self, owner):
             self.owner = owner
 
-        def find_element(self, *_args):
-            return self.owner.submit
+        def find_elements(self, *_args):
+            return [self.owner.submit]
 
     class Submit:
         def __init__(self, owner):
@@ -1501,6 +1579,9 @@ def test_password_setup_uses_selenium_async_callback_and_skips_totp_when_passwor
 
         def is_enabled(self):
             return True
+
+        def get_attribute(self, name):
+            return None
 
         def click(self):
             self.owner.submitted = True
@@ -1618,6 +1699,12 @@ def test_password_setup_uses_playwright_evaluate_for_async_reauth(monkeypatch) -
                 return not self.page.submitted
             return True
 
+        def is_enabled(self, timeout=0):
+            return True
+
+        def get_attribute(self, name, timeout=0):
+            return None
+
         def inner_text(self, timeout=0):
             return "Password updated" if self.page.submitted else "Set a password"
 
@@ -1699,6 +1786,12 @@ def test_password_setup_handles_email_reauth_code_before_password(monkeypatch) -
 
         def is_visible(self, timeout=0):
             return self.count() > 0
+
+        def is_enabled(self, timeout=0):
+            return True
+
+        def get_attribute(self, name, timeout=0):
+            return None
 
         def inner_text(self, timeout=0):
             if self.page.stage == "email":
@@ -1841,7 +1934,7 @@ def password_reauth_driver(monkeypatch):
 
         def find_element(self, *_args):
             self.check_live()
-            return SimpleNamespace(find_element=lambda *_: Submit(self.owner, self.kind))
+            return SimpleNamespace(find_elements=lambda *_: [Submit(self.owner, self.kind)])
 
     class Submit:
         def __init__(self, owner, kind):
@@ -1853,10 +1946,15 @@ def password_reauth_driver(monkeypatch):
         def is_enabled(self):
             return True
 
+        def get_attribute(self, name):
+            return None
+
         def click(self):
             if self.kind == "code":
                 self.owner.explicit_code_clicks += 1
                 self.owner.submit_code()
+                if self.owner.submit_click_raises:
+                    raise RuntimeError("ambiguous private-token 012345 user@example.test")
             else:
                 self.owner.password_submitted = True
 
@@ -1865,13 +1963,16 @@ def password_reauth_driver(monkeypatch):
                      stale_midway=False, reject=False, reject_on_fetch=False,
                      disable_after_submit=False, split_fields=False, hide_after_fetch=False,
                      confirm_password=True, challenge="email", second_challenge=None, stale_before_final=False,
-                     auto_submit_stale=True, observation=True, response_status=200, old_error=False, body_suffix=""):
+                     auto_submit_stale=True, observation=True, response_status=200, old_error=False, body_suffix="",
+                     request_delay=0.0, response_delay=0.0, response_first=False, submit_click_raises=False):
             self.second_challenge, self.stale_before_final = second_challenge, stale_before_final
             self.disabled_after_fetch, self.advance_after = disabled_after_fetch, advance_after
             self.auto_submit, self.stale_midway, self.reject = auto_submit, stale_midway, reject
             self.reject_on_fetch, self.disable_after_submit = reject_on_fetch, disable_after_submit or (auto_submit and auto_submit_stale)
             self.auto_submit_stale, self.observation, self.response_status = auto_submit_stale, observation, response_status
             self.old_error, self.body_suffix = old_error, body_suffix
+            self.request_delay, self.response_delay, self.pending_events = request_delay, response_delay, []
+            self.response_first, self.submit_click_raises = response_first, submit_click_raises
             self.callbacks = {"request": [(0, lambda event: None)], "response": [(0, lambda event: None)]}
             self.removed_callbacks, self.observer_commands, self.mail_budgets = [], [], []
             self.hide_after_fetch, self.confirm_password, self.challenge = hide_after_fetch, confirm_password, challenge
@@ -1882,8 +1983,16 @@ def password_reauth_driver(monkeypatch):
             self.disabled_until, self.submitted_at, self.password_submitted = 0.0, None, False
             self.clock = clock
 
+        def dispatch_events(self):
+            due = [event for event in self.pending_events if event[0] <= clock.now]
+            self.pending_events = [event for event in self.pending_events if event[0] > clock.now]
+            for _, kind, event in due:
+                for _, callback in list(self.callbacks[kind]):
+                    callback(event)
+
         @property
         def stage(self):
+            self.dispatch_events()
             if self.password_submitted:
                 return "done"
             if self.submitted_at is not None and not self.reject and self.advance_after is not None:
@@ -1962,12 +2071,14 @@ def password_reauth_driver(monkeypatch):
             request_id = f"otp-{self.submit_calls}"
             endpoint = "/api/accounts/mfa/totp/fixture-validate" if challenge == "totp" else "/api/accounts/email-otp/validate"
             request = SimpleNamespace(url="https://auth.openai.com" + endpoint, method="POST")
-            for _, callback in list(self.callbacks["request"]):
-                callback(SimpleNamespace(request_id=request_id, request=request))
-            if self.response_status is not None:
-                response = SimpleNamespace(url=request.url, status=400 if self.reject else self.response_status)
-                for _, callback in list(self.callbacks["response"]):
-                    callback(SimpleNamespace(request_id=request_id, response=response))
+            if self.request_delay is not None:
+                request_at = clock.now + self.request_delay
+                self.pending_events.append((request_at, "request", SimpleNamespace(request_id=request_id, request=request)))
+                if self.response_status is not None:
+                    response = SimpleNamespace(url=request.url, status=400 if self.reject else self.response_status)
+                    event = (request_at + self.response_delay, "response", SimpleNamespace(request_id=request_id, response=response))
+                    self.pending_events.insert(len(self.pending_events) - (1 if self.response_first else 0), event)
+            self.dispatch_events()
 
         def fetch_code(self, *_args, **_kwargs):
             self.mail_budgets.append(_kwargs)
@@ -2434,6 +2545,153 @@ def test_password_unobserved_idle_form_stops_without_guessing_post(password_reau
     assert "post_count=unknown" in caplog.text
 
 
+@pytest.mark.parametrize("status, reject, expected", [
+    (200, False, "submitted"), (400, True, "rejected"),
+    (403, False, "http_failed"), (429, False, "http_failed"),
+    (503, False, "http_failed"), (None, False, "request_pending"),
+])
+def test_password_otp_click_keeps_observer_until_delayed_request_is_confirmed(
+    password_reauth_driver, caplog, status, reject, expected,
+):
+    driver = password_reauth_driver(
+        request_delay=2.0, response_delay=1.0, response_status=status, reject=reject, advance_after=None,
+    )
+    with caplog.at_level("INFO"):
+        result = account_export._password_submit_code(driver, "012345", timeout_seconds=8)
+    assert result["status"] == expected
+    assert result["ok"] is (status == 200)
+    assert result["http_status"] == status
+    assert driver.screenshots == []
+    assert driver.clock.now - driver.submitted_at >= (2.0 if status is None else 3.0)
+    assert driver.clock.now <= 8
+    assert driver.submit_calls == driver.explicit_code_clicks == 1
+    assert driver.keys == list("012345")
+    assert len(driver.removed_callbacks) == 2
+    assert all([ident for ident, _ in rows] == [0] for rows in driver.callbacks.values())
+    assert "post_count=1" in caplog.text
+    for sensitive in ("012345", "secret-query", "user@example.test"):
+        assert sensitive not in caplog.text
+
+
+def test_password_otp_click_without_request_or_advancement_is_unconfirmed(password_reauth_driver, caplog):
+    driver = password_reauth_driver(request_delay=None, advance_after=None)
+    with caplog.at_level("INFO"):
+        result = account_export._password_submit_code(driver, "012345", timeout_seconds=8)
+    assert result["status"] == "submit_unconfirmed"
+    assert result["ok"] is False
+    assert result["http_status"] is None
+    assert 7.9 <= driver.clock.now <= 8
+    assert driver.submit_calls == driver.explicit_code_clicks == 1
+    assert driver.keys == list("012345")
+    assert driver.password_values == []
+    assert "stage=submit_unconfirmed" in caplog.text and "post_count=0" in caplog.text
+    assert all([ident for ident, _ in rows] == [0] for rows in driver.callbacks.values())
+
+
+def test_password_otp_click_can_be_confirmed_by_delayed_password_page(password_reauth_driver, caplog):
+    driver = password_reauth_driver(request_delay=None, advance_after=2.5)
+    with caplog.at_level("INFO"):
+        result = account_export._password_submit_code(driver, "012345", timeout_seconds=8)
+    assert result["status"] == "advanced"
+    assert result["ok"] is True
+    assert result["http_status"] is None
+    assert 2.5 <= driver.clock.now - driver.submitted_at < 3.0
+    assert driver.clock.now <= 8
+    assert driver.submit_calls == driver.explicit_code_clicks == 1
+    assert driver.keys == list("012345")
+    assert "stage=advanced" in caplog.text and "post_count=0" in caplog.text
+
+
+@pytest.mark.parametrize("request_delay, response_status, expected", [
+    (None, 200, "submit_unconfirmed"), (2.0, None, "request_pending"), (2.0, 503, "http_failed"),
+])
+def test_password_setup_stops_before_password_on_unconfirmed_or_failed_otp(
+    password_reauth_driver, request_delay, response_status, expected,
+):
+    driver = password_reauth_driver(request_delay=request_delay, response_status=response_status, advance_after=None)
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123", timeout_seconds=60,
+    )
+    assert result["ok"] is False
+    assert result["code"] == f"password_email_reauth_{expected}"
+    assert driver.mail_calls == driver.submit_calls == driver.explicit_code_clicks == 1
+    assert driver.keys == list("012345")
+    assert driver.password_values == [] and "password" not in result
+    assert driver.screenshots == []
+    assert driver.clock.now <= 60
+
+
+@pytest.mark.parametrize("status, expected", [(200, "submitted"), (403, "http_failed"), (503, "http_failed")])
+def test_password_otp_observer_associates_response_before_request_callback(password_reauth_driver, status, expected):
+    driver = password_reauth_driver(
+        request_delay=2.0, response_first=True, response_status=status, advance_after=None,
+    )
+    result = account_export._password_submit_code(driver, "012345", timeout_seconds=8)
+    assert result["status"] == expected
+    assert result["http_status"] == status
+    assert result["ok"] is (status == 200)
+    assert driver.submit_calls == driver.explicit_code_clicks == 1
+    assert driver.keys == list("012345")
+    assert driver.screenshots == []
+
+
+def test_password_otp_ambiguous_click_waits_for_request_without_replaying(password_reauth_driver, caplog):
+    driver = password_reauth_driver(request_delay=2.0, submit_click_raises=True, advance_after=None)
+    with caplog.at_level("DEBUG"):
+        result = account_export._password_submit_code(driver, "012345", timeout_seconds=8)
+    assert result["status"] == "submitted" and result["http_status"] == 200
+    assert driver.submit_calls == driver.explicit_code_clicks == 1
+    assert driver.keys == list("012345")
+    for sensitive in ("012345", "private-token", "user@example.test"):
+        assert sensitive not in caplog.text
+
+
+@pytest.mark.parametrize("runtime", ["selenium", "playwright"])
+@pytest.mark.parametrize("scenario", ["scoped", "click_raises", "no_form", "no_enabled"])
+def test_password_click_targets_only_enabled_controls_in_current_form(runtime, scenario):
+    def button(visible=True, enabled=True, aria_disabled=False, value=""):
+        return SimpleNamespace(
+            is_displayed=Mock(return_value=visible), is_visible=Mock(return_value=visible),
+            is_enabled=Mock(return_value=enabled),
+            get_attribute=Mock(side_effect=lambda name, **kwargs: ("true" if aria_disabled else None) if name == "aria-disabled" else value),
+            click=Mock(),
+        )
+
+    hidden, disabled, selected, unrelated = button(visible=False), button(enabled=False), button(), button()
+    aria_disabled, resend = button(aria_disabled=True), button(value="resend")
+    if scenario == "click_raises":
+        selected.click.side_effect = RuntimeError("ambiguous click after dispatch")
+    buttons = [] if scenario == "no_form" else [hidden, disabled, aria_disabled, resend]
+    if scenario not in {"no_form", "no_enabled"}:
+        buttons.append(selected)
+    collection = SimpleNamespace(count=lambda: len(buttons), nth=lambda index: buttons[index], first=hidden)
+    scope = SimpleNamespace(count=lambda: int(scenario != "no_form"), locator=Mock(return_value=collection),
+                            find_elements=Mock(return_value=buttons), find_element=Mock(return_value=hidden))
+    outside = SimpleNamespace(count=lambda: 1, nth=lambda index: unrelated, first=unrelated)
+    driver = SimpleNamespace(execute_script=Mock(return_value=True), locator=Mock(return_value=outside),
+                             keyboard=SimpleNamespace(press=Mock()))
+    field = SimpleNamespace(find_element=Mock(return_value=scope), locator=Mock(return_value=scope),
+                            send_keys=Mock(), press=Mock())
+    if scenario == "no_form":
+        field.find_element.side_effect = LookupError("form absent")
+    if runtime == "selenium":
+        result = account_export._password_click_selenium(driver, field)
+    else:
+        result = account_export._password_click_playwright(driver, field, 'button[type="submit"]')
+    assert result is (scenario not in {"no_form", "no_enabled"})
+    assert selected.click.call_count == int(scenario not in {"no_form", "no_enabled"})
+    hidden.click.assert_not_called()
+    disabled.click.assert_not_called()
+    aria_disabled.click.assert_not_called()
+    resend.click.assert_not_called()
+    unrelated.click.assert_not_called()
+    driver.execute_script.assert_not_called()
+    driver.locator.assert_not_called()
+    driver.keyboard.press.assert_not_called()
+    field.send_keys.assert_not_called()
+    field.press.assert_not_called()
+
+
 @pytest.mark.parametrize("status", [None, 403, 429, 503])
 def test_password_otp_observer_classifies_response_and_cleans_only_own_callbacks(password_reauth_driver, status):
     driver = password_reauth_driver(response_status=status, advance_after=None)
@@ -2458,10 +2716,15 @@ def test_password_otp_observer_ignores_untracked_and_get_responses(password_reau
         url = "https://auth.openai.com/api/accounts/email-otp/validate"
         for _, callback in list(driver.callbacks["response"]):
             callback(SimpleNamespace(request_id="old", response=SimpleNamespace(url=url, status=400)))
-        for _, callback in list(driver.callbacks["request"]):
-            callback(SimpleNamespace(request_id="get", request=SimpleNamespace(url=url, method="GET")))
-        for _, callback in list(driver.callbacks["response"]):
-            callback(SimpleNamespace(request_id="get", response=SimpleNamespace(url=url, status=503)))
+        for request_id, target, method in (
+            ("get", url, "GET"),
+            ("foreign", "https://other.example.test/api/accounts/email-otp/validate", "POST"),
+            ("other-path", "https://auth.openai.com/api/accounts/unrelated", "POST"),
+        ):
+            for _, callback in list(driver.callbacks["request"]):
+                callback(SimpleNamespace(request_id=request_id, request=SimpleNamespace(url=target, method=method)))
+            for _, callback in list(driver.callbacks["response"]):
+                callback(SimpleNamespace(request_id=request_id, response=SimpleNamespace(url=target, status=503)))
 
     monkeypatch.setattr(driver, "execute", execute)
     result = account_export._setup_password_with_driver(
@@ -2581,7 +2844,7 @@ def test_password_missing_form_separates_generic_hint_from_error_page(password_r
     assert result["code"] == expected
     assert driver.submit_calls == 0 and driver.password_values == []
     if expected.endswith("page_error"):
-        assert len(driver.screenshots) == 1
+        assert driver.screenshots == []
         assert "error_type=auth_page_error" in caplog.text
     for sensitive in ("user@example.test", "012345", "secret-query", "Ab3!cdefgh123"):
         assert sensitive not in caplog.text

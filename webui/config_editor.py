@@ -387,11 +387,11 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "ROXY_OTP_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
-        "label": "OTP提交超时", "help": "提交 OTP 后等待资料页/登录态的主观察窗口，默认 15 秒",
+        "label": "OTP提交超时", "help": "提交 OTP 后等待资料页/登录态的主观察窗口，默认 45 秒；成功立即返回",
     },
     {
         "key": "ROXY_OTP_SUBMIT_ATTEMPTS", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
-        "label": "OTP 表单提交次数", "help": "默认 2；首次无响应时刷新、重填同一验证码后只再提交一次",
+        "label": "OTP 表单提交次数", "help": "默认 1；结果未明时只观察不刷新重放。显式设为 2 会开启原刷新重输逻辑",
     },
     {
         "key": "ROXY_PASSWORD_SUBMIT_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
