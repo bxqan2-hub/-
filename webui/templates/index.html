@@ -1495,7 +1495,7 @@
       border: 1px solid #ebeef5; border-radius: 12px; background: #fff;
       box-shadow: 0 4px 16px rgba(31,42,68,.05); overflow: hidden; margin-bottom: 16px;
     }
-    .sms-center-control-panel { padding: 20px; }
+    .sms-center-control-panel { padding: 20px; background: linear-gradient(135deg,#ffffff 0%,#f8fbff 100%); }
     .sms-center-panel-head, .sms-center-list-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
     .sms-center-panel-head h2, .sms-center-list-head h2 { margin:0; color:#303133; font-size:17px; }
     .sms-center-panel-head p, .sms-center-list-head p { margin:6px 0 0; color:#909399; font-size:12px; line-height:1.5; }
@@ -1507,9 +1507,13 @@
     .sms-center-field small { color:#a0a4ad; font-size:11px; font-weight:400; line-height:1.35; }
     .sms-center-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; padding-top:16px; border-top:1px solid #f0f2f5; }
     .sms-center-actions .jobs-tb-btn { min-height:36px; padding:0 14px; border-radius:7px; }
+    .sms-center-actions .jobs-tb-btn:not(.jobs-tb-btn--primary):not(.jobs-tb-btn--good) { background:#fff; color:#475569; border-color:#cbd5e1; }
+    .sms-center-actions .jobs-tb-btn--primary { background:#377dff; color:#fff; border-color:#377dff; box-shadow:0 3px 8px rgba(55,125,255,.22); }
+    .sms-center-actions .jobs-tb-btn--good { background:#19be6b; color:#fff; border-color:#19be6b; box-shadow:0 3px 8px rgba(25,190,107,.2); }
+    .sms-center-actions .jobs-tb-btn:hover:not(:disabled) { filter:brightness(.96); transform:translateY(-1px); }
     .sms-center-offer-list { min-height:38px; margin-top:14px; padding:10px 12px; border:1px dashed #dcdfe6; border-radius:8px; background:#fafbfc; color:#909399; font-size:12px; line-height:1.6; }
     .sms-center-offer { display:inline-flex; align-items:center; gap:7px; margin:3px 8px 3px 0; padding:4px 9px; border:1px solid #d9ecff; border-radius:6px; background:#ecf5ff; color:#337ecc; }
-    .sms-center-accounts-panel { padding:0; }
+    .sms-center-accounts-panel { padding:0; background:#fff; }
     .sms-center-list-head { padding:18px 20px; border-bottom:1px solid #ebeef5; }
     .sms-center-group-picker { display:flex; align-items:center; gap:8px; color:#606266; font-size:13px; white-space:nowrap; }
     .sms-center-group-picker select { min-width:210px; }
@@ -1519,6 +1523,8 @@
     .sms-center-account-table .sms-cell-security { min-width:220px; }
     .sms-center-account-table .sms-cell-plan { min-width:190px; }
     .sms-center-account-table .sms-cell-status { min-width:140px; }
+    .sms-center-account-table tbody tr:hover > td { background:#f5f9ff; }
+    .sms-center-account-table .sms-center-group-badge + .acc-v2-email { margin-top:2px; }
     .sms-center-group-badge { display:inline-flex; margin-bottom:6px; padding:3px 8px; border-radius:999px; background:#f0f5ff; color:#377dff; font-size:11px; font-weight:600; }
     .sms-center-account-table .sms-center-field, .sms-center-account-table .acc-v2-sub { white-space:normal; }
     @media (max-width: 850px) { .sms-center-fields { grid-template-columns:1fr 1fr; } .sms-center-panel-head, .sms-center-list-head { flex-direction:column; } .sms-center-group-picker { width:100%; } .sms-center-group-picker select { flex:1; } }

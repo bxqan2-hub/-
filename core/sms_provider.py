@@ -118,10 +118,10 @@ def _api_key() -> str:
     return str(getattr(_cfg, "SMS_API_KEY", "") or "").strip()
 
 
-def _http() -> CurlSession:
+def _http(use_proxy: bool = True) -> CurlSession:
     session = CurlSession(impersonate=_browser_cfg.IMPERSONATE)
     local_proxy = str(getattr(_cfg, "CODEX_LOCAL_PROXY", "") or "").strip()
-    if local_proxy:
+    if use_proxy and local_proxy:
         session.proxies = {"http": local_proxy, "https": local_proxy}
     session.timeout = _cfg.SMS_REQUEST_TIMEOUT
     return session

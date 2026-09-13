@@ -4882,7 +4882,18 @@ def create_app(auth_code: str | None = None) -> Flask:
         from core import sms_provider
         try:
             with sms_provider.provider_context(request.args.get("provider")):
-                countries = sms_provider.get_countries()
+                try:
+                    countries = sms_provider.get_countries()
+                except Exception as exc:
+                    # 国家/价格是只读元数据；本地代理未启动时直连重试，
+                    # 取号和短信轮询仍严格沿用 CODEX_LOCAL_PROXY。
+                    if sms_provider._provider_name() != "smsbower" or "proxy" not in str(exc).lower() and "connect" not in str(exc).lower():
+                        raise
+                    direct = sms_provider._http(use_proxy=False)
+                    try:
+                        countries = sms_provider.get_countries(http=direct)
+                    finally:
+                        direct.close()
                 provider = sms_provider.validate_configuration()
             return jsonify({"ok": True, "provider": provider, "countries": countries})
         except Exception as exc:
@@ -4897,7 +4908,16 @@ def create_app(auth_code: str | None = None) -> Flask:
         max_price = request.args.get("max_price") or None
         try:
             with sms_provider.provider_context(request.args.get("provider")):
-                offers = sms_provider.list_affordable_countries(service=service, max_price=max_price)
+                try:
+                    offers = sms_provider.list_affordable_countries(service=service, max_price=max_price)
+                except Exception as exc:
+                    if sms_provider._provider_name() != "smsbower" or "proxy" not in str(exc).lower() and "connect" not in str(exc).lower():
+                        raise
+                    direct = sms_provider._http(use_proxy=False)
+                    try:
+                        offers = sms_provider.list_affordable_countries(service=service, max_price=max_price, http=direct)
+                    finally:
+                        direct.close()
                 provider = sms_provider.validate_configuration()
             if country:
                 offers = [item for item in offers if str(item.get("id")) == str(country)]
