@@ -16,11 +16,12 @@ def test_new_mail_and_sms_clients_read_current_settings(monkeypatch):
     monkeypatch.setattr(sms_provider, "CurlSession", sms_factory)
     http = outlook_client._http_session()
     outlook_client._ms_http()
+    monkeypatch.setattr(sms_provider._cfg, "resolve_local_proxy", lambda: "http://127.0.0.1:7897")
     sms_provider._http()
     assert http.headers["Origin"] == "https://mail.example.test"
     assert http.headers["User-Agent"] == "current-user-agent"
     assert all(call.kwargs["impersonate"] == "current-profile" for call in mail_factory.call_args_list)
-    sms_factory.assert_called_once_with(impersonate="current-profile")
+    sms_factory.assert_called_once_with(impersonate="current-profile", trust_env=False)
 
 
 def test_mail_security_cache_is_bound_to_original_session_host(monkeypatch):

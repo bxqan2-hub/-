@@ -57,7 +57,32 @@ CODEX_OAUTH_DRIVER: str = "roxy"
 
 # Codex 授权、邮箱/手机接码及 Token 交换专用本地代理。
 # 与注册代理池完全分离；注册仍由 config/proxy.py 的代理 API/代理池决定。
-CODEX_LOCAL_PROXY: str = "http://127.0.0.1:7890"
+# system / 留空：读取 Clash 设置的本地系统代理；也可填写显式本地端口。
+CODEX_LOCAL_PROXY: str = "system"
+
+
+def resolve_local_proxy() -> str:
+    """接码与独立 Codex 授权共用本地代理，不读取注册代理池。"""
+    import ipaddress
+    from urllib.parse import urlparse
+    from config.proxy import detect_system_proxy, _normalize_proxy_url
+
+    configured = str(CODEX_LOCAL_PROXY or "").strip()
+    selected = detect_system_proxy() if configured.lower() in {"", "system", "auto"} else configured
+    selected = _normalize_proxy_url(selected)
+    try:
+        parsed = urlparse(selected)
+        local = parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname or "").is_loopback
+        valid = local and parsed.scheme in {"http", "https", "socks5", "socks5h"} and bool(parsed.port)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RuntimeError(
+            "stage=proxy_transport; 接码未检测到有效本地代理；请开启 Clash 系统代理，"
+            "或将 CODEX_LOCAL_PROXY 填为 Clash 的本地代理端口；未使用注册代理池"
+        )
+    return selected
+
 
 # Codex 邮箱验证码单轮等待时间。首次旧码失败后只在当前验证页点击一次重发，
 # 然后完整等待本时长，避免邮件稍慢时反复返回登录页或连续触发发送。

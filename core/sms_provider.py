@@ -14,6 +14,7 @@ from curl_cffi.requests import Session as CurlSession
 
 from config import browser as _browser_cfg
 from config import codex as _cfg
+from core.otp_utils import mask_otp
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +119,10 @@ def _api_key() -> str:
     return str(getattr(_cfg, "SMS_API_KEY", "") or "").strip()
 
 
-def _http(use_proxy: bool = True) -> CurlSession:
-    session = CurlSession(impersonate=_browser_cfg.IMPERSONATE)
-    local_proxy = str(getattr(_cfg, "CODEX_LOCAL_PROXY", "") or "").strip()
-    if use_proxy and local_proxy:
-        session.proxies = {"http": local_proxy, "https": local_proxy}
+def _http() -> CurlSession:
+    local_proxy = _cfg.resolve_local_proxy()
+    session = CurlSession(impersonate=_browser_cfg.IMPERSONATE, trust_env=False)
+    session.proxies = {"http": local_proxy, "https": local_proxy}
     session.timeout = _cfg.SMS_REQUEST_TIMEOUT
     return session
 
@@ -257,7 +257,7 @@ def acquire_number(
             )
             if not offers:
                 raise SmsNoNumbersError(
-                    f"HeroSMS 没有价格不超过 {price_limit or '不限'}、有库存且本轮尚未失败的 {service_code} 国家"
+                    f"{_provider_label()} 没有价格不超过 {price_limit or '不限'}、有库存且本轮尚未失败的 {service_code} 国家"
                 )
         else:
             offers = [{"id": country_strategy, "name": country_strategy, "price": None, "count": None}]
@@ -269,7 +269,7 @@ def acquire_number(
             country_strategy = str(offer["id"])
             if country is None and str(getattr(_cfg, "SMS_COUNTRY", "") or "").strip().lower() == "auto":
                 logger.info(
-                    "[SMS:HeroSMS] 自动选国家：id=%s, name=%s, price=%s, stock=%s, maxPrice=%s",
+                    f"[SMS:{_provider_label()}] 自动选国家：id=%s, name=%s, price=%s, stock=%s, maxPrice=%s",
                     offer["id"], offer["name"], offer["price"], offer["count"], price_limit,
                 )
             params = {
@@ -288,19 +288,19 @@ def acquire_number(
                 text = _request(http, params)
                 break
             except SmsNoNumbersError:
-                logger.info("[SMS:HeroSMS] 国家 id=%s 库存已变化，继续尝试下一个国家", country_strategy)
+                logger.info(f"[SMS:{_provider_label()}] 国家 id=%s 库存已变化，继续尝试下一个国家", country_strategy)
                 selected_offer = None
         if selected_offer is None:
-            raise SmsNoNumbersError("HeroSMS 当前候选国家均没有可取号码")
+            raise SmsNoNumbersError(f"{_provider_label()} 当前候选国家均没有可取号码")
         parts = text.split(":", 2)
         if len(parts) != 3 or parts[0] != "ACCESS_NUMBER":
-            raise SmsProviderError(f"HeroSMS getNumber 响应格式异常：{text[:200]}")
+            raise SmsProviderError(f"{_provider_label()} getNumber 响应格式异常：{text[:200]}")
         activation_id = parts[1].strip()
         phone = _phone_digits(parts[2])
         if not activation_id or not phone:
-            raise SmsProviderError(f"HeroSMS getNumber 响应缺少激活 ID 或号码：{text[:200]}")
+            raise SmsProviderError(f"{_provider_label()} getNumber 响应缺少激活 ID 或号码：{text[:200]}")
         _remember_activation(activation_id, country_strategy)
-        logger.info("[SMS:HeroSMS] 取号成功：activation_id=%s, phone=+%s", activation_id, phone)
+        logger.info("[SMS:%s] 取号成功：activation_id=%s, phone=***%s", _provider_label(), activation_id, phone[-4:])
         return activation_id, phone
     finally:
         if own_http:
@@ -315,7 +315,7 @@ def get_countries(http: CurlSession | None = None) -> list[dict]:
     try:
         data = _request_json(http, {"action": "getCountries"})
         if not isinstance(data, dict):
-            raise SmsProviderError("HeroSMS getCountries 响应不是对象")
+            raise SmsProviderError(f"{_provider_label()} getCountries 响应不是对象")
         countries = []
         for raw_id, raw_item in data.items():
             item = raw_item if isinstance(raw_item, dict) else {}
@@ -356,7 +356,7 @@ def get_prices(
             params["country"] = str(country).strip()
         data = _request_json(http, params)
         if not isinstance(data, dict):
-            raise SmsProviderError("HeroSMS getPrices 响应不是对象")
+            raise SmsProviderError(f"{_provider_label()} getPrices 响应不是对象")
         return data
     finally:
         if own_http:
@@ -386,7 +386,7 @@ def list_affordable_countries(
         try:
             country_names = {item["id"]: item for item in get_countries(http=http)}
         except SmsProviderError as exc:
-            logger.warning("[SMS:HeroSMS] 国家名称读取失败，将仅显示国家 ID：%s", exc)
+            logger.warning(f"[SMS:{_provider_label()}] 国家名称读取失败，将仅显示国家 ID：%s", exc)
             country_names = {}
 
         results = []
@@ -550,25 +550,27 @@ def wait_for_sms_code(
             if text.startswith("STATUS_OK:"):
                 code = text.split(":", 1)[1].strip()
                 if not code:
-                    raise SmsProviderError("HeroSMS 返回 STATUS_OK，但验证码为空")
+                    raise SmsProviderError(f"{_provider_label()} 返回 STATUS_OK，但验证码为空")
                 if previous_code and code == str(previous_code).strip():
                     logger.info(
-                        "[SMS:HeroSMS] 第 %s 轮仍是上一条验证码，继续等待新短信",
+                        "[SMS:%s] 第 %s 轮仍是上一条验证码，继续等待新短信",
+                        _provider_label(),
                         round_no,
                     )
                     if interval > 0:
                         time.sleep(interval)
                     continue
-                logger.info("[SMS:HeroSMS] 第 %s 轮收到验证码：%s", round_no, code)
+                logger.info("[SMS:%s] 第 %s 轮收到验证码：%s", _provider_label(), round_no, mask_otp(code))
                 return code
             if text == "STATUS_CANCEL":
-                raise SmsProviderError("HeroSMS 激活已取消（STATUS_CANCEL）")
+                raise SmsProviderError(f"{_provider_label()} 激活已取消（STATUS_CANCEL）")
             if not text.startswith("STATUS_WAIT"):
-                raise SmsProviderError(f"HeroSMS getStatus 非预期响应：{text[:200]}")
+                raise SmsProviderError(f"{_provider_label()} getStatus 非预期响应：{text[:200]}")
 
             remaining = max(0, int(deadline - time.time()))
             logger.info(
-                "[SMS:HeroSMS] 第 %s 轮状态=%s，%ss 后重试（剩余 %ss）",
+                "[SMS:%s] 第 %s 轮状态=%s，%ss 后重试（剩余 %ss）",
+                _provider_label(),
                 round_no,
                 text,
                 interval,
@@ -577,7 +579,7 @@ def wait_for_sms_code(
             if interval > 0:
                 time.sleep(interval)
 
-        raise SmsCodeTimeout(f"等待 HeroSMS 短信超时（>{total_wait}s），activation_id={activation_id}")
+        raise SmsCodeTimeout(f"等待 {_provider_label()} 短信超时（>{total_wait}s），activation_id={activation_id}")
     finally:
         if own_http:
             http.close()
@@ -586,17 +588,17 @@ def wait_for_sms_code(
 def request_another_code(activation_id: str, http: CurlSession | None = None) -> str:
     """保留当前号码并通知 HeroSMS 等待下一条短信。"""
     result = set_status(activation_id, 3, http=http)
-    logger.info("[SMS:HeroSMS] 已请求当前号码继续接收下一条短信 activation_id=%s", activation_id)
+    logger.info(f"[SMS:{_provider_label()}] 已请求当前号码继续接收下一条短信 activation_id=%s", activation_id)
     return result
 
 
 def set_status(activation_id: str, status: int, http: CurlSession | None = None) -> str:
     """设置 HeroSMS 激活状态；平台支持 3（重发）、6（完成）、8（取消）。"""
     if status == 1:
-        logger.debug("[SMS:HeroSMS] 忽略兼容状态 1：activation_id=%s", activation_id)
+        logger.debug(f"[SMS:{_provider_label()}] 忽略兼容状态 1：activation_id=%s", activation_id)
         return "NO_ACTION"
     if status not in {3, 6, 8}:
-        raise SmsProviderError(f"HeroSMS 不支持的激活状态：{status}")
+        raise SmsProviderError(f"{_provider_label()} 不支持的激活状态：{status}")
 
     own_http = http is None
     http = http or _http()
@@ -614,9 +616,9 @@ def complete(activation_id: str, http: CurlSession | None = None) -> None:
     """标记激活完成；失败仅记录，避免覆盖已验证成功的主流程。"""
     try:
         set_status(activation_id, 6, http=http)
-        logger.info("[SMS:HeroSMS] 已完成 activation_id=%s", activation_id)
+        logger.info(f"[SMS:{_provider_label()}] 已完成 activation_id=%s", activation_id)
     except Exception as exc:
-        logger.warning("[SMS:HeroSMS] 标记完成失败（不影响结果）：%s", exc)
+        logger.warning(f"[SMS:{_provider_label()}] 标记完成失败（不影响结果）：%s", exc)
     finally:
         _forget_activation(activation_id)
 
@@ -628,15 +630,15 @@ def _cancel_after_delay(activation_id: str, delay: float) -> None:
         for attempt in range(1, 4):
             try:
                 set_status(activation_id, 8)
-                logger.info("[SMS:HeroSMS] 延迟取消成功 activation_id=%s", activation_id)
+                logger.info(f"[SMS:{_provider_label()}] 延迟取消成功 activation_id=%s", activation_id)
                 return
             except Exception as exc:
                 if "EARLY_CANCEL_DENIED" in str(exc) and attempt < 3:
-                    logger.info("[SMS:HeroSMS] 平台仍限制取消，5 秒后重试 activation_id=%s", activation_id)
+                    logger.info(f"[SMS:{_provider_label()}] 平台仍限制取消，5 秒后重试 activation_id=%s", activation_id)
                     time.sleep(5)
                     continue
                 logger.warning(
-                    "[SMS:HeroSMS] 延迟取消失败，需到平台检查 activation_id=%s: %s",
+                    f"[SMS:{_provider_label()}] 延迟取消失败，需到平台检查 activation_id=%s: %s",
                     activation_id,
                     exc,
                 )
@@ -659,12 +661,12 @@ def cancel(
     remaining = max(0.0, _MIN_CANCEL_DELAY - (time.time() - acquired_at)) if acquired_at else 0.0
     if remaining > 0 and background:
         if already_scheduled:
-            logger.info("[SMS:HeroSMS] 取消任务已存在 activation_id=%s", activation_id)
+            logger.info(f"[SMS:{_provider_label()}] 取消任务已存在 activation_id=%s", activation_id)
             return
         with _ACTIVATION_LOCK:
             _SCHEDULED_CANCELS.add(activation_id)
         logger.info(
-            "[SMS:HeroSMS] 已安排 %.1f 秒后取消 activation_id=%s（平台最短激活时间 120 秒）",
+            f"[SMS:{_provider_label()}] 已安排 %.1f 秒后取消 activation_id=%s（平台最短激活时间 120 秒）",
             remaining,
             activation_id,
         )
@@ -676,14 +678,14 @@ def cancel(
         ).start()
         return
     if remaining > 0:
-        logger.info("[SMS:HeroSMS] 等待 %.1f 秒后取消 activation_id=%s", remaining, activation_id)
+        logger.info(f"[SMS:{_provider_label()}] 等待 %.1f 秒后取消 activation_id=%s", remaining, activation_id)
         time.sleep(remaining)
     try:
         set_status(activation_id, 8, http=http)
-        logger.info("[SMS:HeroSMS] 已取消 activation_id=%s", activation_id)
+        logger.info(f"[SMS:{_provider_label()}] 已取消 activation_id=%s", activation_id)
     except Exception as exc:
         logger.warning(
-            "[SMS:HeroSMS] 取消失败（不影响主流程，需到平台检查）：activation_id=%s, %s",
+            f"[SMS:{_provider_label()}] 取消失败（不影响主流程，需到平台检查）：activation_id=%s, %s",
             activation_id,
             exc,
         )

@@ -6,6 +6,32 @@ from core import roxy_codex_oauth
 
 
 class RoxyCodexPhoneClassificationTests(unittest.TestCase):
+    def test_invalid_auth_step_stops_before_duplicate_phone_submit(self):
+        state = {"url": "https://auth.openai.com/add-phone", "bodyText": "error_code: invalid_auth_step", "inputs": [], "forms": []}
+        with (
+            patch.object(roxy_codex_oauth, "_phone_page_state", return_value=state),
+            patch.object(roxy_codex_oauth, "_force_submit_add_phone_form") as submit,
+            patch.object(roxy_codex_oauth.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stage=phone_auth; invalid_auth_step"):
+                roxy_codex_oauth._wait_after_phone_send(MagicMock(), timeout=120)
+        submit.assert_not_called()
+
+    def test_expired_phone_auth_stops_before_acquiring_another_number(self):
+        driver = MagicMock()
+        state = {"url": "https://auth.openai.com/add-phone", "bodyText": "error_code: invalid_auth_step", "inputs": [], "forms": []}
+        with (
+            patch.object(roxy_codex_oauth, "_has_strict_add_phone_form", return_value=True),
+            patch.object(roxy_codex_oauth, "_phone_page_state", return_value=state),
+            patch.object(roxy_codex_oauth.sms_provider, "validate_configuration", return_value="smsbower"),
+            patch.object(roxy_codex_oauth.sms_provider, "_http"),
+            patch.object(roxy_codex_oauth.sms_provider, "acquire_number") as acquire,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid_auth_step"):
+                roxy_codex_oauth._do_phone_verification_if_present(driver)
+        acquire.assert_not_called()
+        driver.get.assert_not_called()
+
     def test_whatsapp_label_does_not_override_selected_sms(self):
         state = {
             "url": "https://auth.openai.com/add-phone",

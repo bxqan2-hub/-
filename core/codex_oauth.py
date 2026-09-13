@@ -1344,7 +1344,7 @@ def run_codex_oauth(
     Args:
         email: 已注册成功的账号邮箱
         otp_provider: 邮箱 OTP 获取回调 fn(email, after_ts)->code，默认用 wait_for_otp
-        proxy: 代理（不传从 PROXY_POOL 抽）
+        proxy: 兼容调用参数；独立接码固定读取 CODEX_LOCAL_PROXY/Clash 系统代理
         force: True 时跳过 ENABLE_CODEX_AUTO 开关限制，供手动补跑使用
 
     Returns:
@@ -1354,6 +1354,11 @@ def run_codex_oauth(
         return _codex_result(status="skipped", message="ENABLE_CODEX_AUTO=False")
     if not email:
         return _codex_result(status="skipped", message="email 为空")
+
+    try:
+        proxy = _cfg.resolve_local_proxy()
+    except RuntimeError as exc:
+        return _codex_result(status="failed", email=email, message=str(exc))
 
     # Codex OAuth 支持多种驱动：
     # protocol：原纯协议；roxy/cloak/browser_use：用真实浏览器跑页面并捕获 localhost callback。

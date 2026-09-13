@@ -427,7 +427,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CODEX_LOCAL_PROXY", "file": "codex.py", "type": "str", "group": "Codex",
-        "label": "Codex本地代理", "help": "仅用于 Codex 授权、HeroSMS 接码和 Token 交换；与注册代理池分离，例如 http://127.0.0.1:7890",
+        "label": "接码 / Codex 本地代理", "help": "填写 system 或留空跟随 Clash 系统代理，也可填写本地端口；国家价格查询、HeroSMS/SMSBower 接码及独立授权均使用它，不读取注册代理池",
     },
     {
         "key": "CODEX_EMAIL_OTP_WAIT", "file": "codex.py", "type": "int", "group": "Codex",

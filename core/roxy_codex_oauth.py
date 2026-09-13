@@ -10,6 +10,9 @@ from contextvars import ContextVar
 from urllib.parse import urlparse
 
 from config import roxybrowser as _roxy_cfg
+from config import codex as _codex_cfg
+from config.proxy import mask_proxy_url
+from core.otp_utils import mask_otp
 from core.email_provider import wait_for_otp
 from core.humanize import delay as human_delay
 from core import sms_provider
@@ -178,59 +181,80 @@ def _click_if_present(driver, selectors: list[str], timeout: int = 3) -> bool:
         return False
 
 
-def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18) -> None:
-    """
-    Codex OAuth 提交邮箱后也可能跳到 /log-in/password 或 /create-account/password。
-    优先点击“使用一次性验证码/one-time code”入口，进入邮箱验证码页。
-    """
-    end = time.time() + timeout
-    last_url = ""
-    clicked = False
-    email_resubmits = 0
-    last_email_resubmit_at = 0.0
-    while time.time() < end:
-        try:
-            if _is_email_verification_page(driver):
-                if clicked:
-                    logger.info("[Codex][Browser] 一次性验证码入口已进入邮箱验证码页")
-                return
-            url = str(driver.current_url or "")
-            if url != last_url:
-                logger.info("[Codex][Browser] 提交邮箱后检测密码/OTP 跳转：url=%s", url or "-")
-                last_url = url
-            lower = url.lower()
-            if any(x in lower for x in ("phone", "workspace", "consent", "authorize", "localhost:1455")):
-                return
-            # 近期 Roxy 日志中，首次提交后偶发仍停在 auth.openai.com/log-in，
-            # 邮箱框继续可见。此时并未真正发送 OTP；若直接去邮箱取码，会拿到
-            # 注册阶段的旧验证码。只在根登录页做一次受控重提，不按文字乱点。
-            if (
-                email_resubmits < 1
-                and lower.rstrip("/").endswith("auth.openai.com/log-in")
-                and time.time() - last_email_resubmit_at >= 3.0
-            ):
-                try:
-                    _type_email_address(driver, email, timeout=3)
-                    _submit_email_step(driver, email)
-                    email_resubmits += 1
-                    last_email_resubmit_at = time.time()
-                    logger.info("[Codex][Browser] OAuth 根登录页仍显示邮箱框，已受控重提邮箱一次")
-                    human_delay("form")
-                    continue
-                except Exception:
-                    pass
-            if "/password" in lower or "auth.openai.com" in lower:
+def _complete_login_after_email(driver, email: str, timeout: int = 45) -> str:
+    """使用已保存密码/TOTP，或确认邮箱 OTP 页；不把密码页当成已发邮件。"""
+    from core import db
+    from core.account_security_service import _stored_password
+    from core.account_export import (
+        _PASSWORD_AUTHENTICATOR_RE, _PASSWORD_CODE_SELECTOR,
+        _password_visible_inputs, _password_click_selenium,
+        _wait_for_totp_window, normalize_totp_secret,
+    )
+    from core.codex_retry_service import check_stop_requested
+    import pyotp
+
+    account = db.get_account_by_email(email) or {}
+    if account and str(account.get("email") or "").strip().casefold() != email.strip().casefold():
+        raise RuntimeError("stage=login_identity; 保存的账号与本次登录邮箱不匹配")
+    password = _stored_password(account)
+    secret = str(account.get("totp_secret") or "").strip()
+    submitted = set()
+    stage = "email_transition"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        check_stop_requested(email)
+        parsed = urlparse(str(driver.current_url or ""))
+        path = parsed.path.lower()
+        if _is_callback_url(str(driver.current_url or "")):
+            return "advanced"
+        if parsed.scheme != "https" or parsed.hostname != "auth.openai.com" or parsed.port not in (None, 443):
+            time.sleep(0.5)
+            continue
+        if _has_strict_add_phone_form(driver) or any(part in path for part in ("add-phone", "phone-verification", "consent", "workspace")):
+            logger.info("[Codex][Browser] stage=login_complete next=%s", path)
+            return "advanced"
+        state = _phone_page_state(driver)
+        if any(str(item.get("ariaInvalid") or "").lower() == "true" for item in state.get("inputs", [])):
+            raise RuntimeError(f"stage={stage}; 登录表单标记输入错误；未重复提交")
+        fields = _password_visible_inputs(driver, 'input[type="password"], input[autocomplete="current-password"]')
+        if path == "/log-in/password" and fields:
+            stage = "login_password"
+            if password and stage not in submitted:
+                field = fields[0]
+                field.clear()
+                field.send_keys(password)
+                if not _password_click_selenium(driver, field):
+                    raise RuntimeError("stage=login_password; 当前密码表单缺少提交按钮")
+                submitted.add(stage)
+                deadline = time.monotonic() + timeout
+                logger.info("[Codex][Browser] stage=login_password 已提交已保存密码，等待页面确认")
+            elif not password and "passwordless" not in submitted:
                 result = _click_passwordless_signup_if_present(driver)
-                if result.get("ok"):
-                    clicked = True
-                    logger.info("[Codex][Browser] 已点击一次性验证码入口：email=%s detail=%s", email, result)
-                    human_delay("form")
-                    continue
-        except Exception as exc:
-            logger.debug("[Codex][Browser] 密码页一次性验证码入口探测失败：%s", str(exc)[:140])
+                if not result.get("ok"):
+                    raise RuntimeError("stage=login_password; 未保存密码且页面未提供邮箱验证码入口")
+                submitted.add("passwordless")
+                logger.info("[Codex][Browser] 已选择邮箱验证码登录，等待实际验证码页")
+        elif "email-verification" in path and _is_email_verification_page(driver):
+            logger.info("[Codex][Browser] stage=email_otp_ready 已确认邮箱验证码页")
+            return "email_otp"
+        elif "totp" in path or _PASSWORD_AUTHENTICATOR_RE.search(str(state.get("bodyText") or "")):
+            fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+            stage = "login_totp"
+            if fields and stage not in submitted:
+                if not secret:
+                    raise RuntimeError("stage=login_totp; 账号未保存身份验证器密钥")
+                _wait_for_totp_window()
+                _clear_otp_inputs(driver)
+                _type_otp(driver, pyotp.TOTP(normalize_totp_secret(secret)).now())
+                # 自动提交或导航后不对旧 DOM 补点；只操作当前表单。
+                fields = _password_visible_inputs(driver, _PASSWORD_CODE_SELECTOR)
+                if fields:
+                    _password_click_selenium(driver, fields[0])
+                submitted.add(stage)
+                deadline = time.monotonic() + timeout
+                logger.info("[Codex][Browser] stage=login_totp 已提交动态验证码（已脱敏），等待页面确认")
         time.sleep(0.5)
-    if clicked:
-        logger.info("[Codex][Browser] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
+    raise RuntimeError(f"stage={stage}; 登录页面未在限定时间内进入下一阶段；未启动短信取号")
 
 
 def _wait_for_otp_input(driver, timeout: int = 30) -> None:
@@ -277,13 +301,15 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
     # 非日本出口时按钮文案/顺序会变，不能按可见文字点“继续”，否则可能误点 Google。
     try:
         _type_email_address(driver, email, timeout=12)
-        logger.info("[Codex][Browser] 已填写邮箱：%s", email)
-        human_delay("form")
-        _submit_email_step(driver)
-        logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
-        _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
-        logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", str(exc)[:120])
+        if _has_strict_add_phone_form(driver) or _is_callback_url(str(driver.current_url or "")):
+            return
+        raise RuntimeError("stage=email_entry; 授权页未出现邮箱输入框，已停止登录") from exc
+    logger.info("[Codex][Browser] 已填写邮箱：%s", email)
+    human_delay("form")
+    _submit_email_step(driver)
+    logger.info("[Codex][Browser] 已提交邮箱，确认密码 / 2FA / 邮箱验证码阶段")
+    if _complete_login_after_email(driver, email) == "advanced":
         return
 
     # 提交邮箱后不再执行任何全局“继续/授权/分支”兜底点击；后续只等待验证码页。
@@ -294,7 +320,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
     from config import codex as codex_cfg
     otp_wait_seconds = max(90, int(getattr(codex_cfg, "CODEX_EMAIL_OTP_WAIT", 120) or 120))
 
-    def _restart_email_otp_flow(reason: str) -> None:
+    def _restart_email_otp_flow(reason: str) -> bool:
         """当前验证码页无法重发时的最后兜底：重新打开授权地址并提交邮箱。"""
         nonlocal otp_after_ts
         logger.info("[Codex][Browser] 重新触发邮箱 OTP：%s", reason)
@@ -304,17 +330,16 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         _maybe_accept(driver)
         try:
             _type_email_address(driver, email, timeout=12)
-            human_delay("form")
-            _submit_email_step(driver)
-            logger.info("[Codex][Browser] 已重新提交邮箱触发 OTP")
-            _maybe_click_passwordless_after_email(driver, email, timeout=12)
         except Exception as exc:
-            # 如果重进授权地址后已经停在验证码/下一步页面，就不要再强行提交。
-            if not _is_email_verification_page(driver):
-                logger.warning("[Codex][Browser] 重新提交邮箱失败，继续按当前页面轮询：%s", str(exc)[:180])
-            else:
-                logger.info("[Codex][Browser] 重开授权后已在邮箱 OTP 页面")
-        human_delay("api")
+            if _has_strict_add_phone_form(driver) or _is_callback_url(str(driver.current_url or "")):
+                return True
+            if _is_email_verification_page(driver):
+                return False
+            raise RuntimeError("stage=email_entry; 重开授权后未出现邮箱输入框，已停止登录") from exc
+        human_delay("form")
+        _submit_email_step(driver)
+        logger.info("[Codex][Browser] 已重新提交邮箱，确认实际登录阶段")
+        return _complete_login_after_email(driver, email) == "advanced"
 
     def _resend_email_otp(reason: str) -> bool:
         """优先留在当前验证码页直接重发；按钮缺失/页面异常时才重开授权页。"""
@@ -337,8 +362,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
                 type(exc).__name__,
                 str(exc)[:180],
             )
-            _restart_email_otp_flow(reason)
-            return False
+            return _restart_email_otp_flow(reason)
 
     for otp_attempt in range(1, max_otp_attempts + 1):
         logger.info("[Codex][Browser] 等待邮箱 OTP：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
@@ -365,7 +389,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
                 return
             continue
         used_codes.add(str(code))
-        logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", code)
+        logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", mask_otp(code))
         _wait_for_otp_input(driver, timeout=30)
         _clear_otp_inputs(driver)
         _type_otp(driver, code)
@@ -387,7 +411,8 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         outcome = _wait_after_email_otp_submit(driver, timeout=45)
         logger.info("[Codex][Browser] 邮箱 OTP 提交后状态：%s", outcome)
         if outcome == "accepted":
-            return
+            if _complete_login_after_email(driver, email) == "advanced":
+                return
         if str(outcome).startswith("deactivated:"):
             error_code = str(outcome).split(":", 1)[1] or "account_deactivated"
             raise AccountUnusableError(f"账号已废（{error_code}）", error_code=error_code)
@@ -427,26 +452,8 @@ def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_co
     if not code:
         raise RuntimeError("等待新的邮箱验证码超时：取码接口未返回验证码")
     if code in used_codes:
-        raise RuntimeError(f"等待新的邮箱验证码超时：取码接口仍返回已失败验证码 {code}")
+        raise RuntimeError("等待新的邮箱验证码超时：取码接口仍返回已失败验证码（已脱敏）")
     return code
-
-
-def _resolve_codex_local_proxy(proxy: str | None = None) -> str:
-    if str(proxy or "").strip():
-        return str(proxy).strip()
-    from config import codex as codex_cfg
-
-    configured_proxy = str(getattr(codex_cfg, "CODEX_LOCAL_PROXY", "") or "").strip()
-    if configured_proxy:
-        logger.info("[Codex][Browser] 接码/Codex 使用专用本地代理：%s", configured_proxy)
-        return configured_proxy
-    from config import proxy as proxy_cfg
-
-    local_proxy = str(proxy_cfg.pick_local_proxy() or "").strip()
-    if not local_proxy:
-        raise RuntimeError("Codex 接码要求使用本地代理，但 PROXY_POOL/系统代理中未找到本地代理")
-    logger.info("[Codex][Browser] 接码/Codex 回退使用本地静态/系统代理：%s", local_proxy)
-    return local_proxy
 
 
 def _preflight_codex_proxy(proxy: str) -> dict:
@@ -469,11 +476,11 @@ def _preflight_codex_proxy(proxy: str) -> dict:
     if not str(geo.get("ip") or "").strip():
         raise RuntimeError(
             "stage=proxy_transport; Codex 授权前本地代理预检失败；"
-            f"proxy={proxy_url}，请检查代理端口监听和上游出口"
+            f"proxy={mask_proxy_url(proxy_url)}，请检查代理端口监听和上游出口"
         )
     logger.info(
         "[Codex][Browser] 代理预检通过：proxy=%s exit_ip=%s country=%s",
-        proxy_url,
+        mask_proxy_url(proxy_url),
         geo.get("ip"),
         geo.get("country") or "-",
     )
@@ -773,6 +780,8 @@ def _ensure_add_phone_input(driver, *, reason: str = ""):
     换号时如果还停留在 phone-verification/OTP 页，必须先回到手机号页，
     再把新号码重新写入页面并重新提交。
     """
+    if _classify_phone_page_failure(_phone_page_state(driver)) == "invalid_auth_step":
+        raise RuntimeError("stage=phone_auth; invalid_auth_step；授权已失效，停止导航与取号")
     if _has_strict_add_phone_form(driver):
         return _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
 
@@ -1095,6 +1104,8 @@ def _wait_after_phone_send(driver, timeout: int = 120) -> str:
     while time.time() < end:
         time.sleep(1)
         last = _phone_page_state(driver)
+        if _classify_phone_page_failure(last) == "invalid_auth_step":
+            raise RuntimeError("stage=phone_auth; invalid_auth_step；停止等待和重复提交")
         # 必须优先判断验证码页：页面文案里可能包含 send/limit/check 等词，不能把
         # “Check your phone / Enter the verification code...” 误判成发送失败。
         if _is_phone_code_state(last):
@@ -1217,7 +1228,6 @@ def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "
 
 def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
     """如果页面要求手机号验证，则用当前 sms_provider 自动完成。"""
-    provider = "herosms"
     http = None
     max_retries = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10) if hasattr(sms_provider, "_cfg") else 10
     try:
@@ -1237,7 +1247,7 @@ def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
 
         # 配置缺失不会因换号而恢复。先校验一次，避免同一个静态错误重复
         # SMS_MAX_RETRIES（本次日志中因此无意义刷新了 add-phone 10 次）。
-        sms_provider.validate_configuration()
+        provider = sms_provider.validate_configuration()
         http = sms_provider._http()
 
         last_err = None
@@ -1249,14 +1259,14 @@ def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
                 if email:
                     from core.codex_retry_service import check_stop_requested
                     check_stop_requested(email)
+                logger.info("[Codex][Browser] 取号前确认手机号输入页")
+                _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
                 activation_id, phone = sms_provider.acquire_number(
                     http,
                     excluded_countries=failed_country_ids,
                 )
                 activation_country = sms_provider.activation_country(activation_id)
-                logger.info("[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=+%s", attempt, max_retries, provider, phone)
-                logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号")
-                _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
+                logger.info("[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=***%s", attempt, max_retries, provider, phone[-4:])
                 phone_fill = _set_phone_value(driver, f"+{phone}", timeout=10)
                 logger.info(
                     "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s dialCode=%s country=%s",
@@ -1298,7 +1308,7 @@ def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
                         http,
                         previous_code=previous_code,
                     )
-                    logger.info("[Codex][Browser] 手机 OTP 收到：%s", sms_code)
+                    logger.info("[Codex][Browser] 手机 OTP 收到：%s", mask_otp(sms_code))
                     _clear_otp_inputs(driver)
                     _type_otp(driver, sms_code)
                     logger.info("[Codex][Browser] 已填写手机 OTP")
@@ -1504,7 +1514,8 @@ def _run_roxy_codex_oauth_once(
 
         if not driver:
             driver = _build_driver(opened)
-            _center_browser_window(driver)
+            if not codex_headless:
+                _center_browser_window(driver)
         driver.set_page_load_timeout(int(_roxy_cfg.ROXY_SELENIUM_TIMEOUT))
         logger.info("[Codex][Browser] 开始授权：%s，profile=%s，reuse_existing_profile=%s", email, opened.profile_id, reuse_existing_profile)
         if reuse_existing_profile and clear_existing_state:
@@ -1620,14 +1631,20 @@ def run_roxy_codex_oauth(
     """指纹浏览器 Codex OAuth 入口；CPA callback 409 timeout 时重新开启一轮授权。"""
     from core import codex_oauth as proto
 
-    proxy = _resolve_codex_local_proxy(proxy)
-    if not reuse_existing_profile:
-        try:
+    if not force and not _codex_cfg.ENABLE_CODEX_AUTO:
+        return proto._codex_result(status="skipped", message="ENABLE_CODEX_AUTO=False")
+    if not email:
+        return proto._codex_result(status="skipped", message="email 为空")
+    try:
+        # 忽略调用方携带的注册代理；独立接码只使用当前 Clash/本地配置。
+        proxy = _codex_cfg.resolve_local_proxy()
+        logger.info("[Codex][Browser] 接码本地代理：%s；注册代理池未参与", mask_proxy_url(proxy))
+        if not reuse_existing_profile:
             _preflight_codex_proxy(proxy)
-        except Exception as exc:
-            message = f"{type(exc).__name__}: {str(exc)[:220]}"
-            logger.error("[Codex][Browser] 授权前代理预检失败：%s", message)
-            return proto._codex_result(status="failed", email=email, message=message)
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {str(exc)[:220]}"
+        logger.error("[Codex][Browser] 授权前代理预检失败：%s", message)
+        return proto._codex_result(status="failed", email=email, message=message)
 
     max_rounds = 2
     last_result = None
