@@ -1,8 +1,6 @@
 import os
-import socket
 import subprocess
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,66 +24,78 @@ def test_launcher_rejects_invalid_port(port):
     assert "Starting WebUI" not in result.stdout
 
 
-def test_launcher_normalizes_port_and_preserves_listener():
-    with socket.socket() as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        for port in range(8100, 8200):
-            try:
-                listener.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-            break
-        else:
-            pytest.skip("No free four-digit port for the launcher test")
-        listener.listen(1)
-        result = subprocess.run(
-            ["cmd.exe", "/d", "/c", "start-webui.bat", f"0{port}"],
-            cwd=ROOT, input="", capture_output=True, text=True, timeout=10,
-        )
-        assert result.returncode == 1
-        assert f"Port {port} is already in use" in result.stdout
-        assert "Starting WebUI" not in result.stdout
-        listener.settimeout(2)
-        probe, _ = listener.accept()
-        probe.close()
-        with socket.create_connection(("127.0.0.1", port), timeout=2):
-            connection, _ = listener.accept()
-            connection.close()
+def test_launchers_replace_then_wait_for_http_and_use_one_restart_path():
+    start = (ROOT / "start-webui.bat").read_text(encoding="ascii")
+    stop = (ROOT / "stop-webui.bat").read_text(encoding="ascii")
+    restart = (ROOT / "restart-webui.bat").read_text(encoding="ascii")
+    assert 'if not defined PORT set "PORT=5002"' in start
+    assert start.index("tools\\check_integrations.py") < start.index('call "%~dp0stop-webui.bat"')
+    assert start.index('call "%~dp0stop-webui.bat"') < start.index("Start-Process")
+    assert start.index("r.status==200") < start.index('start "" "http://')
+    assert "-WindowStyle Hidden" in start
+    assert "Stop-Process -Id $owner -Force" in stop
+    assert "foreach($pid " not in stop.lower()
+    assert "-le 4" in stop
+    assert 'call "%~dp0start-webui.bat" %*' in restart
+    assert "stop-webui.bat" not in restart
+    for name in ("start-webui.bat", "stop-webui.bat", "restart-webui.bat"):
+        raw = (ROOT / name).read_bytes()
+        assert b"\n" not in raw.replace(b"\r\n", b"")
+        assert "pause" not in raw.decode("ascii").lower()
 
 
-@pytest.mark.parametrize("status", [200, 302])
-def test_launcher_does_not_identify_an_unrelated_http_server_as_webui(status):
-    requests = []
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            requests.append((self.path, dict(self.headers)))
-            self.send_response(status)
-            if status == 302:
-                self.send_header("Location", "/another-service")
-            self.end_headers()
-            self.wfile.write(b"not the project WebUI")
-
-        def log_message(self, *_args):
-            pass
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+def test_stop_force_replaces_only_requested_listener_and_project(tmp_path):
+    # Real subprocess listeners keep pytest outside the forced-stop target.
+    # Only the stop script is copied into a disposable path-with-spaces fixture.
+    fixture = tmp_path / "launcher fixture"
+    fixture.mkdir()
+    (fixture / "stop-webui.bat").write_bytes((ROOT / "stop-webui.bat").read_bytes())
+    server = """import socket, time
+s = socket.socket()
+for port in range(8100, 8200):
     try:
-        port = server.server_address[1]
-        result = subprocess.run(
-            ["cmd.exe", "/d", "/c", "start-webui.bat", str(port)],
-            cwd=ROOT, input="", capture_output=True, text=True, timeout=10,
+        s.bind(('127.0.0.1', port))
+        break
+    except OSError:
+        continue
+else:
+    raise SystemExit('no fixture port')
+s.listen(1)
+print(s.getsockname()[1], flush=True)
+time.sleep(120)
+"""
+    # This project instance is on a different port and must also be replaced.
+    (fixture / "web.py").write_text(server, encoding="utf-8")
+    children = []
+    try:
+        for args in (["-c", server], ["-c", server], [str(fixture / "web.py")]):
+            child = subprocess.Popen(
+                [sys.executable, *args], cwd=fixture, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            children.append(child)
+        ports = [int(child.stdout.readline().strip()) for child in children]
+        (fixture / "run").mkdir()
+        # A stale PID pointing at an unrelated server must never determine the target.
+        (fixture / "run" / "webui.pid").write_text(str(children[1].pid), encoding="ascii")
+        invalid = subprocess.run(
+            ["cmd.exe", "/d", "/c", "stop-webui.bat", "invalid"],
+            cwd=fixture, input="", capture_output=True, text=True, timeout=15,
         )
-        assert result.returncode == 1
-        assert "identity check failed or timed out" in result.stdout
-        assert "WebUI is already running" not in result.stdout
-        assert len(requests) == 1
-        assert requests[0][0] == "/login"
-        assert not any("auth" in key.lower() or key.lower() == "cookie" for key in requests[0][1])
-        with socket.create_connection(("127.0.0.1", port), timeout=2):
-            pass
+        assert invalid.returncode != 0
+        assert all(child.poll() is None for child in children)
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "stop-webui.bat", f"0{ports[0]}"],
+            cwd=fixture, input="", capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Stopped PID=" in result.stdout
+        children[0].wait(timeout=5)
+        children[2].wait(timeout=5)
+        assert children[1].poll() is None
+        assert not (fixture / "run" / "webui.pid").exists()
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)

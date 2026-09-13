@@ -1,5 +1,5 @@
 @echo off
-cd /d %~dp0
-call stop-webui.bat
-ping 127.0.0.1 -n 2 >nul
-call start-webui.bat %1
+setlocal EnableExtensions
+rem Starting already replaces the old instance; keep a single restart path.
+call "%~dp0start-webui.bat" %*
+exit /b %errorlevel%
