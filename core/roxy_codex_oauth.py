@@ -1463,6 +1463,13 @@ def _run_roxy_codex_oauth_once(
         else:
             raise RuntimeError(f"[Codex][Browser] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
 
+        # 外层页面负责统一 Codex Desktop 登录呈现，内层 authorize_url 保留本轮
+        # 动态 state/PKCE，避免复用固定链接导致回调校验失效。
+        if bool(getattr(codex_cfg, "CODEX_DESKTOP_AUTH_WRAPPER", True)):
+            browser_auth_url = proto._build_desktop_auth_url(auth_url)
+        else:
+            browser_auth_url = auth_url
+
         if not driver:
             driver = _build_driver(opened)
             _center_browser_window(driver)
@@ -1471,7 +1478,7 @@ def _run_roxy_codex_oauth_once(
         if reuse_existing_profile and clear_existing_state:
             clear_roxy_browser_auth_state(driver)
 
-        _fill_email_and_otp(driver, email, otp_provider, auth_url)
+        _fill_email_and_otp(driver, email, otp_provider, browser_auth_url)
         human_delay("api")
         logger.info("[Codex][Browser] 检查是否需要手机号验证")
         _do_phone_verification_if_present(driver, email=email)

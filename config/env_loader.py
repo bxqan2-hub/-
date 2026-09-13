@@ -60,6 +60,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "SUB2API_API_KEY": "sub2api 管理接口 API Key",
     "SUB2API_API_TOKEN": "sub2api 管理接口鉴权 Token（旧配置名，兼容）",
     "SMS_API_KEY": "HeroSMS API Key",
+    "SMSBOWER_API_KEY": "SMSBower API Key",
 }
 
 

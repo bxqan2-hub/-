@@ -562,10 +562,12 @@ def _compact_registration_traffic(row: dict) -> dict | None:
 
     downloaded = amount("downloaded")
     saved = amount("cache_saved_bytes")
+    logical = amount("logical_downloaded") or downloaded + saved
     # v1 stored Fetch replay bytes in downloaded; v2 excludes them at collection time.
     network_bytes = downloaded if traffic.get("downloaded_excludes_cache_replay") else max(0, downloaded - saved)
     return {
         "network_bytes": network_bytes,
+        "logical_bytes": logical,
         "cache_saved_bytes": saved,
         "cache_hits": amount("cache_hits"),
         "cache_misses": amount("cache_misses"),
@@ -4873,6 +4875,35 @@ def create_app(auth_code: str | None = None) -> Flask:
         except Exception as exc:
             logger.warning("API代理测试失败: %s: %s", type(exc).__name__, str(exc)[:300])
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/sms/countries")
+    def api_sms_countries():
+        """返回当前接码平台国家列表，供 Codex 手机验证选择框使用。"""
+        from core import sms_provider
+        try:
+            with sms_provider.provider_context(request.args.get("provider")):
+                countries = sms_provider.get_countries()
+                provider = sms_provider.validate_configuration()
+            return jsonify({"ok": True, "provider": provider, "countries": countries})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/sms/prices")
+    def api_sms_prices():
+        """按 OpenAI 服务代码读取有库存国家及价格。"""
+        from core import sms_provider
+        country = request.args.get("country") or None
+        service = request.args.get("service") or None
+        max_price = request.args.get("max_price") or None
+        try:
+            with sms_provider.provider_context(request.args.get("provider")):
+                offers = sms_provider.list_affordable_countries(service=service, max_price=max_price)
+                provider = sms_provider.validate_configuration()
+            if country:
+                offers = [item for item in offers if str(item.get("id")) == str(country)]
+            return jsonify({"ok": True, "provider": provider, "service": service or "dr", "offers": offers})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.get("/api/config")
     def api_config_get():

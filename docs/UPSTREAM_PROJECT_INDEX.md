@@ -400,3 +400,10 @@
 - 已加载上一轮修复的新日志仍出现 `mail_snapshot ReadTimeout → structured_api ts=None → password_email HTTP 401`。只读接口实际返回 `data{code,body,date,subject}`；原解析器从完整 JSON 提码却只读外层时间，导致上一轮时间门禁失效。
 - 原 `_extract_structured_api_code` 先归一化已观察到的单邮件 data 包装，再从同一对象解析 OTP 和时间；不借用外层 API 时间、不新增预算/重试。真实响应内存对照与空快照旧信→新信/持续旧信回归通过，密码/MFA 安全边界未改。
 - 两次 Session GET 403、两次窗口出口复核失败、历史 activate 400 分开记录；本次不声称远端故障已解决。证据、上游 hash、1062 项全量回归、R8 与待重启状态见 `docs/2026-09-13_嵌套邮件时间丢失与2FA失败续查-report.md`。
+
+## 本次 SMSBower 第二平台与 Codex desktop-auth 扩展（2026-09-13）
+
+- 保留既有 HeroSMS 地址/密钥字段；新增 `SMS_PROVIDER`、`SMSBOWER_API_BASE`、`SMSBOWER_API_KEY`，两套 handler API 完全独立，OpenAI 服务代码仍为 `dr`。
+- Roxy Codex 授权继续使用 `CODEX_HEADLESS=True`、`CODEX_LOCAL_PROXY`，动态 PKCE/state 地址可选包裹 `chatgpt.com/codex/desktop-auth`，回调仍校验原 state 并按 CPA/sub2 原路径导出。
+- WebUI 新增接码平台、国家、价格/库存查询框及 `/api/sms/countries`、`/api/sms/prices`；查询临时切换平台并由锁保护，不改变默认运行平台。
+- 注册流量列表同时显示新增网络下载与含缓存回放的逻辑总量；近期日志约 2.5–3.3 MiB 是真实新增网络字节，逻辑资源总量约 38–87 MiB，二者未混算。

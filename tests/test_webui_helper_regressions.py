@@ -51,6 +51,7 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         })
         self.assertEqual(legacy["registration_traffic"]["network_bytes"], 500)
         self.assertEqual(current["registration_traffic"]["network_bytes"], 500)
+        self.assertEqual(current["registration_traffic"]["logical_bytes"], 1_500)
         self.assertEqual(current["registration_traffic"]["cache_saved_bytes"], 1_000)
         self.assertEqual(current["registration_traffic"]["cache_candidates"], 5)
         self.assertEqual(current["registration_traffic"]["cache_misses"], 3)

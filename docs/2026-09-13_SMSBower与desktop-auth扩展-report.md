@@ -1,0 +1,29 @@
+# SMSBower 第二平台与 Codex desktop-auth 扩展报告
+
+## 结论
+
+- 账号列表约 3 MiB 的“流量”对应 `downloaded` 去除缓存回放后的新增网络下载，并非页面全部逻辑资源。近期样本新增网络约 2.5–3.3 MiB，`logical_downloaded`（网络 + 缓存回放）约 38–87 MiB；本次 UI 已同时展示两项。
+- HeroSMS 保持原 API 地址与密钥；SMSBower 使用独立地址 `https://smsbower.page/stubs/handler_api.php` 与 `SMSBOWER_API_KEY`，不会串用凭据。
+- Roxy Codex 流程使用最新内核配置、无头模式和 `CODEX_LOCAL_PROXY`；授权地址动态生成后包裹 desktop-auth 外层，登录、邮箱 OTP、手机号轮询、callback 及 CPA/sub2 导出仍走原状态机。
+
+## 原因核对
+
+1. **高概率：流量口径误读。** `core/browser_traffic.py` 已区分网络下载和缓存回放；日志中 `downloaded` 约 3 MiB、`logical_downloaded` 更大，属于指标含义不同。
+2. **中概率：缓存跨账号复用。** 共享静态缓存命中数和节省字节单独记录，未计入新增网络字节。
+3. **低概率：日志截断。** `metrics_version=3`、请求数、命中/未命中/写入均来自 performance log 汇总，列表展示只取脱敏汇总字段。
+
+## 修改点
+
+- `config/codex.py`：新增 SMSBower 配置和 `CODEX_DESKTOP_AUTH_WRAPPER`。
+- `core/sms_provider.py`：在原 handler API 路径加入平台选择与独立 endpoint/key，保留取号、轮询、完成、取消逻辑。
+- `core/codex_oauth.py`、`core/roxy_codex_oauth.py`：新增动态 desktop-auth 包装并在 Roxy 无头授权入口使用。
+- `webui/app.py`、`webui/templates/index.html`、`webui/config_editor.py`：增加平台/国家/价格库存查询。
+- `config/env_loader.py`：登记 `SMSBOWER_API_KEY` 为密钥字段。
+
+## 验证
+
+`.venv\\Scripts\\python.exe -m pytest -q tests/test_sms_provider_configuration.py tests/test_sms_provider_herosms.py tests/test_webui_helper_regressions.py tests/test_browser_traffic.py`
+
+结果：`100 passed, 1 warning, 205 subtests passed in 2.13s`。
+
+未执行真实账号登录、短信购买或远端 callback；需在配置页填写 `SMSBOWER_API_KEY` 后选择 SMSBower，再运行 Codex 授权任务验证实际库存和回调。

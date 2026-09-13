@@ -438,6 +438,10 @@ EDITABLE_FIELDS = [
         "label": "Codex接码无头运行", "help": "仅让 Codex/接码浏览器无头运行，不影响注册浏览器窗口",
     },
     {
+        "key": "CODEX_DESKTOP_AUTH_WRAPPER", "file": "codex.py", "type": "bool", "group": "Codex",
+        "label": "Cockpit desktop-auth 链接", "help": "Roxy 授权时包裹 chatgpt.com/codex/desktop-auth 外层链接",
+    },
+    {
         "key": "ROXY_CODEX_CALLBACK_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
         "label": "Codex回调超时", "help": "Roxy Codex OAuth 等待 localhost:1455 callback 的最长秒数",
     },
@@ -889,6 +893,11 @@ EDITABLE_FIELDS = [
         "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
     },
     # ---- 接码平台 ----
+    {
+        "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "接码平台", "help": "herosms 保持现有流程；smsbower 使用 SMSBower handler API",
+        "options": ["herosms", "smsbower"],
+    },
     # ---- Codex：基础 / CPA / sub2api 配置 ----
     {
         "key": "CODEX_AUTH_URL_SOURCE", "file": "codex.py", "type": "str", "group": "Codex",
@@ -955,6 +964,15 @@ EDITABLE_FIELDS = [
     {
         "key": "SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "HeroSMS API Key", "help": "HeroSMS 平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMSBOWER_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API 地址", "help": "默认 https://smsbower.page/stubs/handler_api.php",
+    },
+    {
+        "key": "SMSBOWER_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API Key", "help": "SMSBower 平台 API Key，保存在 .env（SMSBOWER_API_KEY）",
         "storage": "env", "secret": True,
     },
 ]

@@ -141,6 +141,12 @@ def _build_authorize_url(state: str, code_challenge: str, prompt: str = "login")
     return f"{_cfg.CODEX_AUTH_URL}?{urlencode(params)}"
 
 
+def _build_desktop_auth_url(authorize_url: str) -> str:
+    """将动态 OAuth 地址包进 Cockpit/Codex desktop-auth 外层页面。"""
+    wrapper = "https://chatgpt.com/codex/desktop-auth"
+    return f"{wrapper}?{urlencode({'authorize_url': authorize_url})}&codex_streamlined_login=true&no_universal_links=1"
+
+
 def _ensure_oai_context_url(auth_url: str, session: BrowserSession) -> str:
     """在 Codex OAuth 授权 URL 上补齐前端同源上下文参数，保持 oai-did 连续。"""
     try:

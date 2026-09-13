@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""HeroSMS 接码平台客户端。
+"""SMS-Activate handler API 接码客户端（HeroSMS / SMSBower）。
 
 HeroSMS 兼容 SMS-Activate handler API：
 https://hero-sms.com/stubs/handler_api.php
@@ -7,6 +7,7 @@ https://hero-sms.com/stubs/handler_api.php
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 
 from curl_cffi.requests import Session as CurlSession
@@ -20,6 +21,29 @@ _MIN_CANCEL_DELAY = 125
 _ACTIVATION_LOCK = threading.Lock()
 _ACTIVATION_META: dict[str, dict] = {}
 _SCHEDULED_CANCELS: set[str] = set()
+_PROVIDER_LOCK = threading.RLock()
+
+
+@contextmanager
+def provider_context(provider: str | None = None):
+    """在单次 API 查询中临时切换平台，结束后恢复全局配置。"""
+    if not provider:
+        yield
+        return
+    value = str(provider).strip().lower()
+    if value not in {"herosms", "smsbower"}:
+        raise SmsProviderConfigurationError(f"不支持的接码平台：{provider}")
+    with _PROVIDER_LOCK:
+        had = hasattr(_cfg, "SMS_PROVIDER")
+        previous = getattr(_cfg, "SMS_PROVIDER", "herosms")
+        setattr(_cfg, "SMS_PROVIDER", value)
+        try:
+            yield
+        finally:
+            if had:
+                setattr(_cfg, "SMS_PROVIDER", previous)
+            else:
+                delattr(_cfg, "SMS_PROVIDER")
 
 
 def configured_excluded_countries() -> set[str]:
@@ -71,6 +95,29 @@ class SmsCodeTimeout(SmsProviderError):
     """等待短信验证码超时。"""
 
 
+def _provider_name() -> str:
+    value = str(getattr(_cfg, "SMS_PROVIDER", "herosms") or "herosms").strip().lower()
+    if value in {"smsbower", "sms-bower", "sms_bower"}:
+        return "smsbower"
+    return "herosms"
+
+
+def _provider_label() -> str:
+    return "SMSBower" if _provider_name() == "smsbower" else "HeroSMS"
+
+
+def _api_base() -> str:
+    if _provider_name() == "smsbower":
+        return str(getattr(_cfg, "SMSBOWER_API_BASE", "") or "").strip()
+    return str(getattr(_cfg, "SMS_API_BASE", "") or "").strip()
+
+
+def _api_key() -> str:
+    if _provider_name() == "smsbower":
+        return str(getattr(_cfg, "SMSBOWER_API_KEY", "") or "").strip()
+    return str(getattr(_cfg, "SMS_API_KEY", "") or "").strip()
+
+
 def _http() -> CurlSession:
     session = CurlSession(impersonate=_browser_cfg.IMPERSONATE)
     local_proxy = str(getattr(_cfg, "CODEX_LOCAL_PROXY", "") or "").strip()
@@ -81,26 +128,30 @@ def _http() -> CurlSession:
 
 
 def validate_configuration() -> str:
-    """校验 HeroSMS 静态配置，不发起网络请求。"""
+    """校验当前接码平台静态配置，不发起网络请求。"""
+    provider = _provider_name()
+    label = _provider_label()
+    base_key = "SMSBOWER_API_BASE" if provider == "smsbower" else "SMS_API_BASE"
+    api_key_name = "SMSBOWER_API_KEY" if provider == "smsbower" else "SMS_API_KEY"
     required = {
-        "SMS_API_BASE": str(getattr(_cfg, "SMS_API_BASE", "") or "").strip(),
-        "SMS_API_KEY": str(getattr(_cfg, "SMS_API_KEY", "") or "").strip(),
+        base_key: _api_base(),
+        api_key_name: _api_key(),
         "SMS_SERVICE": str(getattr(_cfg, "SMS_SERVICE", "") or "").strip(),
         "SMS_COUNTRY": str(getattr(_cfg, "SMS_COUNTRY", "") or "").strip(),
     }
     missing = [key for key, value in required.items() if not value]
     if missing:
         raise SmsProviderConfigurationError(
-            f"HeroSMS 配置不完整：{', '.join(missing)}；请在本站配置页补齐后重试 Codex OAuth"
+            f"{label} 配置不完整：{', '.join(missing)}；请在本站配置页补齐后重试 Codex OAuth"
         )
     country_strategy = required["SMS_COUNTRY"].lower()
     if country_strategy != "auto" and not country_strategy.isdigit():
         raise SmsProviderConfigurationError(
-            "HeroSMS 的 SMS_COUNTRY 只能填写 auto 或数字国家 ID"
+            f"{label} 的 SMS_COUNTRY 只能填写 auto 或数字国家 ID"
         )
     if country_strategy != "auto" and country_strategy in configured_excluded_countries():
         raise SmsProviderConfigurationError(
-            f"HeroSMS 国家 ID {country_strategy} 已在 SMS_EXCLUDED_COUNTRIES 中永久排除"
+            f"{label} 国家 ID {country_strategy} 已在 SMS_EXCLUDED_COUNTRIES 中永久排除"
         )
     price_limit = str(getattr(_cfg, "SMS_MAX_PRICE", "") or "").strip()
     if country_strategy == "auto" and not price_limit:
@@ -111,27 +162,30 @@ def validate_configuration() -> str:
                 raise SmsProviderConfigurationError("SMS_MAX_PRICE 金额上限必须大于 0")
         except InvalidOperation as exc:
             raise SmsProviderConfigurationError("SMS_MAX_PRICE 金额上限必须是有效数字") from exc
-    return "herosms"
+    return provider
 
 
 def _request(http: CurlSession, params: dict) -> str:
-    request_params = {"api_key": _cfg.SMS_API_KEY, **params}
-    response = http.get(_cfg.SMS_API_BASE, params=request_params)
+    # provider_context 在 WebUI 查询时持有同一把锁，避免并发注册读到临时平台。
+    with _PROVIDER_LOCK:
+        label = _provider_label()
+        request_params = {"api_key": _api_key(), **params}
+        response = http.get(_api_base(), params=request_params)
     text = (response.text or "").strip()
     if response.status_code != 200:
-        raise SmsProviderError(f"HeroSMS HTTP {response.status_code}: {text[:200]}")
+        raise SmsProviderError(f"{label} HTTP {response.status_code}: {text[:200]}")
 
     error_code = text.split(":", 1)[0]
     if error_code in {"BAD_KEY", "BAD_ACTION", "BAD_SERVICE", "BAD_STATUS", "WRONG_SERVICE", "WRONG_COUNTRY"}:
-        raise SmsProviderError(f"HeroSMS 请求失败：{text}")
+        raise SmsProviderError(f"{label} 请求失败：{text}")
     if error_code == "NO_BALANCE":
-        raise SmsNoBalanceError("HeroSMS 余额不足（NO_BALANCE），请充值后重试")
+        raise SmsNoBalanceError(f"{label} 余额不足（NO_BALANCE），请充值后重试")
     if error_code == "NO_NUMBERS":
-        raise SmsNoNumbersError("HeroSMS 暂无符合当前国家、服务和价格条件的号码（NO_NUMBERS）")
+        raise SmsNoNumbersError(f"{label} 暂无符合当前国家、服务和价格条件的号码（NO_NUMBERS）")
     if error_code == "NO_ACTIVATION":
-        raise SmsProviderError("HeroSMS 激活 ID 不存在（NO_ACTIVATION）")
+        raise SmsProviderError(f"{label} 激活 ID 不存在（NO_ACTIVATION）")
     if error_code in {"BANNED", "ERROR_SQL", "SERVICE_UNAVAILABLE_REGION"}:
-        raise SmsProviderError(f"HeroSMS 服务异常：{text}")
+        raise SmsProviderError(f"{label} 服务异常：{text}")
     return text
 
 
@@ -142,7 +196,7 @@ def _request_json(http: CurlSession, params: dict):
 
         return json.loads(text)
     except Exception as exc:
-        raise SmsProviderError(f"HeroSMS 返回的 JSON 格式异常：{text[:200]}") from exc
+        raise SmsProviderError(f"{_provider_label()} 返回的 JSON 格式异常：{text[:200]}") from exc
 
 
 def _phone_digits(value: str) -> str:

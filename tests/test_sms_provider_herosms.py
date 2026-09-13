@@ -50,12 +50,13 @@ class HeroSmsProviderTests(unittest.TestCase):
             sms_provider._ACTIVATION_META.clear()
             sms_provider._SCHEDULED_CANCELS.clear()
 
-    def test_secret_registry_and_webui_only_include_herosms(self):
+    def test_secret_registry_and_webui_include_both_sms_platforms(self):
         self.assertEqual(env_loader.SECRET_ENV_KEYS["SMS_API_KEY"], "HeroSMS API Key")
         fields = {field["key"]: field for field in config_editor.EDITABLE_FIELDS}
         self.assertIn("SMS_API_BASE", fields)
         self.assertTrue(fields["SMS_API_KEY"].get("secret"))
-        self.assertNotIn("SMS_PROVIDER", fields)
+        self.assertIn("SMS_PROVIDER", fields)
+        self.assertTrue(fields["SMSBOWER_API_KEY"].get("secret"))
         self.assertFalse(any(key.startswith(("H_", "L_")) for key in fields))
 
     def test_http_session_uses_codex_local_proxy(self):

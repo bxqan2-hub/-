@@ -6,6 +6,14 @@ from core import roxy_codex_oauth, sms_provider
 
 
 class SmsProviderConfigurationTests(unittest.TestCase):
+    def test_desktop_auth_wrapper_preserves_dynamic_authorize_url(self):
+        inner = "https://auth.openai.com/oauth/authorize?state=STATE&code_challenge=CHALLENGE"
+        from core import codex_oauth
+        wrapped = codex_oauth._build_desktop_auth_url(inner)
+        self.assertTrue(wrapped.startswith("https://chatgpt.com/codex/desktop-auth?"))
+        self.assertIn("authorize_url=https%3A%2F%2Fauth.openai.com", wrapped)
+        self.assertIn("codex_streamlined_login=true", wrapped)
+
     def test_reports_all_missing_required_fields(self):
         with (
             patch.object(sms_provider._cfg, "SMS_API_BASE", ""),
@@ -41,6 +49,33 @@ class SmsProviderConfigurationTests(unittest.TestCase):
             patch.object(sms_provider._cfg, "SMS_MAX_PRICE", "0.15"),
         ):
             self.assertEqual(sms_provider.validate_configuration(), "herosms")
+
+    def test_valid_smsbower_configuration(self):
+        with (
+            patch.object(sms_provider._cfg, "SMS_PROVIDER", "smsbower"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_BASE", "https://smsbower.page/stubs/handler_api.php"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_KEY", "secret"),
+            patch.object(sms_provider._cfg, "SMS_SERVICE", "dr"),
+            patch.object(sms_provider._cfg, "SMS_COUNTRY", "187"),
+        ):
+            self.assertEqual(sms_provider.validate_configuration(), "smsbower")
+
+    def test_smsbower_uses_own_endpoint_and_key(self):
+        http = unittest.mock.MagicMock()
+        http.get.return_value.status_code = 200
+        http.get.return_value.text = "ACCESS_NUMBER:act-1:15551234567"
+        with (
+            patch.object(sms_provider._cfg, "SMS_PROVIDER", "smsbower"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_BASE", "https://smsbower.page/stubs/handler_api.php"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_KEY", "bower-secret"),
+            patch.object(sms_provider._cfg, "SMS_SERVICE", "dr"),
+            patch.object(sms_provider._cfg, "SMS_COUNTRY", "187"),
+        ):
+            sms_provider.acquire_number(http=http)
+        http.get.assert_called_once()
+        args = http.get.call_args.kwargs
+        self.assertEqual(args["params"]["api_key"], "bower-secret")
+        self.assertEqual(http.get.call_args.args[0], "https://smsbower.page/stubs/handler_api.php")
 
     def test_auto_country_requires_price_limit(self):
         with (
