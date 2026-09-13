@@ -15,6 +15,17 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.client = create_app(auth_code="test-auth").test_client()
         self.client.environ_base["HTTP_X_AUTH_CODE"] = "test-auth"
 
+    def test_sms_center_has_explicit_controls_and_account_selection(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="tab-sms"', html)
+        self.assertIn('id="smsCenterProviderV2"', html)
+        self.assertIn('自动选择（按价格和库存）', html)
+        self.assertIn('手动：${esc(c.name)}（ID ${esc(c.id)}）', html)
+        self.assertIn('id="smsCenterSelectAllV2"', html)
+        self.assertIn('id="btnSmsCenterStartV2"', html)
+        self.assertIn('单号等待时间', html)
+        self.assertIn('轮询间隔', html)
+
     def test_account_list_exposes_safe_registration_traffic_totals(self):
         legacy = _compact_account_for_list({
             "id": 1,
