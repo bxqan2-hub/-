@@ -11,8 +11,9 @@ from webui import config_editor
 class _Response:
     status_code = 200
 
-    def __init__(self, text):
+    def __init__(self, text, content=None):
         self.text = text
+        self.content = text.encode("utf-8") if content is None else content
 
 
 class _Http:
@@ -112,6 +113,17 @@ class HeroSmsProviderTests(unittest.TestCase):
                 "maxPrice": "0.15",
             },
         )
+
+    def test_country_names_decode_utf8_response_bytes(self):
+        http = _Http([
+            '{"1":{"id":1,"chn":"中国","eng":"China","iso":"CN"}}',
+        ])
+
+        countries = sms_provider.get_countries(http=http)
+
+        self.assertEqual(countries, [{
+            "id": "1", "name": "中国", "eng": "China", "iso": "CN",
+        }])
 
     def test_auto_country_prioritizes_spain_mexico_colombia(self):
         http = _Http([

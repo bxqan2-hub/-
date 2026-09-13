@@ -444,3 +444,10 @@
 - 本地修改：`core/browser_traffic.py::RoxyTrafficOptimizer._install_fetch_cache` 移除不兼容的 `Manifest` 枚举；ChatGPT/Auth/CDN 一方 image/media/font 继续使用已支持的资源类型 pattern，manifest 使用 URL-only `*manifest*` pattern，再由既有 `block_reason()` 二次判定路径、查询串和安全白名单；遥测/可选身份域保持 URL-only。没有新增第二套拦截器，也没有改变 2FA 的认证请求。
 - 2FA 复核：重新读取上游 `core/account_export.py`，本地 `setup_2fa_from_selenium` 与上游保持邮箱匹配、同一 driver、显式 `access_token`、`/backend-api/accounts/mfa/enroll` → TOTP → `activate_enrollment` 且仅 `success=true` 保存 Secret 的顺序。
 - 验证：`tests/test_browser_traffic.py tests/test_roxy_registration_otp_recovery.py tests/test_roxy_registration_session_recovery.py tests/test_registration_local_proxy_mode.py` 共 `144 passed, 230 subtests passed`。下一批真实批次以 `errors=[]`、`candidates>0`、`blocked_by_reason` 和热缓存 `hits` 验收。
+
+## 本次接码国家名称乱码核对（2026-09-13）
+
+- 现场接口仍能返回国家数据，但 `curl_cffi` 的 `response.text` 将无 charset/旧 content-type 的 UTF-8 国家名解码成替换字符；英文国家名存在，中文名称显示为乱码，容易被误判为“没有国家信息”。
+- 本地修改：`core/sms_provider.py::_request` 优先读取 `response.content` 并按 UTF-8 解码，只有响应对象没有字节内容或 UTF-8 解码失败时才回退 `response.text`；HeroSMS/SMSBower 的纯文本状态响应和 JSON 响应共用同一路径。
+- 现场核对：SMSBower/HeroSMS `getCountries` 均返回 200；修复后的国家名称 Unicode 码点正确，WebUI `/api/sms/countries` 使用同一 provider handler。
+- 验证：新增 `tests/test_sms_provider_herosms.py::test_country_names_decode_utf8_response_bytes`，定向结果 `1 passed`。2FA/注册流程未改变。

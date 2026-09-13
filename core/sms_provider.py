@@ -171,7 +171,20 @@ def _request(http: CurlSession, params: dict) -> str:
         label = _provider_label()
         request_params = {"api_key": _api_key(), **params}
         response = http.get(_api_base(), params=request_params)
-    text = (response.text or "").strip()
+    # curl_cffi can expose UTF-8 JSON as a mis-decoded ``text`` value when the
+    # provider omits a charset or sends a legacy content-type.  Country names
+    # then become replacement characters even though the raw response is
+    # valid UTF-8.  Prefer the bytes for all provider responses and retain the
+    # text-only fallback used by lightweight test doubles.
+    raw_content = getattr(response, "content", None)
+    if isinstance(raw_content, (bytes, bytearray)) and raw_content:
+        try:
+            text = bytes(raw_content).decode("utf-8")
+        except UnicodeDecodeError:
+            text = str(getattr(response, "text", "") or "")
+    else:
+        text = str(getattr(response, "text", "") or "")
+    text = text.strip()
     if response.status_code != 200:
         raise SmsProviderError(f"{label} HTTP {response.status_code}: {text[:200]}")
 
