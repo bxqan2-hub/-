@@ -393,3 +393,10 @@
 - 依据 Roxy 官方 `/browser/create` 文档，在现有创建链路增加唯一 `ROXY_CORE_VERSION`：latest 删除模板残留 coreVersion，指定主版本则传字符串，同时设置 coreType=Chrome。UI 接入现有配置保存/热加载，只影响之后新建窗口，不伪改 UA 或复制旧 Profile。
 - 密码成功终态/ checkpoint、同窗 Cookie/Token、邮箱匹配、enroll/activate 成功确认、只读校验分离均保持，未修改这些状态机。回归 `1058 passed, 1 deselected, 1 warning, 338 subtests passed`。
 - 上游 hash、完整配置链路、前端交互/后端参数验证、八项自检及待重启状态见 `docs/2026-09-13_Roxy重复IP与Chrome内核选择-report.md`。
+
+## 本次嵌套邮件时间丢失与 2FA 失败续查（2026-09-13 中午）
+
+- 修改前重新获取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 account_export、roxy_registration、generic_api_mail_client，均 HTTP 200；版本不变，不覆盖上游或新增协议路径。
+- 已加载上一轮修复的新日志仍出现 `mail_snapshot ReadTimeout → structured_api ts=None → password_email HTTP 401`。只读接口实际返回 `data{code,body,date,subject}`；原解析器从完整 JSON 提码却只读外层时间，导致上一轮时间门禁失效。
+- 原 `_extract_structured_api_code` 先归一化已观察到的单邮件 data 包装，再从同一对象解析 OTP 和时间；不借用外层 API 时间、不新增预算/重试。真实响应内存对照与空快照旧信→新信/持续旧信回归通过，密码/MFA 安全边界未改。
+- 两次 Session GET 403、两次窗口出口复核失败、历史 activate 400 分开记录；本次不声称远端故障已解决。证据、上游 hash、1062 项全量回归、R8 与待重启状态见 `docs/2026-09-13_嵌套邮件时间丢失与2FA失败续查-report.md`。

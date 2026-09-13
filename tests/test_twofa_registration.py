@@ -2489,12 +2489,15 @@ def test_password_reauth_real_mail_provider_uses_isolated_retry_budget(
         assert sensitive not in diagnostic
 
 
+@pytest.mark.parametrize("response_kind", ["detail", "nested_json"])
 @pytest.mark.parametrize("new_mail_arrives", [True, False])
 def test_password_reauth_waits_for_fresh_detail_mail_when_snapshot_is_empty(
-    password_reauth_driver, monkeypatch, caplog, new_mail_arrives,
+    password_reauth_driver, monkeypatch, caplog, new_mail_arrives, response_kind,
 ):
+    import json
     import time
-    from datetime import datetime
+    from datetime import datetime, timezone
+    from email.utils import format_datetime
     from config import email as email_cfg, twofa
     from core import email_provider, generic_api_mail_client as mail
 
@@ -2519,10 +2522,14 @@ def test_password_reauth_waits_for_fresh_detail_mail_when_snapshot_is_empty(
         received_at = datetime.fromtimestamp(requested_at + 3 if fresh else requested_at - 45)
         timestamp = received_at.strftime("%Y年%m月%d日 %H:%M:%S (北京时间)")
         code = "012345" if fresh else "999999"
-        return SimpleNamespace(status_code=200, text=(
-            f'<div class="time">{timestamp}</div>'
-            f'<script>const htmlContent = "Your verification code is {code}";</script>'
-        ))
+        if response_kind == "nested_json":
+            timestamp = format_datetime(received_at.astimezone(timezone.utc)) + " (UTC)"
+            text = json.dumps({"success": True, "data": {"code": code, "date": timestamp,
+                               "subject": f"Your code {code}", "body": f"<p>Code {code}</p>"}, "message": "OK"})
+        else:
+            text = (f'<div class="time">{timestamp}</div>'
+                    f'<script>const htmlContent = "Your verification code is {code}";</script>')
+        return SimpleNamespace(status_code=200, text=text)
     monkeypatch.setattr(mail.requests, "Session", lambda: SimpleNamespace(get=get))
     resend = Mock(return_value=False)
     monkeypatch.setattr(account_export, "_password_click_resend", resend)

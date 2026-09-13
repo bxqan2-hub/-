@@ -103,16 +103,24 @@ class FlysmsPickupTests(unittest.TestCase):
         from types import SimpleNamespace
 
         sent_at = datetime(2026, 9, 13, 10, 0, 15).timestamp()
-        for response_kind in ("detail", "json"):
+        for response_kind in ("detail", "json", "nested_json", "nested_body"):
             for history in (set(), {"111111"}, {"999999"}):
                 with self.subTest(response_kind=response_kind, history=history):
                     clock = [sent_at]
                     def response(received_at, code):
                         date = datetime.fromtimestamp(received_at).strftime("%Y-%m-%d %H:%M:%S")
-                        text = json.dumps({"code": code, "time": date}) if response_kind == "json" else (
-                            f'<div class="time">{date}</div><script>const htmlContent = '
-                            f'"Your verification code is {code}";</script>'
-                        )
+                        if response_kind.startswith("nested"):
+                            from email.utils import format_datetime
+                            date = format_datetime(datetime.fromtimestamp(received_at, timezone.utc)) + " (UTC)"
+                            message = {"date": date, "subject": "Your verification code", "body": f"<p>Code {code}</p>"}
+                            if response_kind == "nested_json":
+                                message["code"] = code
+                            text = json.dumps({"success": True, "data": message, "message": "OK"})
+                        else:
+                            text = json.dumps({"code": code, "time": date}) if response_kind == "json" else (
+                                f'<div class="time">{date}</div><script>const htmlContent = '
+                                f'"Your verification code is {code}";</script>'
+                            )
                         return FakeResponse(text=text)
                     session = MagicMock()
                     session.get.side_effect = [response(sent_at - 45, "111111"), response(sent_at + 1, "222222")]
@@ -127,6 +135,33 @@ class FlysmsPickupTests(unittest.TestCase):
                                                 poll_interval=1, settle_seconds=0, exclude_codes=history)
                     self.assertEqual(code, "222222")
                     self.assertEqual(session.get.call_count, 2)
+
+    def test_nested_json_keeps_code_and_timestamp_on_the_same_message(self):
+        import json
+
+        timestamp = "Sun, 13 Sep 2026 03:55:03 +0000 (UTC)"
+        expected_ts = datetime(2026, 9, 13, 3, 55, 3, tzinfo=timezone.utc).timestamp()
+        for code_field in ("code", "otp", "verification_code", "body"):
+            with self.subTest(code_field=code_field):
+                message = {"date": timestamp, "subject": "Your verification code 012345"}
+                message[code_field] = "Code 012345" if code_field == "body" else "012345"
+                text = json.dumps({"success": True, "code": "999999", "date": expected_ts + 90, "data": message})
+                code, meta = generic_client._extract_structured_api_code(text)
+                self.assertEqual(code, "012345")
+                self.assertEqual(meta["msg_ts"], expected_ts)
+                self.assertEqual(meta["received_at"], timestamp)
+                self.assertEqual(meta["subject"], message["subject"])
+                self.assertIsNone(generic_client._extract_structured_api_code(text, after_ts=expected_ts + 3))
+                self.assertEqual(generic_client._extract_structured_api_code(text, after_ts=expected_ts + 2)[0], code)
+
+    def test_nested_json_does_not_borrow_envelope_time_for_undated_mail(self):
+        import json
+
+        text = json.dumps({"date": "2026-09-13T03:55:03Z", "data": {"code": "012345"}})
+        code, meta = generic_client._extract_structured_api_code(text)
+        self.assertEqual(code, "012345")
+        self.assertIsNone(meta["msg_ts"])
+        self.assertIsNone(meta["received_at"])
 
     def test_stale_detail_page_exhausts_wait_without_returning_candidate(self):
         from types import SimpleNamespace

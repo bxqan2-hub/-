@@ -537,10 +537,9 @@ def _inline_timestamp_is_before(
 
 def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tuple[str, dict] | None:
     """
-    兼容 newzoe 这类直接返回 JSON 的取码接口：
-      {"code":"784207","from":"...","subject":"Your temporary ChatGPT login code","time":"2026-08-05T01:10:17.000Z"}
-
-    如果响应里有 time/date/received_at，会按 after_ts 过滤旧码，避免拿到上一次缓存验证码。
+    解析平铺邮件 JSON 或 {"success":true,"data":{...}} 单邮件响应。
+    验证码与 time/date/received_at 始终取自同一邮件对象，再按 after_ts 过滤；
+    外层请求时间不作为内层邮件的新鲜度证据。
     """
     if not text:
         return None
@@ -550,8 +549,10 @@ def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tu
         return None
     if not isinstance(data, dict):
         return None
+    if isinstance(data.get("data"), dict):
+        data = data["data"]
 
-    # 常见字段优先级：code / otp / verification_code；没有再回退从拉平文本提取。
+    # 常见字段优先级：code / otp / verification_code；没有再回退从该邮件文本提取。
     raw_code = (
         data.get("code")
         or data.get("otp")
