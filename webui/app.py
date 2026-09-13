@@ -4882,18 +4882,15 @@ def create_app(auth_code: str | None = None) -> Flask:
         from core import sms_provider
         try:
             with sms_provider.provider_context(request.args.get("provider")):
-                try:
-                    countries = sms_provider.get_countries()
-                except Exception as exc:
-                    # 国家/价格是只读元数据；本地代理未启动时直连重试，
-                    # 取号和短信轮询仍严格沿用 CODEX_LOCAL_PROXY。
-                    if sms_provider._provider_name() != "smsbower" or "proxy" not in str(exc).lower() and "connect" not in str(exc).lower():
-                        raise
+                if sms_provider._provider_name() == "smsbower":
+                    # 国家列表是只读元数据，直接请求避免未监听的本地代理阻塞 UI。
                     direct = sms_provider._http(use_proxy=False)
                     try:
                         countries = sms_provider.get_countries(http=direct)
                     finally:
                         direct.close()
+                else:
+                    countries = sms_provider.get_countries()
                 provider = sms_provider.validate_configuration()
             return jsonify({"ok": True, "provider": provider, "countries": countries})
         except Exception as exc:
@@ -4908,16 +4905,15 @@ def create_app(auth_code: str | None = None) -> Flask:
         max_price = request.args.get("max_price") or None
         try:
             with sms_provider.provider_context(request.args.get("provider")):
-                try:
-                    result = sms_provider.list_price_tiers(service=service, country=country, max_price=max_price)
-                except Exception as exc:
-                    if sms_provider._provider_name() != "smsbower" or "proxy" not in str(exc).lower() and "connect" not in str(exc).lower():
-                        raise
+                if sms_provider._provider_name() == "smsbower":
+                    # 同国家接口保持一致，价格/库存元数据直连；实际取号仍走代理。
                     direct = sms_provider._http(use_proxy=False)
                     try:
                         result = sms_provider.list_price_tiers(service=service, country=country, max_price=max_price, http=direct)
                     finally:
                         direct.close()
+                else:
+                    result = sms_provider.list_price_tiers(service=service, country=country, max_price=max_price)
                 provider = sms_provider.validate_configuration()
             return jsonify({"ok": True, "provider": provider, "service": service or "dr",
                             **result})
