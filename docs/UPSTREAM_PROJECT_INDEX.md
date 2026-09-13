@@ -428,3 +428,11 @@
 - Cockpit Tools 对照固定 commit `cc4a3f4a1573143f8551fa27825aec443e2df09f` 的 `src/utils/codexExportFormats.ts`，SHA256 `b47b24e78b0a033533f9525c37ff42576ad66311e9b77bc65a6fc0e8cf215558`。本地 `build_sub2api_oauth_account` 生成同一 `sub2api-data` v1 OAuth schema，保留 refresh token，access token-only 仅在有明确 expiry 时允许。
 - `webui/app.py:api_accounts_download_codex_bulk` 替代旧 CPA-only endpoint：账号页选择 → format → 本地 OAuth 读取/身份校验 → CPA ZIP 或 sub2 JSON → 一次性 prepared download。旧 `/api/accounts/download-cpa-bulk` 与旧 handler 已删除；Agent Identity 生成/上传接口不变。
 - 实测账号 ID 255 已生成并下载 sub2 与 CPA 文件，HTTP 200；本地三类 Token 身份对照通过，导出 metadata 不含 Token。定向测试 `tests/test_codex_oauth_export.py`、WebUI helper、retry logging 共 46 passed，inline JavaScript syntax 通过。
+
+## 本次按注册流量教程扩展低流量拦截（2026-09-13）
+
+- 修改前重读本索引并保持上游锁定 commit `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；未覆盖上游注册实现，仅调整本站 `core/browser_traffic.py` 的既有 `block_reason` 与 Fetch pattern 安装路径。
+- 参考用户教程的资源分层，低流量模式现在拦截已知遥测域、可选第三方登录域，以及 ChatGPT/Auth/CDN 一方的图片、媒体、字体和 manifest；Cloudflare、Arkose、hCaptcha、reCAPTCHA、Sentinel、challenge 路径和动态认证请求继续放行。
+- 共享缓存范围、Profile 隔离、Cookie/Authorization/Set-Cookie 门禁、session/Token/密码/2FA 流程未改；低流量关闭或注册恢复时，Fetch 仍按原路径禁用并恢复联网。
+- Fetch pattern 与唯一 `block_reason` 共用同一判定，避免再增加第二套 URL 黑名单；查询串、片段、编码/路径穿越资源继续放行，遥测与可选身份域允许正常带查询参数被拦截。
+- 验证：`tests/test_browser_traffic.py` 通过 `42 passed, 204 subtests`；注册/代理/OTP/Session 相关回归通过 `144 passed, 230 subtests`。尚未启动真实注册批次，不把单元回归等同于代理账单下降。

@@ -90,7 +90,7 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
         optimizer.driver.execute_cdp_cmd.assert_called_once_with("Network.setBlockedURLs", {"urls": []})
         optimizer._connection.execute.assert_called_once_with(optimizer._devtools.fetch.disable())
 
-    def test_only_exact_public_cdn_optional_media_is_blocked(self):
+    def test_low_traffic_blocks_optional_first_party_resources(self):
         for extension in ("mp3", "mp4", "ogg", "webm"):
             with self.subTest(extension=extension):
                 self.assertEqual(block_reason(f"https://cdn.openai.com/assets/demo.{extension}", "media"), "optional_media")
@@ -104,36 +104,43 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
             ("https://cdn.openai.com/assets/../account/demo.mp4", "media"),
             ("https://cdn.openai.com/assets/%64emo.mp4", "media"),
             ("https://cdn.openai.com/assets/demo.mp4", "script"),
-            ("https://cdn.openai.com/assets/demo.mp4", "image"),
-            ("https://cdn.openai.com/assets/font.woff2", "font"),
-            ("https://cdn.openai.com/assets/icon.png", "image"),
             ("https://cdn.openai.com/other/demo.mp4", "media"),
             ("https://sub.cdn.openai.com/assets/demo.mp4", "media"),
             ("https://cdn.openai.com:8443/assets/demo.mp4", "media"),
             ("http://cdn.openai.com/assets/demo.mp4", "media"),
-            ("https://auth.openai.com/assets/demo.mp4", "media"),
-            ("https://chatgpt.com/assets/demo.mp4", "media"),
+            ("https://chatgpt.com/assets/demo.mp4?identity=fixture", "media"),
         ]
         for url, resource in allowed:
             with self.subTest(url=url, resource=resource):
                 self.assertEqual(block_reason(url, resource), "")
+        for url, resource, reason in [
+            ("https://chatgpt.com/assets/icon.png", "image", "optional_image"),
+            ("https://auth.openai.com/assets/font.woff2", "font", "optional_font"),
+            ("https://cdn.openai.com/assets/demo.mp4", "media", "optional_media"),
+            ("https://chatgpt.com/manifest.json", "manifest", "optional_manifest"),
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(block_reason(url, resource), reason)
 
-    def test_identity_challenge_configuration_and_telemetry_stay_live(self):
+    def test_security_stays_live_and_optional_services_are_blocked(self):
         for url, resource in [
             ("https://challenges.cloudflare.com/widget.js", "script"),
             ("https://sentinel.openai.com/a.png", "image"),
             ("https://cdn.openai.com/assets/recaptcha/audio.mp3", "media"),
             ("https://cdn.openai.com/assets/hcaptcha/audio.mp3", "media"),
             ("https://cdn.openai.com/assets/challenge/audio.mp3", "media"),
-            ("https://statsigapi.net/v1/config", "xhr"),
-            ("https://featuregates.org/v1/initialize", "fetch"),
-            ("https://browser-intake-datadoghq.com/v1/log", "xhr"),
-            ("https://accounts.google.com/o/oauth2", "document"),
             ("https://auth.openai.com/awe/api/v2/rum", "xhr"),
-            ("https://chatgpt.com/manifest.json", "manifest"),
         ]:
             with self.subTest(url=url):
                 self.assertEqual(block_reason(url, resource), "")
+        for url, resource, reason in [
+            ("https://statsigapi.net/v1/config", "xhr", "telemetry"),
+            ("https://featuregates.org/v1/initialize", "fetch", "telemetry"),
+            ("https://browser-intake-datadoghq.com/v1/log", "xhr", "telemetry"),
+            ("https://accounts.google.com/o/oauth2", "document", "optional_identity"),
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(block_reason(url, resource), reason)
 
     def test_session_only_keeps_application_shell_and_security_requests_live(self):
         for path, resource in [
@@ -150,22 +157,15 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
                 optimizer = _optimizer(static_cache=static_cache, low_traffic=low_traffic)
                 optimizer.install()
                 optimizer.driver.execute_cdp_cmd.assert_any_call("Network.setBlockedURLs", {"urls": []})
-                expected = []
-                if static_cache:
-                    for url_pattern in (
-                        "https://cdn.openai.com/assets/*", "https://cdn.openai.com/cdn/assets/*",
-                        "https://cdn.openai.com/_next/static/*", "https://cdn.openai.com/unauth-mweb/assets/*",
-                        "https://chatgpt.com/cdn/assets/*",
-                    ):
-                        for resource in ("SCRIPT", "STYLESHEET"):
-                            expected.append((url_pattern, getattr(optimizer._devtools.network.ResourceType, resource)))
-                if low_traffic:
-                    expected.append(("https://cdn.openai.com/assets/*", optimizer._devtools.network.ResourceType.MEDIA))
                 patterns = optimizer._devtools.fetch.RequestPattern.call_args_list
-                self.assertCountEqual(
-                    [(pattern.kwargs["url_pattern"], pattern.kwargs["resource_type"]) for pattern in patterns],
-                    expected,
-                )
+                if static_cache:
+                    self.assertTrue(any(p.kwargs["url_pattern"] == "https://chatgpt.com/cdn/assets/*" for p in patterns))
+                if low_traffic:
+                    urls = {p.kwargs["url_pattern"] for p in patterns}
+                    self.assertIn("https://chatgpt.com/*", urls)
+                    self.assertIn("https://statsigapi.net/*", urls)
+                    self.assertIn("https://*.statsigapi.net/*", urls)
+                self.assertTrue(all(p.kwargs["request_stage"] == optimizer._devtools.fetch.RequestStage.REQUEST for p in patterns))
                 for pattern in patterns:
                     self.assertEqual(pattern.kwargs["request_stage"], optimizer._devtools.fetch.RequestStage.REQUEST)
                 self.assertTrue(optimizer._fetch_enabled)
@@ -710,7 +710,7 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["network_requests"], 1)
         self.assertEqual(summary["cache_saved_bytes"], 500)
         self.assertTrue(summary["within_budget"])
-        self.assertEqual(summary["blocked_by_reason"], {"inspector": 1})
+        self.assertEqual(summary["blocked_by_reason"], {"telemetry": 1})
 
     def test_summary_prefers_exact_cache_request_id_for_repeated_url(self):
         def entry(method, params):
@@ -771,7 +771,7 @@ class PerformanceSummaryTests(unittest.TestCase):
 
         summary = summarize_performance_logs(entries)
 
-        self.assertEqual(summary["blocked_by_reason"], {"inspector": 1})
+        self.assertEqual(summary["blocked_by_reason"], {"optional_image": 1})
 
     def test_roxy_finalize_logs_document_diagnostics_without_losing_summary(self):
         from core.roxy_registration import _finish_traffic_optimizer

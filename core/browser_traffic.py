@@ -21,6 +21,25 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_CDN_HOST = "cdn.openai.com"
 OPTIONAL_MEDIA_EXTENSIONS = (".mp3", ".mp4", ".ogg", ".webm")
+# The registration flow does not use these optional browser services.  Keep
+# challenge/authentication hosts outside this list; block_reason() performs the
+# security-path allow check before applying the low-traffic policy.
+TELEMETRY_SUFFIXES = (
+    "browser-intake-datadoghq.com", "statsigapi.net", "featuregates.org",
+    "segment.io", "segment.com", "sentry.io",
+)
+OPTIONAL_IDENTITY_SUFFIXES = (
+    "accounts.google.com", "appleid.apple.com", "login.microsoftonline.com",
+)
+LOW_TRAFFIC_FIRST_PARTY_HOSTS = {
+    "chatgpt.com", "auth.openai.com", "cdn.openai.com", "auth-cdn.oaistatic.com",
+    "oaistatic.com",
+}
+LOW_TRAFFIC_RESOURCE_TYPES = {"image", "media", "font", "manifest"}
+SECURITY_SUFFIXES = (
+    "arkoselabs.com", "challenges.cloudflare.com", "hcaptcha.com",
+    "recaptcha.net", "sentinel.openai.com",
+)
 # Only body/representation headers are replayable, never origin/profile state,
 # tracing identifiers, CSP nonces, or client-hint negotiation.
 REPLAY_ALLOWED_HEADERS = {
@@ -89,23 +108,44 @@ def _header_values(headers) -> dict[str, str]:
 
 
 def block_reason(url: str, resource_type: str = "", *, session_only: bool = False) -> str:
-    """Block only optional CDN media, never configuration/authentication traffic."""
+    """Block optional registration resources while allowing security/auth flows."""
     try:
         parsed = urlparse(str(url or ""))
-        if (parsed.scheme != "https" or parsed.hostname != PUBLIC_CDN_HOST
+        host = str(parsed.hostname or "").lower()
+        if (parsed.scheme != "https" or not host
                 or parsed.port not in (None, 443) or parsed.username is not None
-                or parsed.password is not None or parsed.query or parsed.fragment):
+                or parsed.password is not None):
             return ""
     except ValueError:
         return ""
     path = parsed.path
-    if _resource_name(resource_type) != "media" or not path.startswith("/assets/"):
+    resource = _resource_name(resource_type)
+    host_matches = lambda suffix: host == suffix or host.endswith("." + suffix)
+    lower_path = path.lower()
+    if any(host_matches(suffix) for suffix in SECURITY_SUFFIXES):
         return ""
-    if ("%" in path or "\\" in path or "?" in str(url) or "#" in str(url)
-            or any(segment in {".", "..", "sentinel", "recaptcha", "hcaptcha", "captcha", "challenge"} for segment in path.lower().split("/"))
-            or "/cdn-cgi/challenge-platform/" in path.lower()):
+    if ("/cdn-cgi/challenge-platform/" in lower_path or "/sentinel/" in lower_path
+            or any(segment in {".", "..", "recaptcha", "hcaptcha", "captcha", "challenge"}
+                   for segment in lower_path.split("/"))):
         return ""
-    return "optional_media" if path.endswith(OPTIONAL_MEDIA_EXTENSIONS) else ""
+    if any(host_matches(suffix) for suffix in TELEMETRY_SUFFIXES):
+        return "telemetry"
+    if any(host_matches(suffix) for suffix in OPTIONAL_IDENTITY_SUFFIXES):
+        return "optional_identity"
+    if host in LOW_TRAFFIC_FIRST_PARTY_HOSTS and resource in LOW_TRAFFIC_RESOURCE_TYPES:
+        if (parsed.query or parsed.fragment or "?" in str(url) or "#" in str(url)
+                or "%" in path or "\\" in path
+                or any(segment in {".", ".."} for segment in path.split("/"))):
+            return ""
+        if resource == "media" and host == PUBLIC_CDN_HOST and not lower_path.startswith("/assets/"):
+            return ""
+        if resource == "media" and not lower_path.endswith(OPTIONAL_MEDIA_EXTENSIONS):
+            return "optional_media"
+        return "optional_" + resource
+    if (host == PUBLIC_CDN_HOST and resource == "media" and path.startswith("/assets/")
+            and path.endswith(OPTIONAL_MEDIA_EXTENSIONS)):
+        return "optional_media"
+    return ""
 
 
 def is_cacheable_request(url: str, method: str, resource_type: str, headers=None) -> bool:
@@ -567,10 +607,36 @@ class RoxyTrafficOptimizer:
                                 request_stage=devtools.fetch.RequestStage.REQUEST,
                             ))
             if self.low_traffic:
-                patterns.append(devtools.fetch.RequestPattern(
-                    url_pattern="https://cdn.openai.com/assets/*", resource_type=devtools.network.ResourceType.MEDIA,
-                    request_stage=devtools.fetch.RequestStage.REQUEST,
-                ))
+                # Pause optional first-party resources and known telemetry /
+                # social-login hosts.  The handler keeps challenge and auth
+                # paths live, so the broad patterns do not become a second
+                # security or session classifier.
+                resource_types = (
+                    devtools.network.ResourceType.IMAGE,
+                    devtools.network.ResourceType.MEDIA,
+                    devtools.network.ResourceType.FONT,
+                    devtools.network.ResourceType.MANIFEST,
+                )
+                for host in LOW_TRAFFIC_FIRST_PARTY_HOSTS:
+                    for resource in resource_types:
+                        patterns.append(devtools.fetch.RequestPattern(
+                            url_pattern=f"https://{host}/*", resource_type=resource,
+                            request_stage=devtools.fetch.RequestStage.REQUEST,
+                        ))
+                for suffix in TELEMETRY_SUFFIXES + OPTIONAL_IDENTITY_SUFFIXES:
+                    for resource in resource_types + (
+                        devtools.network.ResourceType.XHR,
+                        devtools.network.ResourceType.FETCH,
+                        devtools.network.ResourceType.SCRIPT,
+                        devtools.network.ResourceType.STYLESHEET,
+                        devtools.network.ResourceType.DOCUMENT,
+                        devtools.network.ResourceType.OTHER,
+                    ):
+                        for host_pattern in (f"https://{suffix}/*", f"https://*.{suffix}/*"):
+                            patterns.append(devtools.fetch.RequestPattern(
+                                url_pattern=host_pattern, resource_type=resource,
+                                request_stage=devtools.fetch.RequestStage.REQUEST,
+                            ))
             self._devtools = devtools
             self._connection = connection
             connection.add_callback(devtools.fetch.RequestPaused, self._on_request_paused)
