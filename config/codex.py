@@ -116,6 +116,8 @@ SMS_PROVIDER: str = "herosms"
 # SMSBower API 地址和密钥（选择 SMS_PROVIDER=smsbower 时生效）
 SMSBOWER_API_BASE: str = "https://smsbower.page/stubs/handler_api.php"
 SMSBOWER_API_KEY: str = env_str("SMSBOWER_API_KEY", "")
+# 固定国家内的供应商 ID；空值由平台在金额上限内分配。
+SMSBOWER_PROVIDER_ID: str = ""
 
 # HeroSMS API 密钥
 # 留空时 Codex 授权的手机验证步会失败；如不需要 Codex 自动授权，把 ENABLE_CODEX_AUTO=False。
@@ -151,4 +153,4 @@ SMS_REQUEST_TIMEOUT: int = 30
 
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_LOCAL_PROXY': 'str', 'CODEX_EMAIL_OTP_WAIT': 'int', 'CODEX_HEADLESS': 'bool', 'CODEX_DESKTOP_AUTH_WRAPPER': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_API_BASE': 'str', 'SMSBOWER_API_BASE': 'str', 'SMS_COUNTRY': 'str', 'SMS_EXCLUDED_COUNTRIES': 'str', 'SMS_PRIORITY_COUNTRIES': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_API_KEY': 'str', 'SMSBOWER_API_KEY': 'str'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_LOCAL_PROXY': 'str', 'CODEX_EMAIL_OTP_WAIT': 'int', 'CODEX_HEADLESS': 'bool', 'CODEX_DESKTOP_AUTH_WRAPPER': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_API_BASE': 'str', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_PROVIDER_ID': 'str', 'SMS_COUNTRY': 'str', 'SMS_EXCLUDED_COUNTRIES': 'str', 'SMS_PRIORITY_COUNTRIES': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_API_KEY': 'str', 'SMSBOWER_API_KEY': 'str'})

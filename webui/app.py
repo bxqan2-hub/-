@@ -4901,7 +4901,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/sms/prices")
     def api_sms_prices():
-        """按 OpenAI 服务代码读取有库存国家及价格。"""
+        """读取国家卡片及每个国家下的全部价格档位。"""
         from core import sms_provider
         country = request.args.get("country") or None
         service = request.args.get("service") or None
@@ -4909,19 +4909,18 @@ def create_app(auth_code: str | None = None) -> Flask:
         try:
             with sms_provider.provider_context(request.args.get("provider")):
                 try:
-                    offers = sms_provider.list_affordable_countries(service=service, max_price=max_price)
+                    result = sms_provider.list_price_tiers(service=service, country=country, max_price=max_price)
                 except Exception as exc:
                     if sms_provider._provider_name() != "smsbower" or "proxy" not in str(exc).lower() and "connect" not in str(exc).lower():
                         raise
                     direct = sms_provider._http(use_proxy=False)
                     try:
-                        offers = sms_provider.list_affordable_countries(service=service, max_price=max_price, http=direct)
+                        result = sms_provider.list_price_tiers(service=service, country=country, max_price=max_price, http=direct)
                     finally:
                         direct.close()
                 provider = sms_provider.validate_configuration()
-            if country:
-                offers = [item for item in offers if str(item.get("id")) == str(country)]
-            return jsonify({"ok": True, "provider": provider, "service": service or "dr", "offers": offers})
+            return jsonify({"ok": True, "provider": provider, "service": service or "dr",
+                            **result})
         except Exception as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 

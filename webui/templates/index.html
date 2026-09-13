@@ -1513,6 +1513,20 @@
     .sms-center-actions .jobs-tb-btn:hover:not(:disabled) { filter:brightness(.96); transform:translateY(-1px); }
     .sms-center-offer-list { min-height:38px; margin-top:14px; padding:10px 12px; border:1px dashed #dcdfe6; border-radius:8px; background:#fafbfc; color:#909399; font-size:12px; line-height:1.6; }
     .sms-center-offer { display:inline-flex; align-items:center; gap:7px; margin:3px 8px 3px 0; padding:4px 9px; border:1px solid #d9ecff; border-radius:6px; background:#ecf5ff; color:#337ecc; }
+    .sms-tier-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:12px; margin-top:2px; }
+    .sms-country-card { border:1px solid #b7e4d1; border-radius:12px; overflow:hidden; background:linear-gradient(145deg,#ecfff6,#f7fbff); box-shadow:0 3px 10px rgba(31,42,68,.06); }
+    .sms-country-head { display:flex; align-items:center; gap:10px; padding:12px 14px; color:#fff; background:linear-gradient(135deg,#269c68,#2878c8); }
+    .sms-country-flag { width:32px; height:32px; display:grid; place-items:center; border-radius:50%; background:rgba(255,255,255,.2); font-size:20px; }
+    .sms-country-title { flex:1; min-width:0; } .sms-country-title strong { display:block; font-size:15px; } .sms-country-title small { opacity:.85; font-size:11px; }
+    .sms-country-select { border:0; border-radius:6px; padding:6px 9px; color:#17613f; background:#e9fff4; cursor:pointer; font-weight:600; }
+    .sms-tier-table { width:100%; border-collapse:collapse; font-size:12px; color:#435466; }
+    .sms-tier-table th { padding:8px 10px; text-align:left; color:#6b8496; background:rgba(255,255,255,.65); font-weight:600; }
+    .sms-tier-table td { padding:8px 10px; border-top:1px solid rgba(121,185,157,.25); }
+    .sms-tier-badge { display:inline-block; min-width:58px; padding:3px 7px; border-radius:999px; text-align:center; color:#fff; background:linear-gradient(#d89055,#a74d2d); font-size:11px; }
+    .sms-tier-over { opacity:.55; } .sms-tier-select { border:1px solid #409eff; border-radius:6px; padding:4px 8px; color:#2563eb; background:#eff6ff; cursor:pointer; }
+    .sms-tier-badge:nth-child(even) { background:linear-gradient(#aab5c0,#75818d); }
+    .sms-tier-price { display:inline-block; min-width:64px; padding:6px 8px; border-radius:7px; text-align:center; color:#fff; background:#ff9517; font-weight:700; }
+    .sms-tier-stock.low { color:#d97706; } .sms-tier-empty { padding:18px; text-align:center; color:#8b98a7; }
     .sms-center-accounts-panel { padding:0; background:#fff; }
     .sms-center-list-head { padding:18px 20px; border-bottom:1px solid #ebeef5; }
     .sms-center-group-picker { display:flex; align-items:center; gap:8px; color:#606266; font-size:13px; white-space:nowrap; }
@@ -2942,8 +2956,10 @@
       <div class="sms-center-panel-head"><div><h2>接码任务设置</h2><p>先查询国家价格和库存，再选择国家并应用设置。自动模式会按价格优先尝试有库存国家。</p></div><span class="sms-center-status" id="smsCenterStatusV2">等待查询</span></div>
       <div class="sms-center-fields">
         <label class="sms-center-field"><span>接码平台</span><select id="smsCenterProviderV2"><option value="herosms">HeroSMS（现有平台）</option><option value="smsbower">SMSBower（第二平台）</option></select><small>两个平台使用各自的 API 地址和 Key。</small></label>
-        <label class="sms-center-field"><span>国家选择</span><select id="smsCenterCountryV2"><option value="auto">自动选择（按价格和库存）</option></select><small>查询后会加载国家名称、国家 ID、价格和库存。</small></label>
-        <label class="sms-center-field"><span>服务项目</span><select id="smsCenterServiceV2"><option value="dr">OpenAI（dr）</option></select><small>传给平台的 service 参数，当前默认 OpenAI。</small></label>
+        <label class="sms-center-field"><span>国家选择模式</span><select id="smsCenterCountryModeV2"><option value="auto">自动选择（按价格和库存）</option><option value="manual">手动选择国家</option></select><small>自动按预算轮询；手动模式使用下方国家 ID。</small></label>
+        <label class="sms-center-field"><span>国家</span><select id="smsCenterCountryV2" disabled><option value="auto">自动分配</option></select><small>选择国家卡片中的“选择国家”即可写入。</small></label>
+        <label class="sms-center-field"><span>服务项目</span><select id="smsCenterServiceV2"><option value="dr">OpenAI（dr）</option></select><small>平台 service 固定为 OpenAI 的 dr。</small></label>
+        <label class="sms-center-field"><span>供应商档位</span><select id="smsCenterSupplierV2"><option value="">自动分配供应商</option></select><small>SMSBower 的供应商 ID；价格和库存来自同一档位。</small></label>
         <label class="sms-center-field"><span>最高单价</span><input id="smsCenterMaxPriceV2" value="0.15" inputmode="decimal"><small>平台币种单个号码最高价格，例如 0.15。</small></label>
         <label class="sms-center-field"><span>单号等待时间</span><input id="smsCenterWaitV2" type="number" value="120" min="10"><small>号码分配后最多等待短信多少秒。</small></label>
         <label class="sms-center-field"><span>轮询间隔</span><input id="smsCenterPollV2" type="number" value="5" min="1"><small>每隔多少秒查询一次短信状态。</small></label>
@@ -8524,21 +8540,32 @@ async function loadSmsCenterGroupsV2() {
 }
 async function loadSmsCenterOffersV2() {
   const provider = $('#smsCenterProviderV2')?.value || 'herosms';
-  const country = $('#smsCenterCountryV2');
-  const status = $('#smsCenterStatusV2');
+  const country = $('#smsCenterCountryV2'); const mode = $('#smsCenterCountryModeV2');
+  const supplier = $('#smsCenterSupplierV2'); const status = $('#smsCenterStatusV2');
   try {
+    const previousCountry = country?.value || 'auto';
     const countries = await api(`/api/sms/countries?provider=${encodeURIComponent(provider)}`);
-    country.innerHTML = '<option value="auto">自动选择（按价格和库存）</option>' + (countries.countries || []).map(c => `<option value="${esc(c.id)}">手动：${esc(c.name)}（ID ${esc(c.id)}）</option>`).join('');
-    const price = $('#smsCenterMaxPriceV2')?.value || '0.15';
-    const service = $('#smsCenterServiceV2')?.value || 'dr';
-    const prices = await api(`/api/sms/prices?provider=${encodeURIComponent(provider)}&service=${encodeURIComponent(service)}&max_price=${encodeURIComponent(price)}`);
-    const offerList = $('#smsCenterOfferListV2');
-    if (offerList) offerList.innerHTML = (prices.offers || []).map(o => `<span class="sms-center-offer"><b>${esc(o.name)}</b><span>ID ${esc(o.id)}</span><span>价格 ${esc(o.price)}</span><span>库存 ${esc(o.count)}</span></span>`).join('') || '<span>当前价格上限内无库存，请提高最高单价或切换平台。</span>';
-    status.textContent = `已加载 ${(countries.countries || []).length} 个国家，返回 ${(prices.offers || []).length} 个有库存报价`;
+    country.innerHTML = '<option value="auto">自动分配（按价格和库存）</option>' + (countries.countries || []).map(c => `<option value="${esc(c.id)}">手动：${esc(c.name)}（ID ${esc(c.id)}）</option>`).join('');
+    if (previousCountry !== 'auto' && Array.from(country.options).some(o => o.value === previousCountry)) country.value = previousCountry;
+    if (mode) { mode.value = previousCountry === 'auto' ? 'auto' : 'manual'; country.disabled = mode.value !== 'manual'; }
+    const price = $('#smsCenterMaxPriceV2')?.value || '0.15'; const service = $('#smsCenterServiceV2')?.value || 'dr';
+    const selected = country?.value && country.value !== 'auto' ? `&country=${encodeURIComponent(country.value)}` : '';
+    const prices = await api(`/api/sms/prices?provider=${encodeURIComponent(provider)}&service=${encodeURIComponent(service)}&max_price=${encodeURIComponent(price)}${selected}`);
+    const cards = Array.isArray(prices.countries) ? prices.countries : []; const offerList = $('#smsCenterOfferListV2');
+    const flag = (iso, name) => { const code=String(iso||'').toUpperCase(); if(code.length===2) return String.fromCodePoint(...[...code].map(c=>127397+c.charCodeAt())); const n=String(name||'').toLowerCase(); return n.includes('united states')||n.includes('美国')?'🇺🇸':n.includes('south africa')||n.includes('南非')?'🇿🇦':n.includes('united kingdom')||n.includes('英国')?'🇬🇧':'🌐'; };
+    if (supplier) supplier.innerHTML = '<option value="">自动分配供应商</option>';
+    if (offerList) offerList.innerHTML = cards.length ? `<div class="sms-tier-grid">${cards.map(c => `<article class="sms-country-card"><div class="sms-country-head"><span class="sms-country-flag">${flag(c.iso, c.eng || c.name)}</span><div class="sms-country-title"><strong>${esc(c.name || `国家 ${c.id}`)}</strong><small>国家 ID ${esc(c.id)} · ${c.tiers.length} 个供应商档位</small></div><button type="button" class="sms-country-select" data-sms-country="${esc(c.id)}">选择国家</button></div><table class="sms-tier-table"><thead><tr><th>供应商级别</th><th>供应商 ID</th><th>库存</th><th>成本</th><th>操作</th></tr></thead><tbody>${c.tiers.map(t => `<tr class="${t.within_budget ? '' : 'sms-tier-over'}"><td><span class="sms-tier-badge">${esc(t.rank || '供应商')}</span></td><td>${esc(t.provider_id || '-')}</td><td class="sms-tier-stock ${Number(t.count)<10?'low':''}">${Number(t.count)<10?'少量':`${esc(t.count)} 件`}</td><td><span class="sms-tier-price">${Number(t.price).toFixed(3)} $</span>${t.within_budget?'':'<small> 超预算</small>'}</td><td><button type="button" class="sms-tier-select" data-sms-country="${esc(c.id)}" data-sms-provider="${esc(t.provider_id||'')}" data-sms-price="${esc(t.price)}">选此档</button></td></tr>`).join('')}</tbody></table></article>`).join('')}</div>` : '<div class="sms-tier-empty">没有可展示的报价；请检查 API Key 或提高最高单价。</div>';
+    offerList?.querySelectorAll('[data-sms-country]').forEach(btn => btn.addEventListener('click', () => {
+      const id=btn.dataset.smsCountry||'auto'; if(country){ country.value=id; if(mode){mode.value='manual';country.disabled=false;} }
+      if (btn.dataset.smsProvider && supplier) { const id=btn.dataset.smsProvider; if(!Array.from(supplier.options).some(o=>o.value===id)) supplier.add(new Option(`供应商 ${id}`, id)); supplier.value=id; }
+      if (btn.dataset.smsPrice) $('#smsCenterMaxPriceV2').value=btn.dataset.smsPrice;
+      showToast(`已选择国家 ${id}${btn.dataset.smsProvider ? ` / 供应商 ${btn.dataset.smsProvider}` : ''}`);
+    }));
+    const tierCount=cards.reduce((n,c)=>n+(c.tiers||[]).length,0); status.textContent=`已加载 ${(countries.countries||[]).length} 个国家；${cards.length} 个国家有库存，共 ${tierCount} 个供应商档位${prices.rank_notice?'；'+prices.rank_notice:''}`;
   } catch (err) { status.textContent = `查询失败：${err.message}`; }
 }
 async function applySmsCenterSettingsV2() {
-  const updates = {SMS_PROVIDER: $('#smsCenterProviderV2')?.value || 'herosms', SMS_COUNTRY: $('#smsCenterCountryV2')?.value || 'auto', SMS_SERVICE: $('#smsCenterServiceV2')?.value || 'dr', SMS_MAX_PRICE: $('#smsCenterMaxPriceV2')?.value || '0.15', SMS_CODE_WAIT: Number($('#smsCenterWaitV2')?.value || 120), SMS_POLL_INTERVAL: Number($('#smsCenterPollV2')?.value || 5)};
+  const updates = {SMS_PROVIDER: $('#smsCenterProviderV2')?.value || 'herosms', SMS_COUNTRY: ($('#smsCenterCountryModeV2')?.value === 'manual' ? ($('#smsCenterCountryV2')?.value || 'auto') : 'auto'), SMS_SERVICE: $('#smsCenterServiceV2')?.value || 'dr', SMS_MAX_PRICE: $('#smsCenterMaxPriceV2')?.value || '0.15', SMS_CODE_WAIT: Number($('#smsCenterWaitV2')?.value || 120), SMS_POLL_INTERVAL: Number($('#smsCenterPollV2')?.value || 5), SMSBOWER_PROVIDER_ID: $('#smsCenterSupplierV2')?.value || ''};
   await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({updates})});
   showToast(`已应用 ${updates.SMS_PROVIDER} / ${updates.SMS_COUNTRY}`);
 }
@@ -8561,6 +8588,8 @@ async function startSmsCenterV2() {
   if (group) group.addEventListener('change', loadSmsCenterAccountsV2);
   document.getElementById('smsCenterProviderV2')?.addEventListener('change', loadSmsCenterOffersV2);
   document.getElementById('smsCenterServiceV2')?.addEventListener('change', loadSmsCenterOffersV2);
+  document.getElementById('smsCenterCountryV2')?.addEventListener('change', loadSmsCenterOffersV2);
+  document.getElementById('smsCenterCountryModeV2')?.addEventListener('change', e => { const c=document.getElementById('smsCenterCountryV2'); if(c){ c.disabled=e.target.value!=='manual'; if(e.target.value==='auto') c.value='auto'; } });
   document.getElementById('smsCenterSelectAllV2')?.addEventListener('change', e => document.querySelectorAll('.sms-center-account-v2').forEach(x => { x.checked = e.target.checked; }));
   loadSmsCenterGroupsV2().catch(() => {});
   loadSmsCenterDefaultsV2().catch(() => loadSmsCenterOffersV2().catch(() => {}));
@@ -8576,6 +8605,7 @@ async function loadSmsCenterDefaultsV2() {
   if ($('#smsCenterMaxPriceV2') && value('SMS_MAX_PRICE') !== undefined) $('#smsCenterMaxPriceV2').value = value('SMS_MAX_PRICE');
   if ($('#smsCenterWaitV2') && value('SMS_CODE_WAIT') !== undefined) $('#smsCenterWaitV2').value = value('SMS_CODE_WAIT');
   if ($('#smsCenterPollV2') && value('SMS_POLL_INTERVAL') !== undefined) $('#smsCenterPollV2').value = value('SMS_POLL_INTERVAL');
+  if ($('#smsCenterSupplierV2') && value('SMSBOWER_PROVIDER_ID') !== undefined) $('#smsCenterSupplierV2').value = value('SMSBOWER_PROVIDER_ID');
   await loadSmsCenterOffersV2();
   const countryEl = $('#smsCenterCountryV2');
   const country = String(value('SMS_COUNTRY') || 'auto');

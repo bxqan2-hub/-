@@ -241,6 +241,8 @@ def acquire_number(
             if max_price is None
             else str(max_price or "").strip()
         )
+        if _provider_name() == "smsbower" and getattr(_cfg, "SMSBOWER_PROVIDER_ID", "") and country_strategy.lower() == "auto":
+            raise SmsProviderConfigurationError("指定 SMSBower 供应商时请选择固定国家")
         offers = []
         if country_strategy.lower() == "auto":
             offers = list_affordable_countries(
@@ -277,6 +279,11 @@ def acquire_number(
             }
             if price_limit:
                 params["maxPrice"] = price_limit
+            supplier_id = str(getattr(_cfg, "SMSBOWER_PROVIDER_ID", "") or "").strip() if _provider_name() == "smsbower" else ""
+            if supplier_id:
+                if not supplier_id.isdigit() or country_strategy == "auto":
+                    raise SmsProviderConfigurationError("指定 SMSBower 供应商时请选择固定国家和数字供应商 ID")
+                params["providerIds"] = supplier_id
             try:
                 text = _request(http, params)
                 break
@@ -325,6 +332,7 @@ def get_countries(http: CurlSession | None = None) -> list[dict]:
             countries.append({
                 "id": country_id,
                 "name": name,
+                "eng": str(item.get("eng") or "").strip(),
                 "iso": str(item.get("iso") or item.get("iso2") or "").strip().upper(),
             })
         return countries
@@ -410,6 +418,95 @@ def list_affordable_countries(
             })
         results.sort(key=lambda item: (item["price"], item["name"], item["id"]))
         return results
+    finally:
+        if own_http:
+            http.close()
+
+
+def list_price_tiers(
+    service: str | None = None,
+    country: str | None = None,
+    max_price: str | float | None = None,
+    http: CurlSession | None = None,
+) -> dict:
+    """展示全部单服务报价；预算只标注档位，不隐藏更高价格。
+
+    SMSBower V3 返回国家 → 服务 → 供应商 → price/count/provider_id。
+    标准 getPrices 是服务汇总，getTopCountriesByService 只含推荐子集。
+    两者都不替代完整 V3 档位。V3 未公布金/银/铜等级，rank 留空。
+    """
+    provider = validate_configuration()
+    service_code = str(service or _cfg.SMS_SERVICE).strip()
+    country_filter = str(country or "").strip()
+    if country_filter and not country_filter.isdigit():
+        raise SmsProviderConfigurationError("请选择数字国家 ID")
+    price_limit = str(max_price if max_price is not None else getattr(_cfg, "SMS_MAX_PRICE", "") or "").strip()
+    try:
+        limit = Decimal(price_limit) if price_limit else None
+    except InvalidOperation as exc:
+        raise SmsProviderConfigurationError("金额上限必须是有效数字") from exc
+    if limit is not None and (not limit.is_finite() or limit <= 0):
+        raise SmsProviderConfigurationError("金额上限必须是大于 0 的有限数字")
+    own_http = http is None
+    http = http or _http()
+    try:
+        grouped = []
+        if provider == "smsbower":
+            params = {"action": "getPricesV3", "service": service_code}
+            if country_filter:
+                params["country"] = country_filter
+            raw = _request_json(http, params)
+            if not isinstance(raw, dict):
+                raise SmsProviderError("SMSBower getPricesV3 响应不是对象")
+            names = {item["id"]: item for item in get_countries(http=http)}
+            for country_id, services in raw.items():
+                country_id = str(country_id)
+                if country_filter and country_id != country_filter:
+                    continue
+                if not country_id.isdigit() or not isinstance(services, dict):
+                    continue
+                providers = services.get(service_code, {})
+                if not isinstance(providers, dict):
+                    continue
+                tiers = []
+                for key, item in providers.items():
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        price = Decimal(str(item.get("price", "")))
+                        count = int(item.get("count", 0))
+                    except (InvalidOperation, ValueError, TypeError, OverflowError):
+                        continue
+                    supplier_id = str(item.get("provider_id") or key)
+                    if not price.is_finite() or price < 0 or count <= 0 or not supplier_id.isdigit():
+                        continue
+                    tiers.append({"provider_id": supplier_id, "price": float(price), "count": count,
+                                  "rank": None, "within_budget": limit is None or price <= limit})
+                if tiers:
+                    meta = names.get(country_id, {})
+                    grouped.append({"id": country_id, "name": meta.get("name") or f"国家 {country_id}",
+                                    "iso": meta.get("iso") or "", "eng": meta.get("eng") or "", "tiers": tiers})
+        else:
+            # HeroSMS 保持原 endpoint 和服务汇总口径，不冒充供应商档位。
+            for item in list_affordable_countries(service=service_code, max_price="", http=http):
+                if country_filter and item["id"] != country_filter:
+                    continue
+                grouped.append({"id": item["id"], "name": item["name"], "iso": item["iso"], "tiers": [{
+                    "provider_id": "", "price": item["price"], "count": item["count"], "rank": None,
+                    "within_budget": limit is None or Decimal(str(item["price"])) <= limit,
+                }]})
+        offers = []
+        for item in grouped:
+            item["tiers"].sort(key=lambda tier: (tier["price"], tier["provider_id"]))
+            affordable = [tier for tier in item["tiers"] if tier["within_budget"]]
+            if affordable:
+                offers.append({"id": item["id"], "name": item["name"], "iso": item["iso"],
+                               "price": affordable[0]["price"], "count": sum(tier["count"] for tier in affordable),
+                               "service": service_code})
+        grouped.sort(key=lambda item: (item["tiers"][0]["price"], item["id"]))
+        offers.sort(key=lambda item: (item["price"], item["id"]))
+        return {"countries": grouped, "offers": offers, "currency": "USD" if provider == "smsbower" else "",
+                "rank_notice": "供应商等级（黄金/银器/铜器）未由此 API 返回" if provider == "smsbower" else "HeroSMS 当前接口提供服务汇总报价"}
     finally:
         if own_http:
             http.close()

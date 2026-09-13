@@ -77,6 +77,35 @@ class SmsProviderConfigurationTests(unittest.TestCase):
         self.assertEqual(args["params"]["api_key"], "bower-secret")
         self.assertEqual(http.get.call_args.args[0], "https://smsbower.page/stubs/handler_api.php")
 
+    def test_smsbower_price_tiers_keep_all_service_levels(self):
+        http = unittest.mock.MagicMock()
+
+        def response(*args, **kwargs):
+            action = kwargs["params"].get("action")
+            payloads = {
+                "getCountries": '{"187":{"id":"187","chn":"美国","iso":"US"}}',
+                "getPricesV3": '{"187":{"dr":{"3370":{"price":0.064,"count":120},"3170":{"price":0.15,"count":5}}}}',
+            }
+            return unittest.mock.Mock(status_code=200, text=payloads[action])
+
+        http.get.side_effect = response
+        with (
+            patch.object(sms_provider._cfg, "SMS_PROVIDER", "smsbower"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_BASE", "https://smsbower.page/stubs/handler_api.php"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_KEY", "bower-secret"),
+            patch.object(sms_provider._cfg, "SMS_SERVICE", "dr"),
+            patch.object(sms_provider._cfg, "SMS_COUNTRY", "auto"),
+            patch.object(sms_provider._cfg, "SMS_MAX_PRICE", "0.2"),
+        ):
+            result = sms_provider.list_price_tiers(max_price="0.2", http=http)
+
+        self.assertEqual(result["countries"][0]["id"], "187")
+        self.assertEqual([tier["provider_id"] for tier in result["countries"][0]["tiers"]], ["3370", "3170"])
+        self.assertEqual(result["countries"][0]["tiers"][0]["count"], 120)
+        prices_calls = [call.kwargs["params"] for call in http.get.call_args_list if call.kwargs["params"].get("action") == "getPricesV3"]
+        self.assertEqual(len(prices_calls), 1)
+        self.assertEqual(prices_calls[0]["service"], "dr")
+
     def test_auto_country_requires_price_limit(self):
         with (
             patch.object(sms_provider._cfg, "SMS_API_BASE", "https://hero-sms.com/stubs/handler_api.php"),

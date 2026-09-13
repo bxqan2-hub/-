@@ -19,12 +19,17 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         html = self.client.get("/").get_data(as_text=True)
         self.assertIn('id="tab-sms"', html)
         self.assertIn('id="smsCenterProviderV2"', html)
+        self.assertIn('id="smsCenterCountryModeV2"', html)
+        self.assertIn('手动选择国家', html)
+        self.assertIn('id="smsCenterSupplierV2"', html)
         self.assertIn('自动选择（按价格和库存）', html)
         self.assertIn('手动：${esc(c.name)}（ID ${esc(c.id)}）', html)
         self.assertIn('id="smsCenterSelectAllV2"', html)
         self.assertIn('id="btnSmsCenterStartV2"', html)
         self.assertIn('单号等待时间', html)
         self.assertIn('轮询间隔', html)
+        self.assertIn('sms-tier-table', html)
+        self.assertIn('选此档', html)
 
     def test_account_list_exposes_safe_registration_traffic_totals(self):
         legacy = _compact_account_for_list({

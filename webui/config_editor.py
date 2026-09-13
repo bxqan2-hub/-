@@ -971,6 +971,10 @@ EDITABLE_FIELDS = [
         "label": "SMSBower API 地址", "help": "默认 https://smsbower.page/stubs/handler_api.php",
     },
     {
+        "key": "SMSBOWER_PROVIDER_ID", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 供应商 ID", "help": "接码中心选择档位后填写；仅固定国家下生效，空值为自动分配",
+    },
+    {
         "key": "SMSBOWER_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSBower API Key", "help": "SMSBower 平台 API Key，保存在 .env（SMSBOWER_API_KEY）",
         "storage": "env", "secret": True,
