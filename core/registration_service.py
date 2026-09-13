@@ -670,7 +670,34 @@ def _account_for_job(job: dict) -> dict | None:
         except (TypeError, ValueError):
             pass
     email = str(job.get("email") or "").strip()
-    return db.get_account_by_email(email) if email else None
+    if not email:
+        return None
+
+    # A failed registration job may have no account_id.  Do not associate it
+    # with a later registration that reused the same mailbox: that made an old
+    # failed job display the newer account's completed security state.  The
+    # timestamp check keeps the legacy email fallback only for accounts that
+    # already existed when this job reached its terminal state.
+    account = db.get_account_by_email(email)
+    if not account:
+        return None
+    account_created = str(account.get("created_at") or "").strip()
+    job_terminal = str(job.get("completed_at") or job.get("started_at") or "").strip()
+    if account_created and job_terminal:
+        try:
+            created_at = datetime.fromisoformat(account_created.replace("Z", "+00:00"))
+            terminal_at = datetime.fromisoformat(job_terminal.replace("Z", "+00:00"))
+            if created_at.tzinfo is None and terminal_at.tzinfo is not None:
+                terminal_at = terminal_at.replace(tzinfo=None)
+            elif created_at.tzinfo is not None and terminal_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=None)
+            if created_at > terminal_at:
+                return None
+        except ValueError:
+            # Preserve the historical fallback when either persisted
+            # timestamp is malformed; this path is only a compatibility aid.
+            pass
+    return account
 
 
 def get_retry_info(job: dict) -> dict:

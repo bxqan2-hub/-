@@ -203,6 +203,38 @@ class RegistrationSecurityRetryTests(unittest.TestCase):
                 self.assertEqual(info["retry_action"], "codex")
                 self.assertEqual(info["display_status"], "partial_success")
 
+    def test_email_fallback_does_not_match_account_created_by_later_registration(self):
+        # A failed job without account_id can share its mailbox with a later
+        # successful registration.  The later account must not rewrite the
+        # old job as "security complete".
+        later_account = {
+            **self.account,
+            "id": 701,
+            "email": "retry@example.com",
+            "created_at": "2026-09-13T19:11:13",
+            "totp_secret": "Confirmed-secret",
+            "extra_json": json.dumps({
+                "registration_password": "Confirmed-password",
+                "twofa": {"status": "success"},
+                "codex": {"status": "skipped", "ok": True},
+            }),
+        }
+        failed_job = {
+            "id": 240,
+            "status": "failed",
+            "account_id": None,
+            "email": "retry@example.com",
+            "started_at": "2026-09-13T19:03:09",
+            "completed_at": "2026-09-13T19:08:36",
+        }
+        with patch.object(registration_service.db, "get_account", return_value=None), \
+             patch.object(registration_service.db, "get_account_by_email", return_value=later_account), \
+             patch.object(registration_service.db, "get_successful_retry_for_job", return_value=None):
+            info = registration_service.get_retry_info(failed_job)
+        self.assertEqual(info["display_status"], "failed")
+        self.assertEqual(info["retry_action"], "registration")
+        self.assertNotIn("密码/2FA 已完成", info.get("retry_reason") or "")
+
     def test_active_security_setup_prevents_duplicate_submission(self):
         for status in ("queued", "running"):
             with self.subTest(status=status):
