@@ -7,7 +7,11 @@ if exist "%ProgramFiles%\nodejs" set "PATH=%ProgramFiles%\nodejs;%PATH%"
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set "PORT=%~1"
-if not defined PORT set "PORT=5002"
+set "DEFAULT_PORT_REQUESTED=0"
+if not defined PORT (
+  set "PORT=5002"
+  set "DEFAULT_PORT_REQUESTED=1"
+)
 
 if not exist .venv\Scripts\python.exe (
   echo [ERR] .venv not found. Run install-integrations.bat first.
@@ -29,7 +33,17 @@ if not exist logs mkdir logs
 if not exist run mkdir run
 rem The shared stop path replaces this project and the requested port without prompting.
 call "%~dp0stop-webui.bat" "%PORT%"
+if not errorlevel 1 goto start_instance
+rem Windows can retain an orphaned listener whose owning PID no longer exists.
+rem Keep the no-argument launcher usable by moving the default instance to 5001.
+if not "%DEFAULT_PORT_REQUESTED%"=="1" exit /b 1
+if not "%PORT%"=="5002" exit /b 1
+echo [WARN] Port 5002 is stuck; retrying WebUI on port 5001.
+set "PORT=5001"
+call "%~dp0stop-webui.bat" "%PORT%"
 if errorlevel 1 exit /b 1
+
+:start_instance
 
 echo Starting WebUI on http://127.0.0.1:%PORT% ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $root=(Get-Location).Path; $python=Join-Path $root '.venv\Scripts\python.exe'; $argsLine=[char]34+(Join-Path $root 'web.py')+[char]34+' --host 127.0.0.1 --port '+$env:PORT; $child=Start-Process -FilePath $python -ArgumentList $argsLine -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root ('logs\webui-'+$env:PORT+'.log')) -RedirectStandardError (Join-Path $root ('logs\webui-'+$env:PORT+'.err.log')) -PassThru; Set-Content -LiteralPath (Join-Path $root 'run\webui.pid') -Value $child.Id -Encoding ASCII"

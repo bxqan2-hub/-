@@ -28,7 +28,9 @@ def test_launchers_replace_then_wait_for_http_and_use_one_restart_path():
     start = (ROOT / "start-webui.bat").read_text(encoding="ascii")
     stop = (ROOT / "stop-webui.bat").read_text(encoding="ascii")
     restart = (ROOT / "restart-webui.bat").read_text(encoding="ascii")
-    assert 'if not defined PORT set "PORT=5002"' in start
+    assert 'set "PORT=5002"' in start
+    assert 'set "PORT=5001"' in start
+    assert "Port 5002 is stuck" in start
     assert start.index("tools\\check_integrations.py") < start.index('call "%~dp0stop-webui.bat"')
     assert start.index('call "%~dp0stop-webui.bat"') < start.index("Start-Process")
     assert start.index("r.status==200") < start.index('start "" "http://')
