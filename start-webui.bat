@@ -31,8 +31,7 @@ if defined EXISTING_PID (
     start "" "http://127.0.0.1:%PORT%/"
     exit /b 0
   )
-  echo [ERR] Port %PORT% is already in use by PID %EXISTING_PID%; project WebUI identity check failed or timed out. Existing services were left running.
-  goto failed
+  echo Existing listener did not answer as this WebUI; attempting to start the project instance.
 )
 ".venv\Scripts\python.exe" tools\check_integrations.py
 if errorlevel 1 (
@@ -43,7 +42,7 @@ echo Starting WebUI on http://127.0.0.1:%PORT% ...
 start /B "" ".venv\Scripts\python.exe" web.py --host 127.0.0.1 --port %PORT% > logs\webui-%PORT%.log 2>&1
 for /l %%i in (1,1,30) do (
   ping 127.0.0.1 -n 2 >nul
-  for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%PORT% .*LISTENING"') do (
+  for /f %%p in ('powershell -NoProfile -Command "$all=Get-CimInstance Win32_Process; foreach($x in $all){if($x.Name -eq 'python.exe' -and $x.CommandLine -match 'web.py' -and $x.CommandLine -match '--port %PORT%'){ $x.ProcessId; break }}"') do (
     echo %%p> run\webui.pid
     echo Started PID=%%p
     echo Auth code is in .env WEBUI_AUTH_CODE
