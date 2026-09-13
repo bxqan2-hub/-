@@ -8517,7 +8517,7 @@ function roxyConfigSectionForKey(key) {
   if ([
     'ROXY_OPEN_HEADLESS', 'ROXY_KEEP_BROWSER_OPEN', 'ROXY_ONE_PROFILE_PER_ACCOUNT',
     'ROXY_DELETE_PROFILE_AFTER_RUN', 'ROXY_RANDOM_OS_ON_CREATE', 'ROXY_RANDOM_OS_CHOICES',
-    'ROXY_DEFAULT_OS', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE', 'ROXY_PROFILE_NAME_PREFIX',
+    'ROXY_DEFAULT_OS', 'ROXY_CORE_VERSION', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE', 'ROXY_PROFILE_NAME_PREFIX',
     'ROXY_CREATE_USE_PROXY_POOL', 'ROXY_PROXY_CHECK_CHANNEL', 'ROXY_PROXY_PREFLIGHT_ATTEMPTS',
     'ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS', 'ROXY_BROWSER_EXIT_IP_ATTEMPTS',
   ].includes(key)) {
@@ -9154,7 +9154,14 @@ function renderConfigPlainFieldV2(f) {
     GOPAY_CHECK_PROXY_ACTIVE: 'GOPAY_CHECK_PROXY_PROFILES',
     MOMO_CHECK_PROXY_ACTIVE: 'MOMO_CHECK_PROXY_PROFILES',
   };
-  if (detectionProfileMap[f.key]) {
+  if (f.key === 'ROXY_CORE_VERSION') {
+    const current = String(fv == null ? 'latest' : fv).trim();
+    const latest = current.toLowerCase() === 'latest';
+    control = `<select data-roxy-core-mode aria-label="Chrome 内核版本模式">
+      <option value="latest"${latest ? ' selected' : ''}>最新（Roxy 自动选择）</option>
+      <option value="manual"${latest ? '' : ' selected'}>手动指定版本</option>
+    </select><input type="number" min="10" max="999" step="1" data-key="${attrEsc(f.key)}" value="${attrEsc(latest ? '' : current)}"${latest ? ' hidden disabled' : ''} placeholder="主版本号，例如 147" aria-label="Chrome 主版本号">`;
+  } else if (detectionProfileMap[f.key]) {
     const profiles = detectionProxyProfileOptionsV2(detectionProfileMap[f.key]);
     const current = String(fv == null ? '' : fv);
     control = `<select data-key="${attrEsc(f.key)}">${profiles.length
@@ -10093,6 +10100,7 @@ async function saveRoxyWorkspaceSelection() {
 
 function readConfigElementValue(el, f) {
   if (!f) return undefined;
+  if (f.key === 'ROXY_CORE_VERSION' && el.closest('.fld').querySelector('[data-roxy-core-mode]').value === 'latest') return 'latest';
   if (f.type === 'list_str_multiline') return el.value.split('\n').map(s=>s.trim()).filter(Boolean);
   if (f.type === 'bool') {
     if (el.type === 'checkbox') return !!el.checked;
@@ -10104,7 +10112,12 @@ function readConfigElementValue(el, f) {
 }
 
 function trackConfigFieldChange(e) {
-  const el = e.target.closest('[data-key]');
+  const coreMode = e.target.closest('[data-roxy-core-mode]');
+  const el = coreMode ? coreMode.closest('.fld').querySelector('[data-key]') : e.target.closest('[data-key]');
+  if (coreMode && el) {
+    el.hidden = coreMode.value === 'latest';
+    el.disabled = el.hidden;
+  }
   if (!el || !el.closest('#tab-config')) return;
   const f = CONFIG.find(x => x.key === el.dataset.key);
   if (!f) return;

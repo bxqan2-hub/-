@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -50,8 +50,7 @@ class RoxyOpenResult:
     created_by_run: bool = False
     preflight_exit_geo: dict | None = None
     # Capture this at open time so a later WebUI config reload cannot change
-    # whether the live Profile is expected to remain open (and whether its
-    # IP reservation may be released).
+    # whether the live Profile is expected to remain open.
     keep_open: bool = False
 
 
@@ -183,12 +182,6 @@ class RoxyBrowserClient:
         self.token = (token if token is not None else _cfg.ROXY_API_TOKEN).strip()
         self.profile_proxy = str(profile_proxy or "").strip() or None
         self.profile_proxy_source = "explicit" if self.profile_proxy else None
-        # The reservation owner is process-local and never written to logs or
-        # runtime data.  It lets concurrent Roxy registration workers claim a
-        # verified exit IP atomically without conflating endpoint uniqueness
-        # with the actual address observed through that endpoint.
-        self._exit_ip_reservation_owner = f"roxy-{uuid.uuid4().hex}"
-        self._reserved_exit_ip = ""
         self._last_profile_create_summary: dict[str, object] = {}
         self.http = requests.Session()
         # Roxy OpenAPI normally listens on loopback.  Do not let Clash/system
@@ -473,6 +466,14 @@ class RoxyBrowserClient:
         body = dict(getattr(_cfg, "ROXY_PROFILE_CREATE_PAYLOAD", {}) or {})
         if payload:
             body.update(payload)
+        core_version = str(getattr(_cfg, "ROXY_CORE_VERSION", "latest") or "latest").strip().lower()
+        if core_version != "latest" and not re.fullmatch(r"[1-9][0-9]{1,2}", core_version):
+            raise ValueError("ROXY_CORE_VERSION 请填 latest 或 Chrome 主版本号（例如 147）")
+        body["coreType"] = "Chrome"
+        if core_version == "latest":
+            body.pop("coreVersion", None)
+        else:
+            body["coreVersion"] = core_version
         # Roxy's profile generator must build a fresh device fingerprint for
         # every registration environment.  The upstream implementation sends
         # this field explicitly; keeping it forced here prevents a stale
@@ -524,7 +525,7 @@ class RoxyBrowserClient:
                 "或直接在 ROXY_PROFILE_CREATE_PAYLOAD 里加入 {'workspaceId': '你的工作区ID'}。"
             )
         logger.info(
-            "[Roxy] 创建环境参数：workspaceId=%s projectId=%s name=%s random_name=%s os=%s osVersion=%s random_os=%s randomFingerprint=%s",
+            "[Roxy] 创建环境参数：workspaceId=%s projectId=%s name=%s random_name=%s os=%s osVersion=%s random_os=%s randomFingerprint=%s coreVersion=%s",
             body.get("workspaceId"),
             body.get("projectId") or "-",
             body.get("name") or "-",
@@ -533,6 +534,7 @@ class RoxyBrowserClient:
             body.get("osVersion") or "-",
             random_os_enabled,
             body.get("randomFingerprint"),
+            core_version,
         )
         # Keep only non-sensitive fields for the account isolation audit.  The
         # full payload (proxy credentials/workspace identifiers) is never
@@ -552,65 +554,6 @@ class RoxyBrowserClient:
         if not profile_id:
             raise RuntimeError(f"Roxy 创建环境成功但未返回 dirId/profile_id: {result}")
         return profile_id
-
-    def _release_exit_ip_reservation(self) -> None:
-        """Release this client's verified exit IP, if one was claimed."""
-        reserved = str(getattr(self, "_reserved_exit_ip", "") or "").strip()
-        if not reserved:
-            return
-        try:
-            from config import proxy as _proxy_cfg
-
-            released = _proxy_cfg.release_registration_exit_ip(
-                reserved,
-                self._exit_ip_reservation_owner,
-            )
-            if released:
-                logger.info("[Roxy] 已释放注册出口 IP reservation：ip=%s", reserved)
-        except Exception:
-            # Reservation cleanup must never mask the registration result.
-            logger.debug("[Roxy] 注册出口 IP reservation 清理失败", exc_info=True)
-        finally:
-            self._reserved_exit_ip = ""
-
-    def reconcile_registration_exit_ip(self, exit_ip: str | None) -> bool:
-        """Reconcile the reservation with the IP observed inside the Roxy window.
-
-        The preflight probe runs before profile creation, while the browser
-        probe runs after Roxy has applied ``proxyInfo``.  A sticky provider is
-        expected to report the same address.  If it changes, claim the actual
-        address atomically only when it is unused; the caller can then fail
-        closed on a mismatch rather than registering over an unverified route.
-        """
-        from config import proxy as _proxy_cfg
-
-        normalized = _proxy_cfg.normalize_exit_ip(exit_ip)
-        if not normalized:
-            return False
-        if normalized == str(getattr(self, "_reserved_exit_ip", "") or ""):
-            # Re-check the map instead of trusting a stale client field (for
-            # example after a controlled config reload or service reset).
-            if _proxy_cfg.reserve_registration_exit_ip(
-                normalized,
-                self._exit_ip_reservation_owner,
-            ):
-                return True
-            self._reserved_exit_ip = ""
-            return False
-        if not _proxy_cfg.reserve_registration_exit_ip(
-            normalized,
-            self._exit_ip_reservation_owner,
-        ):
-            return False
-        previous = str(getattr(self, "_reserved_exit_ip", "") or "")
-        self._reserved_exit_ip = normalized
-        if previous:
-            _proxy_cfg.release_registration_exit_ip(
-                previous,
-                self._exit_ip_reservation_owner,
-            )
-        logger.info("[Roxy] 已核对浏览器实际注册出口 IP：ip=%s", normalized)
-        return True
 
     @staticmethod
     def _normalize_profile_id(value: str | None) -> str:
@@ -637,10 +580,6 @@ class RoxyBrowserClient:
                 "不能配置/传入固定 ROXY_PROFILE_ID；请留空以便每个账号创建新环境。"
             )
 
-        # A client may be reused for a failed browser attempt.  Drop any
-        # previous claim before probing the next profile so a stale claim does
-        # not reduce the available exit-IP set.
-        self._release_exit_ip_reservation()
         preflight_exit_geo: dict = {}
         if require_proxy_exit_ip:
             self._ensure_profile_proxy()
@@ -655,7 +594,6 @@ class RoxyBrowserClient:
                 min(10, int(getattr(_cfg, "ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS", 3) or 3)),
             )
             failed_proxies: set[str] = set()
-            duplicate_exit_ips: set[str] = set()
             for proxy_attempt in range(1, proxy_attempts + 1):
                 logger.info("[Roxy] 出口 IP 快速检测：代理 %s/%s", proxy_attempt, proxy_attempts)
                 preflight_exit_geo = probe_proxy_exit_geo(
@@ -675,27 +613,9 @@ class RoxyBrowserClient:
                             "[Roxy] 代理预检返回了非法出口 IP，跳过当前线路",
                         )
                         preflight_exit_geo = {}
-                    elif _proxy_cfg.reserve_registration_exit_ip(
-                        canonical_ip,
-                        self._exit_ip_reservation_owner,
-                    ):
-                        self._reserved_exit_ip = canonical_ip
-                        # Keep the canonical value in the result used by the
-                        # registration record, so equivalent IPv6 spellings
-                        # cannot bypass the reservation comparison.
-                        preflight_exit_geo["ip"] = self._reserved_exit_ip
-                        logger.info(
-                            "[Roxy] 已占用注册出口 IP：ip=%s reservation=process+cooldown",
-                            self._reserved_exit_ip,
-                        )
-                        break
                     else:
-                        duplicate_exit_ips.add(canonical_ip)
-                        preflight_exit_geo = {}
-                        logger.warning(
-                            "[Roxy] 代理预检出口 IP 已被其他任务占用或仍在冷却，跳过当前线路：ip=%s",
-                            canonical_ip,
-                        )
+                        preflight_exit_geo["ip"] = canonical_ip
+                        break
                 failed_proxies.add(str(self.profile_proxy or ""))
                 if self.profile_proxy_source != "pool" or proxy_attempt >= proxy_attempts:
                     break
@@ -707,14 +627,8 @@ class RoxyBrowserClient:
                     break
                 self.profile_proxy = replacement
                 self.profile_proxy_source = "pool"
-                logger.warning("[Roxy] 当前候选未通过出口预检或独立性核对，随机更换下一条")
+                logger.warning("[Roxy] 当前候选未通过出口预检，随机更换下一条")
             if not preflight_exit_geo.get("ip"):
-                self._release_exit_ip_reservation()
-                if duplicate_exit_ips:
-                    raise RuntimeError(
-                        f"Roxy 代理出口 IP 已被其他任务占用或仍在冷却（已检测 {len(failed_proxies)} 条代理，"
-                        f"冲突 IP {len(duplicate_exit_ips)} 个）；未创建环境、未打开窗口"
-                    )
                 raise RuntimeError(
                     f"Roxy 代理出口快速检测失败（已检测 {len(failed_proxies)} 条），"
                     "环境未创建、窗口未打开；请按 proxy_preflight 日志区分超时、代理传输、HTTP 和无效出口响应"
@@ -727,13 +641,9 @@ class RoxyBrowserClient:
         pid = configured_pid
         created_by_run = False
         if not pid:
-            try:
-                pid = self.create_profile()
-                created_by_run = True
-                logger.info("[Roxy] 已创建临时环境：%s", pid)
-            except BaseException:
-                self._release_exit_ip_reservation()
-                raise
+            pid = self.create_profile()
+            created_by_run = True
+            logger.info("[Roxy] 已创建临时环境：%s", pid)
         try:
             if callable(on_profile_ready):
                 on_profile_ready(str(pid))
@@ -744,7 +654,6 @@ class RoxyBrowserClient:
                 logger.exception("[Roxy] 绑定新环境失败，立即回收：%s", pid)
                 self.close_profile(str(pid))
                 self.delete_profile(str(pid))
-            self._release_exit_ip_reservation()
             raise
 
         path = str(_cfg.ROXY_OPEN_PATH).format(profile_id=pid)
@@ -802,7 +711,6 @@ class RoxyBrowserClient:
                 logger.exception("[Roxy] 新环境打开/解析失败，立即回收：%s", pid)
                 self.close_profile(str(pid))
                 self.delete_profile(str(pid))
-            self._release_exit_ip_reservation()
             raise
         return RoxyOpenResult(
             pid,
@@ -874,40 +782,29 @@ class RoxyBrowserClient:
 
     def cleanup_profile(self, opened: RoxyOpenResult | None) -> None:
         """任务结束清理：关闭窗口；一号一环境时删除本轮创建的 Profile。"""
-        keep_open = False
-        try:
-            if not opened or not opened.profile_id:
-                return
-            keep_open = bool(
-                getattr(
-                    opened,
-                    "keep_open",
-                    getattr(_cfg, "ROXY_KEEP_BROWSER_OPEN", False),
-                )
+        if not opened or not opened.profile_id:
+            return
+        keep_open = bool(
+            getattr(
+                opened,
+                "keep_open",
+                getattr(_cfg, "ROXY_KEEP_BROWSER_OPEN", False),
             )
-            if not keep_open:
-                self.close_profile(opened.profile_id)
+        )
+        if not keep_open:
+            self.close_profile(opened.profile_id)
 
-            should_delete = (
-                bool(getattr(_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
-                and bool(getattr(_cfg, "ROXY_DELETE_PROFILE_AFTER_RUN", True))
-                and bool(opened.created_by_run)
-            )
-            if should_delete:
-                # 删除前尽量确保已关闭；若 keep_open=True 则不删除，便于调试保留现场。
-                if keep_open:
-                    logger.info("[Roxy] ROXY_KEEP_BROWSER_OPEN=True，跳过删除环境：%s", opened.profile_id)
-                    return
-                self.delete_profile(opened.profile_id)
-        finally:
-            # A retained debugging Profile still owns its verified IP.  For
-            # the normal terminal path release after close/delete; the
-            # captured flag is used instead of current config so hot reloads
-            # cannot accidentally free a live route.
-            if not keep_open:
-                self._release_exit_ip_reservation()
-            else:
-                logger.info("[Roxy] 保留打开环境，暂不释放注册出口 IP reservation：profile=%s", getattr(opened, "profile_id", "-"))
+        should_delete = (
+            bool(getattr(_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
+            and bool(getattr(_cfg, "ROXY_DELETE_PROFILE_AFTER_RUN", True))
+            and bool(opened.created_by_run)
+        )
+        if should_delete:
+            # 删除前尽量确保已关闭；若 keep_open=True 则不删除，便于调试保留现场。
+            if keep_open:
+                logger.info("[Roxy] ROXY_KEEP_BROWSER_OPEN=True，跳过删除环境：%s", opened.profile_id)
+                return
+            self.delete_profile(opened.profile_id)
 
     @staticmethod
     def _extract_debugger_address(payload: dict) -> str | None:

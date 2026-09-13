@@ -147,6 +147,9 @@ ROXY_DEFAULT_OS: str = "macOS"
 # 留空则使用 Roxy 对应系统的默认/最大版本；如需固定可填 15.3.2、14.7 等。
 ROXY_DEFAULT_OS_VERSION: str = ""
 
+# 新建窗口的 Chrome 主版本；latest 由 Roxy 选择最新，也可填写 Roxy 支持的版本号。
+ROXY_CORE_VERSION: str = "latest"
+
 # 创建 Roxy 环境时是否使用 config/proxy.py 的 PROXY_POOL：
 #   False = 不主动给 Roxy 环境设置代理
 #   True  = 每次创建环境时从 PROXY_POOL 随机取一个代理写入 proxyInfo
@@ -162,8 +165,7 @@ ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS: int = 3
 ROXY_PROXY_PREFLIGHT_RETRY_DELAY: float = 0.5
 
 # 窗口启动后再从 Selenium 上下文复核实际出口 IP；仍失败则终止注册。
-# 预检得到的真实出口 IP 会在进程内原子占用，并在释放后保留 15 分钟冷却，
-# 防止并发或紧邻的下一个账号复用同一出口；若窗口内 IP 与预检漂移则 fail-closed。
+# 允许不同账号使用同一出口 IP；若窗口内 IP 与预检漂移则停止该账号。
 ROXY_BROWSER_EXIT_IP_ATTEMPTS: int = 1
 ROXY_BROWSER_EXIT_IP_RETRY_DELAY: float = 0.5
 
@@ -200,7 +202,7 @@ apply_env_overrides(globals(), {
     'ROXY_CREATE_API_ATTEMPTS': 'int', 'GC_REGISTRATION_MODE': 'bool',
     'ROXY_ONE_PROFILE_PER_ACCOUNT': 'bool', 'ROXY_DELETE_PROFILE_AFTER_RUN': 'bool',
     'ROXY_RANDOM_OS_ON_CREATE': 'bool', 'ROXY_RANDOM_OS_CHOICES': 'str',
-    'ROXY_DEFAULT_OS': 'str', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE': 'bool',
+    'ROXY_DEFAULT_OS': 'str', 'ROXY_CORE_VERSION': 'str', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE': 'bool',
     'ROXY_PROFILE_NAME_PREFIX': 'str', 'ROXY_CREATE_USE_PROXY_POOL': 'bool',
     'ROXY_PROXY_CHECK_CHANNEL': 'str', 'ROXY_PROXY_PREFLIGHT_ATTEMPTS': 'int',
     'ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS': 'int',

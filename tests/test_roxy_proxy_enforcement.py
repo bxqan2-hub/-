@@ -5,17 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from unittest.mock import MagicMock, call, patch
 
-from config import proxy as proxy_config
 from core.roxybrowser_client import RoxyBrowserClient
 
 
 class RoxyProxyEnforcementTests(unittest.TestCase):
-    def setUp(self):
-        proxy_config.reset_registration_exit_ip_reservations(clear_history=True)
-
-    def tearDown(self):
-        proxy_config.reset_registration_exit_ip_reservations(clear_history=True)
-
     def test_profile_is_reported_immediately_after_creation(self):
         client = RoxyBrowserClient()
         reported = []
@@ -140,37 +133,48 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertEqual(probe.call_args_list[1].args[0], second)
         self.assertEqual(pick_proxy.call_args_list[1].kwargs["excluded"], {first})
 
-    def test_duplicate_preflight_exit_ip_rotates_to_a_new_pool_node(self):
-        client = RoxyBrowserClient()
-        first = "socks5h://first.example:1080"
-        second = "socks5h://second.example:1080"
-        with patch("core.roxybrowser_client._cfg.ROXY_CREATE_USE_PROXY_POOL", True), \
-             patch("core.roxybrowser_client._cfg.ROXY_PROXY_PREFLIGHT_PROXY_ATTEMPTS", 3), \
-             patch("config.proxy.pick_proxy", side_effect=[first, second]) as pick_proxy, \
-             patch("core.browser_exit_geo.probe_proxy_exit_geo", side_effect=[
-                 {"ip": "203.0.113.20", "country": "JP"},
-                 {"ip": "203.0.113.21", "country": "JP"},
-             ]) as probe, \
-             patch.object(client, "create_profile", return_value="created-profile"), \
-             patch.object(client, "request", return_value={"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}}):
-            # Occupy the first observed address as if another registration
-            # worker won the race just before this probe.
-            self.assertTrue(proxy_config.reserve_registration_exit_ip("203.0.113.20", "other-worker"))
-            opened = client.open_profile(require_proxy_exit_ip=True)
+    def test_same_exit_ip_allows_independent_profiles_before_and_after_cleanup(self):
+        for use_pool in (False, True):
+            for keep_open in (False, True):
+                with self.subTest(use_pool=use_pool, keep_open=keep_open):
+                    clients = [RoxyBrowserClient(profile_proxy=None if use_pool else "socks5h://fixed.example:1080") for _ in range(3)]
+                    with patch("core.roxybrowser_client._cfg.ROXY_CREATE_USE_PROXY_POOL", True), \
+                         patch("core.roxybrowser_client._cfg.ROXY_KEEP_BROWSER_OPEN", keep_open), \
+                         patch("core.roxybrowser_client._cfg.ROXY_DELETE_PROFILE_AFTER_RUN", True), \
+                         patch("config.proxy.pick_proxy", side_effect=[f"socks5h://proxy-{i}.example:1080" for i in range(3)]) as pick_proxy, \
+                         patch("core.browser_exit_geo.probe_proxy_exit_geo", return_value={"ip": "203.0.113.20", "country": "JP"}) as probe, \
+                         patch.object(RoxyBrowserClient, "create_profile", side_effect=["profile-1", "profile-2", "profile-3"]) as create_profile, \
+                         patch.object(RoxyBrowserClient, "request", return_value={"data": {"http": "127.0.0.1:9222"}}), \
+                         patch.object(RoxyBrowserClient, "close_profile", return_value=True) as close, \
+                         patch.object(RoxyBrowserClient, "delete_profile", return_value=True) as delete:
+                        first = clients[0].open_profile(require_proxy_exit_ip=True)
+                        second = clients[1].open_profile(require_proxy_exit_ip=True)
+                        clients[0].cleanup_profile(first)
+                        third = clients[2].open_profile(require_proxy_exit_ip=True)
+                    self.assertEqual([item.profile_id for item in (first, second, third)], ["profile-1", "profile-2", "profile-3"])
+                    self.assertTrue(all(item.created_by_run for item in (first, second, third)))
+                    self.assertEqual([item.preflight_exit_geo["ip"] for item in (first, second, third)], ["203.0.113.20"] * 3)
+                    self.assertEqual(create_profile.call_count, 3)
+                    self.assertEqual(probe.call_count, 3)
+                    self.assertEqual(pick_proxy.call_count, 3 if use_pool else 0)
+                    self.assertEqual(close.call_count, 0 if keep_open else 1)
+                    self.assertEqual(delete.call_count, 0 if keep_open else 1)
 
-        self.assertEqual(opened.preflight_exit_geo["ip"], "203.0.113.21")
-        self.assertEqual(probe.call_count, 2)
-        self.assertEqual(pick_proxy.call_args_list[1].kwargs["excluded"], {first})
-        client.cleanup_profile(opened)
-
-    def test_duplicate_explicit_exit_ip_fails_closed_before_create(self):
-        client = RoxyBrowserClient(profile_proxy="socks5h://fixed.example:1080")
-        self.assertTrue(proxy_config.reserve_registration_exit_ip("203.0.113.22", "other-worker"))
-        with patch("core.browser_exit_geo.probe_proxy_exit_geo", return_value={"ip": "203.0.113.22", "country": "JP"}), \
-             patch.object(client, "create_profile") as create_profile:
-            with self.assertRaisesRegex(RuntimeError, "已被其他任务占用或仍在冷却"):
-                client.open_profile(require_proxy_exit_ip=True)
-        create_profile.assert_not_called()
+    def test_parallel_preflight_accepts_equivalent_ipv6_exits(self):
+        clients = [RoxyBrowserClient(profile_proxy="socks5h://fixed.example:1080") for _ in range(3)]
+        barrier = threading.Barrier(3)
+        def probe(*_args, **_kwargs):
+            index = barrier.wait(timeout=5)
+            return {"ip": ["2001:0db8::1", "2001:db8:0:0:0:0:0:1", "2001:db8::1"][index]}
+        with patch("core.browser_exit_geo.probe_proxy_exit_geo", side_effect=probe) as probed, \
+             patch.object(RoxyBrowserClient, "create_profile", side_effect=["profile-1", "profile-2", "profile-3"]) as created, \
+             patch.object(RoxyBrowserClient, "request", return_value={"data": {"http": "127.0.0.1:9222"}}), \
+             ThreadPoolExecutor(max_workers=3) as pool:
+            opened = list(pool.map(lambda client: client.open_profile(require_proxy_exit_ip=True), clients))
+        self.assertEqual(len({item.profile_id for item in opened}), 3)
+        self.assertEqual([item.preflight_exit_geo["ip"] for item in opened], ["2001:db8::1"] * 3)
+        self.assertEqual(probed.call_count, 3)
+        self.assertEqual(created.call_count, 3)
 
     def test_invalid_preflight_ip_is_not_misreported_as_duplicate(self):
         client = RoxyBrowserClient(profile_proxy="socks5h://fixed.example:1080")
@@ -180,28 +184,6 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
                 client.open_profile(require_proxy_exit_ip=True)
         self.assertNotIn("并发注册任务重复", str(raised.exception))
         create_profile.assert_not_called()
-
-    def test_released_exit_ip_is_not_immediately_reused(self):
-        self.assertTrue(proxy_config.reserve_registration_exit_ip("2001:0db8::1", "owner-a"))
-        self.assertTrue(proxy_config.release_registration_exit_ip("2001:db8:0:0:0:0:0:1", "owner-a"))
-        self.assertFalse(proxy_config.reserve_registration_exit_ip("2001:db8::1", "owner-b"))
-        with patch.object(proxy_config, "_REGISTRATION_EXIT_IP_REUSE_COOLDOWN_SECONDS", 0):
-            self.assertTrue(proxy_config.reserve_registration_exit_ip("2001:db8::1", "owner-b"))
-
-    def test_keep_open_profile_retains_exit_ip_reservation(self):
-        client = RoxyBrowserClient(profile_proxy="socks5h://keep.example:1080")
-        with patch("core.roxybrowser_client._cfg.ROXY_KEEP_BROWSER_OPEN", True), \
-             patch("core.browser_exit_geo.probe_proxy_exit_geo", return_value={"ip": "203.0.113.23", "country": "JP"}), \
-             patch.object(client, "create_profile", return_value="keep-profile"), \
-             patch.object(client, "request", return_value={"data": {"dirId": "keep-profile", "http": "127.0.0.1:9222"}}):
-            opened = client.open_profile(require_proxy_exit_ip=True)
-
-        self.assertTrue(opened.keep_open)
-        client.cleanup_profile(opened)
-        self.assertFalse(proxy_config.reserve_registration_exit_ip("203.0.113.23", "other-worker"))
-        # Explicitly close the retained reservation in the test, mirroring a
-        # later manual profile close/restart in the service.
-        client._release_exit_ip_reservation()
 
     def _config_patches(self):
         return (
@@ -283,6 +265,36 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         body = request.call_args.kwargs["json_body"]
         self.assertEqual(body["os"], "Windows")
         self.assertNotIn("osVersion", body)
+
+    def test_selected_chrome_core_overrides_template_and_latest_omits_version(self):
+        from config import roxybrowser
+        client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
+        template = {"coreVersion": "130", "coreType": "Firefox"}
+        for version in ("latest", "147", "138", "latest"):
+            with self.subTest(version=version), \
+                 patch.object(roxybrowser, "ROXY_CORE_VERSION", version, create=True), \
+                 patch.object(roxybrowser, "ROXY_PROFILE_CREATE_PAYLOAD", template), \
+                 patch.object(roxybrowser, "ROXY_WORKSPACE_ID", "123"), \
+                 patch.object(client, "request", return_value={"data": {"dirId": "profile-fixture"}}) as request:
+                client.create_profile({"coreVersion": "125", "coreType": "Firefox", "randomFingerprint": False})
+            body = request.call_args.kwargs["json_body"]
+            self.assertEqual(body["coreType"], "Chrome")
+            self.assertTrue(body["randomFingerprint"])
+            if version == "latest":
+                self.assertNotIn("coreVersion", body)
+            else:
+                self.assertEqual(body["coreVersion"], version)
+            self.assertEqual(template, {"coreVersion": "130", "coreType": "Firefox"})
+
+    def test_invalid_chrome_core_stops_before_create_request(self):
+        from config import roxybrowser
+        for version in ("147.0", "invalid", "-1", "1", "0147", "9999"):
+            with self.subTest(version=version), \
+                 patch.object(roxybrowser, "ROXY_CORE_VERSION", version, create=True), \
+                 patch.object(RoxyBrowserClient, "request") as request:
+                with self.assertRaisesRegex(ValueError, "ROXY_CORE_VERSION"):
+                    RoxyBrowserClient().create_profile()
+                request.assert_not_called()
 
     def test_profile_create_always_requests_fresh_random_fingerprint(self):
         client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")

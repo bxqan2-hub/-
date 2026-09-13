@@ -20,7 +20,6 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 client.open_profile.return_value = RoxyOpenResult(
                     "profile-fixture", {}, preflight_exit_geo={"ip": "198.51.100.7"},
                 )
-                client.reconcile_registration_exit_ip.return_value = True
                 driver = MagicMock()
                 clock = [1000.0]
                 sent_at = []
@@ -129,7 +128,6 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 client.open_profile.return_value = RoxyOpenResult(
                     "profile-fixture", {}, preflight_exit_geo={"ip": "198.51.100.7"},
                 )
-                client.reconcile_registration_exit_ip.return_value = True
                 session = SimpleNamespace(close=MagicMock())
                 setup_result = SimpleNamespace(
                     secret="fixture-secret", access_token="result-at", expires="fresh-expires",

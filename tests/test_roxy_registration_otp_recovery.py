@@ -394,21 +394,17 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertTrue(submitted)
         type_name.assert_not_called()
 
-    def test_browser_exit_geo_mismatch_is_rejected_after_reconciling_actual_ip(self):
+    def test_browser_exit_geo_mismatch_is_rejected(self):
         opened = RoxyOpenResult(
             "profile-1",
             {},
             preflight_exit_geo={"ip": "203.0.113.30", "country": "JP"},
         )
-        client = MagicMock()
-        client.reconcile_registration_exit_ip.return_value = True
         with self.assertRaisesRegex(RuntimeError, "出口 IP 与创建前预检不一致"):
             roxy_registration._verify_registration_exit_geo(
-                client,
                 opened,
                 {"ip": "203.0.113.31", "country": "JP"},
             )
-        client.reconcile_registration_exit_ip.assert_called_once_with("203.0.113.31")
 
     def test_empty_or_invalid_browser_probe_stops_before_preflight_can_be_reused(self):
         opened = RoxyOpenResult(
@@ -416,26 +412,20 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
             {},
             preflight_exit_geo={"ip": "203.0.113.32", "country": "JP"},
         )
-        client = MagicMock()
         for browser_geo in ({}, {"ip": "not-an-ip"}, None):
             with self.subTest(browser_geo=browser_geo):
                 with self.assertRaisesRegex(RuntimeError, "窗口内出口 IP 复核失败") as raised:
-                    roxy_registration._verify_registration_exit_geo(client, opened, browser_geo)
+                    roxy_registration._verify_registration_exit_geo(opened, browser_geo)
                 self.assertTrue(roxy_registration._is_proxy_isolation_failure(raised.exception))
-        client.reconcile_registration_exit_ip.assert_not_called()
 
-    def test_browser_exit_geo_is_reserved_when_preflight_was_skipped(self):
+    def test_browser_exit_geo_is_verified_when_preflight_was_skipped(self):
         opened = RoxyOpenResult("profile-2", {}, preflight_exit_geo={})
-        client = MagicMock()
-        client.reconcile_registration_exit_ip.return_value = True
         selected = roxy_registration._verify_registration_exit_geo(
-            client,
             opened,
             {"ip": "198.51.100.42", "country": "US"},
         )
         self.assertEqual(selected["ip"], "198.51.100.42")
         self.assertEqual(selected["verification_source"], "browser_context")
-        client.reconcile_registration_exit_ip.assert_called_once_with("198.51.100.42")
 
     def test_profile_isolation_summary_uses_create_payload_and_open_runtime_values(self):
         client = MagicMock()

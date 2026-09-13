@@ -64,13 +64,9 @@ def _is_proxy_transport_failure(value) -> bool:
 
 
 def _is_proxy_isolation_failure(value) -> bool:
-    """Identify a verified-route collision or drift separately from transport."""
+    """Identify route drift or failed browser verification separately from transport."""
     text = f"{type(value).__name__}: {value}"
     return any(marker in text for marker in (
-        "出口 IP 与并发注册任务重复",
-        "出口 IP 已被其他任务占用或仍在冷却",
-        "注册出口 IP 已被其他并发任务占用",
-        "注册出口 IP 已被其他任务占用或处于冷却",
         "出口 IP 与创建前预检不一致",
         "窗口内出口 IP 复核失败",
     ))
@@ -3559,17 +3555,14 @@ def _release_roxy_registration_email_failure(
 
 
 def _verify_registration_exit_geo(
-    client: RoxyBrowserClient,
     opened: RoxyOpenResult,
     browser_geo: dict | None,
 ) -> dict:
     """Verify that the live Roxy window kept the preflight exit route.
 
     A proxy endpoint is only a candidate until the real public IP is observed.
-    The preflight reservation protects the create/open race; this second gate
-    prevents a proxy that rotated or was ignored by Roxy from silently being
-    used for registration.  A preflight reservation does not establish the
-    actual route used by the browser; an empty live probe stops registration.
+    The browser probe rejects a changed or missing route. Different accounts
+    may share the same verified address without sharing their Profile.
     """
     from config import proxy as _proxy_cfg
 
@@ -3581,23 +3574,12 @@ def _verify_registration_exit_geo(
         raise RuntimeError("Roxy 窗口内出口 IP 复核失败：未返回有效实测地址；已终止注册")
 
     if browser_ip and preflight_ip and browser_ip != preflight_ip:
-        # Claim the actually observed address before aborting, so another
-        # worker cannot start on it during this profile's cleanup window.
-        if not client.reconcile_registration_exit_ip(browser_ip):
-            raise RuntimeError(
-                f"Roxy 浏览器实际出口 IP 已被其他任务占用或处于冷却：ip={browser_ip}；"
-                "已终止注册并回收当前环境"
-            )
         raise RuntimeError(
             f"Roxy 浏览器出口 IP 与创建前预检不一致：preflight={preflight_ip} browser={browser_ip}；"
             "疑似代理漂移或 proxyInfo 未生效，已终止注册"
         )
 
     selected = {**preflight, **browser}
-    if not client.reconcile_registration_exit_ip(browser_ip):
-        raise RuntimeError(
-            f"Roxy 注册出口 IP 已被其他任务占用或处于冷却：ip={browser_ip}；已终止注册"
-        )
     selected["ip"] = browser_ip
     selected["verification_source"] = "browser_context"
     return selected
@@ -3692,7 +3674,6 @@ def run_roxy_registration(
             stop_check=_check_manual_stop,
         )
         registration_exit_geo = _verify_registration_exit_geo(
-            client,
             opened,
             registration_exit_geo,
         )

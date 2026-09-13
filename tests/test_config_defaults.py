@@ -73,6 +73,48 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ROXY_DEFAULT_OS")
         self.assertEqual(field["options"], ["Windows", "macOS"])
 
+    def test_roxy_core_version_round_trips_env_reload_and_create_payload(self):
+        from config import roxybrowser
+        from core.roxybrowser_client import RoxyBrowserClient
+
+        field = next(item for item in config_editor.EDITABLE_FIELDS if item["key"] == "ROXY_CORE_VERSION")
+        self.assertEqual(field["group"], "RoxyBrowser")
+        self.assertEqual(field["type"], "str")
+        source = Path(roxybrowser.__file__).read_text(encoding="utf-8")
+        self.assertEqual(config_editor._parse_value_from_source(source, "ROXY_CORE_VERSION", "str"), "latest")
+        original_version = roxybrowser.ROXY_CORE_VERSION
+        try:
+            with tempfile.TemporaryDirectory() as tmp, \
+                 patch.object(env_loader, "_ENV_PATH", Path(tmp) / ".env"), \
+                 patch.object(env_loader, "_LOADED", True), patch.dict(os.environ, {}, clear=False):
+                for value, expected in (("147", "147"), (" 138 ", "138"), (" LATEST ", "latest")):
+                    with self.subTest(value=value):
+                        result = config_editor.update_config({"ROXY_CORE_VERSION": value})
+                        self.assertEqual(result["updated"], ["ROXY_CORE_VERSION"])
+                        self.assertEqual(env_loader.read_env_file()["ROXY_CORE_VERSION"], expected)
+                        importlib.reload(roxybrowser)
+                        self.assertEqual(roxybrowser.ROXY_CORE_VERSION, expected)
+                        with patch.object(config_editor, "EDITABLE_FIELDS", [field]):
+                            self.assertEqual(config_editor.get_config()[0]["value"], expected)
+                        with patch.object(roxybrowser, "ROXY_WORKSPACE_ID", "123"), \
+                             patch.object(RoxyBrowserClient, "request", return_value={"data": {"dirId": "fixture"}}) as request:
+                            RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080").create_profile()
+                        body = request.call_args.kwargs["json_body"]
+                        self.assertEqual(body.get("coreVersion"), None if expected == "latest" else expected)
+        finally:
+            importlib.reload(roxybrowser)
+            roxybrowser.ROXY_CORE_VERSION = original_version
+
+    def test_invalid_roxy_core_version_rejects_whole_update_before_writes(self):
+        for value in ("", None, "147.0", "0147", "9999", "147\nROXY_API_TOKEN=value", "１４７", "1e2"):
+            with self.subTest(value=value), \
+                 patch.object(env_loader, "write_env_values") as write_env, \
+                 patch.object(env_loader, "write_runtime_list_file") as write_runtime:
+                with self.assertRaisesRegex(ValueError, "ROXY_CORE_VERSION"):
+                    config_editor.update_config({"PROXY_POOL": ["socks5h://proxy.example:1080"], "ROXY_CORE_VERSION": value})
+                write_env.assert_not_called()
+                write_runtime.assert_not_called()
+
     def test_unused_post_registration_chat_settings_are_not_exposed(self):
         keys = {item["key"] for item in config_editor.EDITABLE_FIELDS}
         self.assertTrue({

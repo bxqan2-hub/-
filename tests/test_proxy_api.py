@@ -15,10 +15,6 @@ class ProxyApiTests(unittest.TestCase):
         proxy_cfg._PROXY_API_CACHE["proxy"] = ""
         proxy_cfg._PROXY_API_CACHE["expires_at"] = 0.0
         proxy_cfg._PROXY_API_FLIGHTS.clear()
-        proxy_cfg.reset_registration_exit_ip_reservations(clear_history=True)
-
-    def tearDown(self):
-        proxy_cfg.reset_registration_exit_ip_reservations(clear_history=True)
 
     def test_normalizes_fullwidth_socks5_punctuation(self):
         self.assertEqual(
@@ -390,13 +386,12 @@ class ProxyApiTests(unittest.TestCase):
         fetch.assert_called_once_with(force=True)
         fallback.assert_not_called()
 
-    def test_registration_exit_ip_reservation_is_canonical_and_owner_scoped(self):
-        self.assertEqual(proxy_cfg.normalize_exit_ip("[2001:0db8::7]"), "2001:db8::7")
-        self.assertTrue(proxy_cfg.reserve_registration_exit_ip("2001:0db8::7", "owner-a"))
-        self.assertTrue(proxy_cfg.reserve_registration_exit_ip("2001:db8:0:0:0:0:0:7", "owner-a"))
-        self.assertFalse(proxy_cfg.reserve_registration_exit_ip("2001:db8::7", "owner-b"))
-        self.assertFalse(proxy_cfg.release_registration_exit_ip("2001:db8::7", "owner-b"))
-        self.assertTrue(proxy_cfg.release_registration_exit_ip("2001:db8::7", "owner-a"))
+    def test_exit_ip_normalization_preserves_route_comparison(self):
+        for value, expected in (("2001:0db8::7", "2001:db8::7"),
+                                ("[2001:db8:0:0:0:0:0:7]", "2001:db8::7"),
+                                ("203.0.113.8", "203.0.113.8"), ("not-an-ip", ""), (None, "")):
+            with self.subTest(value=value):
+                self.assertEqual(proxy_cfg.normalize_exit_ip(value), expected)
 
     def test_strict_pick_proxy_uses_selected_static_entry(self):
         selected = "http://user:pass@proxy-two.example:8080"

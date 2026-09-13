@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 import json
+import shutil
+import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from core import db
@@ -554,6 +557,83 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("占位卡片 3", html)
         self.assertNotIn("占位卡片 4", html)
         self.assertNotIn("内容稍后完善", html)
+
+    def test_invalid_roxy_core_version_returns_400_without_writing_config(self):
+        with patch("config.env_loader.write_env_values") as write_env:
+            response = self.client.post("/api/config", json={"updates": {"ROXY_CORE_VERSION": "147.0"}})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("ROXY_CORE_VERSION", response.get_json()["error"])
+        write_env.assert_not_called()
+
+    def test_roxy_core_ui_switches_latest_manual_and_saves_one_key(self):
+        node = shutil.which("node")
+        root = Path(__file__).resolve().parents[1]
+        jsdom = root / "integrations/pay153_checkout/node_modules/jsdom"
+        if not node or not jsdom.exists():
+            self.skipTest("Node.js and the existing jsdom dependency are required")
+        html = self.client.get("/").get_data(as_text=True)
+        script = r"""
+const assert = require('node:assert/strict');
+const {JSDOM} = require(process.argv[1]);
+const html = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const page = new JSDOM(html);
+for (const script of page.window.document.scripts) {
+  if (!script.src) new Function(script.textContent);
+}
+function source(name) {
+  const lines = html.split('\n');
+  const start = lines.findIndex(line => line.startsWith('function ' + name + '(') || line.startsWith('async function ' + name + '('));
+  assert(start >= 0, name);
+  if (lines[start].trimEnd().endsWith('}')) return lines[start];
+  const end = lines.findIndex((line, i) => i > start && line.trimEnd() === '}');
+  return lines.slice(start, end + 1).join('\n');
+}
+const dom = new JSDOM('<div id="tab-config"><div id="configSectionsV2"></div></div>', {runScripts: 'outside-only'});
+const w = dom.window;
+w.eval(['fmt', 'esc', 'attrEsc', 'isPlaceholderEmpty', 'roxyConfigSectionForKey', 'renderConfigPlainFieldV2', 'readConfigElementValue', 'trackConfigFieldChange', 'saveConfigUpdates'].map(source).join('\n'));
+w.CONFIG = [{key:'ROXY_CORE_VERSION', type:'str', value:'latest', label:'Chrome', help:''}];
+w.CONFIG_PENDING_UPDATES = {};
+w.$$ = selector => [...w.document.querySelectorAll(selector)];
+w.showToast = () => {};
+w.renderConfigLayoutV2 = () => { w.document.querySelector('#configSectionsV2').innerHTML = w.renderConfigPlainFieldV2(w.CONFIG[0]); };
+const saved = [];
+w.api = async (_url, options) => { saved.push(JSON.parse(options.body).updates); return {reloaded:true}; };
+w.document.querySelector('#tab-config').addEventListener('change', w.trackConfigFieldChange);
+w.document.querySelector('#tab-config').addEventListener('input', w.trackConfigFieldChange);
+const mode = () => w.document.querySelector('[data-roxy-core-mode]');
+const input = () => w.document.querySelector('[data-key="ROXY_CORE_VERSION"]');
+const change = (el, value, event='change') => { el.value=value; el.dispatchEvent(new w.Event(event, {bubbles:true})); };
+(async () => {
+  assert.equal(w.roxyConfigSectionForKey('ROXY_CORE_VERSION')[0], '环境与代理');
+  w.renderConfigLayoutV2();
+  assert.equal(mode().value, 'latest');
+  assert.equal(input().hidden, true);
+  assert.equal(input().disabled, true);
+  await w.saveConfigUpdates();
+  assert.equal(saved[0].ROXY_CORE_VERSION, 'latest');
+  change(mode(), 'manual');
+  assert.equal(input().hidden, false);
+  assert.equal(input().disabled, false);
+  assert.equal(w.CONFIG_PENDING_UPDATES.ROXY_CORE_VERSION, '');
+  change(input(), '147', 'input');
+  w.renderConfigLayoutV2();
+  assert.equal(mode().value, 'manual');
+  assert.equal(input().value, '147');
+  await w.saveConfigUpdates();
+  assert.equal(saved[1].ROXY_CORE_VERSION, '147');
+  assert.equal(input().value, '147');
+  change(mode(), 'latest');
+  await w.saveConfigUpdates();
+  assert.equal(saved[2].ROXY_CORE_VERSION, 'latest');
+  assert.equal(input().hidden, true);
+  for (const payload of saved) assert.deepEqual(Object.keys(payload), ['ROXY_CORE_VERSION']);
+  console.log('Roxy core UI: latest -> manual 147 -> latest; script syntax and save payload OK');
+})().catch(error => { console.error(error); process.exitCode=1; });
+"""
+        result = subprocess.run([node, "-e", script, str(jsdom)], input=json.dumps(html), text=True,
+                                capture_output=True, timeout=30, encoding="utf-8", cwd=root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("save payload OK", result.stdout)
 
     def test_plan_check_ui_bursts_until_completed_result_is_rendered(self):
         html = self.client.get("/").get_data(as_text=True)

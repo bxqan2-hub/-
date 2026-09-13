@@ -384,3 +384,12 @@
 - 截至 10:04 的安全设置结果中，11 次补密码邮箱 HTTP 401 均再次锁定注册时的旧邮件时间，且没有有效历史 OTP 快照；另有 1 次 activate HTTP 400 单独未定因。详情页时间仅用于历史码例外判断、JSON 过滤后整页正则再取旧码是本地可复现缺陷。
 - 原 `fetch_latest_otp` 在候选锁定前统一验证详情/结构化时间，保留两秒容差、列表消息 ID/分钟精度与同码新邮件规则。原快照/补密码/MFA helper 增加脱敏阶段与耗时日志，不扩大邮箱/写请求预算、不换注册代理。
 - 密码终态 checkpoint、同窗 Cookie/邮箱匹配、Token 刷新透传、activate 成功确认以及只读校验分离均保持并回归；完整证据、上游 hash、测试与加载状态见 `docs/2026-09-13_2FA旧邮件误取与阶段耗时修复-report.md`。
+
+
+## 本次重复出口放行与 Chrome 内核选择（2026-09-13）
+
+- 重新读取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 roxy_registration、roxybrowser_client、config/roxybrowser，均 HTTP 200；版本不变。上游没有本地进程内出口 lease，也没有独立 Chrome 版本配置。
+- 按维护者最新要求，删除本地出口 IP 占用/冷却机制和冲突终止分支；同一 IP 允许并发及连续使用，独立 Profile/随机指纹、真实预检及窗口内漂移复核保留。本节取代此前索引/历史报告中“每账号独占出口和释放后冷却”的当前要求，AGENTS.md 同步更新。
+- 依据 Roxy 官方 `/browser/create` 文档，在现有创建链路增加唯一 `ROXY_CORE_VERSION`：latest 删除模板残留 coreVersion，指定主版本则传字符串，同时设置 coreType=Chrome。UI 接入现有配置保存/热加载，只影响之后新建窗口，不伪改 UA 或复制旧 Profile。
+- 密码成功终态/ checkpoint、同窗 Cookie/Token、邮箱匹配、enroll/activate 成功确认、只读校验分离均保持，未修改这些状态机。回归 `1058 passed, 1 deselected, 1 warning, 338 subtests passed`。
+- 上游 hash、完整配置链路、前端交互/后端参数验证、八项自检及待重启状态见 `docs/2026-09-13_Roxy重复IP与Chrome内核选择-report.md`。

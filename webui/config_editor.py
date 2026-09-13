@@ -318,6 +318,10 @@ EDITABLE_FIELDS = [
         "options": ["Windows", "macOS"],
     },
     {
+        "key": "ROXY_CORE_VERSION", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
+        "label": "Chrome 内核版本", "help": "最新由 Roxy 自动选择；手动填写主版本号（如 147），须为当前 Roxy 支持的版本，仅影响之后新建窗口",
+    },
+    {
         "key": "ROXY_RANDOM_PROFILE_NAME_ON_CREATE", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
         "label": "创建环境随机名称", "help": "创建 Roxy 环境时自动生成不同名称，避免固定 gpt-free-register",
     },
@@ -1268,6 +1272,12 @@ def _format_env_value(value, vtype: str) -> str:
 def update_config(updates: dict) -> dict:
     """批量更新配置；大代理池写运行时文件，其余字段写项目根 `.env`。"""
     from config.env_loader import write_env_values, write_runtime_list_file, load_env
+
+    if "ROXY_CORE_VERSION" in updates:
+        version = str(updates["ROXY_CORE_VERSION"] or "").strip().lower()
+        if version != "latest" and not re.fullmatch(r"[1-9][0-9]{1,2}", version):
+            raise ValueError("ROXY_CORE_VERSION 请填 latest 或 Chrome 主版本号（例如 147）")
+        updates = {**updates, "ROXY_CORE_VERSION": version}
 
     updated, ignored, runtime_file_updated = [], [], []
     env_updates: dict[str, str] = {}
