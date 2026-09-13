@@ -36,6 +36,7 @@ def test_launchers_replace_then_wait_for_http_and_use_one_restart_path():
     assert start.index("r.status==200") < start.index('start "" "http://')
     assert "-WindowStyle Hidden" in start
     assert "Stop-Process -Id $owner -Force" in stop
+    assert "Orphaned listener remains" in stop
     assert "foreach($pid " not in stop.lower()
     assert "-le 4" in stop
     assert 'call "%~dp0start-webui.bat" %*' in restart
