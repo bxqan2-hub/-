@@ -8464,7 +8464,7 @@ async function loadCodexSmsOffersV2() {
 
 // ---------- 配置 ----------
 let CONFIG_EMAIL_ACTIVE_SECTION_V2 = '通用邮箱 / OTP';
-let CONFIG_SMS_ACTIVE_SECTION_V2 = 'HeroSMS';
+let CONFIG_SMS_ACTIVE_SECTION_V2 = '接码平台';
 let CONFIG_CODEX_ACTIVE_SECTION_V2 = '基础配置';
 let CONFIG_ROXY_ACTIVE_SECTION_V2 = '连接与团队';
 let CONFIG_QUERY_V2 = '';
@@ -8532,7 +8532,7 @@ function emailConfigSectionForKey(key) {
 }
 
 function smsConfigSectionForKey(key) {
-  return ['HeroSMS', 'HeroSMS 取号、短信轮询和释放配置；API Key 保存到 .env'];
+  return ['接码平台', 'HeroSMS / SMSBower 取号、短信轮询和释放配置；API Key 保存到 .env'];
 }
 
 function roxyConfigSectionForKey(key) {
@@ -9723,7 +9723,7 @@ function renderConfigSectionV2(name, fields) {
       name,
       fields,
       smsConfigSectionForKey,
-      ['HeroSMS'],
+      ['接码平台'],
       { get: () => CONFIG_SMS_ACTIVE_SECTION_V2, set: v => { CONFIG_SMS_ACTIVE_SECTION_V2 = v; } },
       'sms-section-v2'
     );
