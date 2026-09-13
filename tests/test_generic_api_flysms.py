@@ -98,6 +98,81 @@ class FlysmsPickupTests(unittest.TestCase):
             )
         self.assertEqual(code, "398154")
 
+    def test_detail_and_json_polling_reject_stale_mail_without_history_snapshot(self):
+        import json
+        from types import SimpleNamespace
+
+        sent_at = datetime(2026, 9, 13, 10, 0, 15).timestamp()
+        for response_kind in ("detail", "json"):
+            for history in (set(), {"111111"}, {"999999"}):
+                with self.subTest(response_kind=response_kind, history=history):
+                    clock = [sent_at]
+                    def response(received_at, code):
+                        date = datetime.fromtimestamp(received_at).strftime("%Y-%m-%d %H:%M:%S")
+                        text = json.dumps({"code": code, "time": date}) if response_kind == "json" else (
+                            f'<div class="time">{date}</div><script>const htmlContent = '
+                            f'"Your verification code is {code}";</script>'
+                        )
+                        return FakeResponse(text=text)
+                    session = MagicMock()
+                    session.get.side_effect = [response(sent_at - 45, "111111"), response(sent_at + 1, "222222")]
+                    account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")
+                    with patch.object(generic_client, "get_account_context", return_value=account), \
+                         patch.object(generic_client.requests, "Session", return_value=session), \
+                         patch.object(generic_client, "time", SimpleNamespace(
+                             time=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+                             strftime=generic_client.time.strftime, localtime=generic_client.time.localtime,
+                         )):
+                        code = fetch_latest_otp(account.email, after_ts=sent_at, max_wait=5,
+                                                poll_interval=1, settle_seconds=0, exclude_codes=history)
+                    self.assertEqual(code, "222222")
+                    self.assertEqual(session.get.call_count, 2)
+
+    def test_stale_detail_page_exhausts_wait_without_returning_candidate(self):
+        from types import SimpleNamespace
+
+        sent_at = datetime(2026, 9, 13, 10, 0, 15).timestamp()
+        clock = [sent_at]
+        session = MagicMock()
+        session.get.return_value = FakeResponse(text=(
+            '<div class="time">2026年09月13日 09:59:34 (北京时间)</div>'
+            '<script>const htmlContent = "Your verification code is 111111";</script>'
+        ))
+        account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")
+        with patch.object(generic_client, "get_account_context", return_value=account), \
+             patch.object(generic_client.requests, "Session", return_value=session), \
+             patch.object(generic_client, "time", SimpleNamespace(
+                 time=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+                 strftime=generic_client.time.strftime, localtime=generic_client.time.localtime,
+             )):
+            with self.assertRaisesRegex(GenericApiMailError, "本次请求之后的新验证码邮件"):
+                fetch_latest_otp(account.email, after_ts=sent_at, max_wait=3,
+                                 poll_interval=1, settle_seconds=0)
+        self.assertEqual(clock[0], sent_at + 3)
+        self.assertEqual(session.get.call_count, 3)
+
+    def test_history_snapshot_failure_logs_only_status_type_and_budget(self):
+        account = GenericApiEmailAccount("user@example.test", "https://mail.example.test/private-mail-token")
+        for failure in (requests.exceptions.ReadTimeout(account.code_url + "?code=123456"), 503):
+            with self.subTest(failure_type=type(failure).__name__):
+                session = MagicMock()
+                if isinstance(failure, Exception):
+                    session.get.side_effect = failure
+                else:
+                    session.get.return_value = FakeResponse(status_code=failure)
+                with patch.object(generic_client, "get_account_context", return_value=account), \
+                     patch.object(generic_client.requests, "Session", return_value=session), \
+                     self.assertLogs(generic_client.logger, level="WARNING") as logs:
+                    self.assertIsNone(snapshot_current_otp(account.email, timeout=2))
+                diagnostic = "\n".join(logs.output)
+                self.assertIn("stage=mail_snapshot", diagnostic)
+                self.assertIn("timeout=2.0s", diagnostic)
+                self.assertIn("error_type=ReadTimeout" if isinstance(failure, Exception) else "http=503", diagnostic)
+                for sensitive in (account.email, "private-mail-token", "123456"):
+                    self.assertNotIn(sensitive, diagnostic)
+                session.close.assert_called_once()
+                session.get.assert_called_once()
+
     def test_generic_code_endpoint_fast_fails_after_bounded_transport_errors(self):
         account = GenericApiEmailAccount("a@icloud.com", "https://example.test/code")
         session = MagicMock()

@@ -903,6 +903,8 @@ def _browser_authenticated_json_post(
         if totp_secret:
             _wait_for_totp_window()
             request_payload["code"] = pyotp.TOTP(totp_secret).now()
+        request_started_at = time.monotonic()
+        logger.info("[2FA] 浏览器 MFA 请求 stage=%s attempt=%s/3", stage, attempt)
         try:
             if _is_playwright_page(driver):
                 result = driver.evaluate(
@@ -921,6 +923,8 @@ def _browser_authenticated_json_post(
         except Exception as exc:
             # A renderer/fetch timeout has an unknown write outcome: preserve
             # the diagnostic, but never replay enroll or activate on that basis.
+            logger.warning("[2FA] 浏览器 MFA 请求异常 stage=%s attempt=%s/3 elapsed=%.2fs error_type=%s",
+                           stage, attempt, time.monotonic() - request_started_at, type(exc).__name__)
             detail = f"{type(exc).__name__}: {str(exc)}"
             for sensitive in (access_token, totp_secret, str(payload.get("session_id") or "")):
                 if sensitive:
@@ -933,6 +937,8 @@ def _browser_authenticated_json_post(
         if not isinstance(result, dict):
             raise TwoFASetupError(stage, code, f"{message} stage=exception attempt={attempt}/3")
         status = int(result.get("status") or 0)
+        logger.info("[2FA] 浏览器 MFA 响应 stage=%s http=%s attempt=%s/3 elapsed=%.2fs",
+                    stage, status, attempt, time.monotonic() - request_started_at)
         request_stage = str(result.get("stage") or "request")
         current_email = str(result.get("email") or "").strip()
         if result.get("error") == "session_account_mismatch" or (
@@ -1521,6 +1527,8 @@ def _setup_password_with_driver(
     except Exception:
         otp_history = set()
     otp_message_ids = _snapshot_otp_message_ids(email, timeout=2.0)
+    logger.info("[2FA][密码] 邮箱历史快照 codes=%s message_ids=%s；按本次请求时间过滤旧邮件",
+                len(otp_history), len(otp_message_ids))
     requested_at = time.time()
     normalized_mode = str(password_mode or "add").strip().lower()
     if normalized_mode not in {"add", "reset"}:

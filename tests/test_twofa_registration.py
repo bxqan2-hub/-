@@ -141,6 +141,7 @@ def test_browser_totp_temporary_http_exhaustion_is_bounded(browser_mfa_replay, p
 
 @pytest.mark.parametrize("phase", ["enroll", "activate"])
 @pytest.mark.parametrize("failure", [
+    {"status": 400, "body": {"error": {"code": "invalid_request"}}},
     {"status": 401, "body": {"error": "token_revoked"}},
     {"status": 403, "body": {"error": "permission_denied"}},
     {"status": 408, "body": {}},
@@ -168,6 +169,32 @@ def test_browser_totp_does_not_replay_business_or_ambiguous_writes(browser_mfa_r
         assert "enrollment-private" not in str(exc_info.value)
     if isinstance(failure, dict) and failure.get("status") == 401:
         assert "token_revoked" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("failure_kind", ["http", "exception"])
+def test_browser_mfa_latency_diagnostics_do_not_replay_or_expose_credentials(browser_mfa_replay, monkeypatch, caplog, failure_kind):
+    replay = browser_mfa_replay
+    clock = [0.0]
+    monkeypatch.setattr(account_export, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    def slow_post(*args):
+        clock[0] += 64
+        if failure_kind == "exception":
+            raise TimeoutError("renderer timed out")
+        return {"status": 400, "stage": "request", "body": {"error": {"code": "invalid_request"}}}
+    replay.driver.execute_async_script.side_effect = slow_post
+    with caplog.at_level("INFO", logger="core.account_export"), pytest.raises(account_export.TwoFASetupError):
+        account_export._browser_authenticated_json_post(
+            replay.driver, "/backend-api/accounts/mfa/user/activate_enrollment",
+            {"factor_type": "totp", "session_id": "enrollment-private"},
+            access_token="browser-token-private", expected_email="user@example.test",
+            totp_secret="JBSWY3DPEHPK3PXP", stage="totp_activate",
+            code="totp_browser_activate_failed", message="MFA request failed",
+        )
+    replay.driver.execute_async_script.assert_called_once()
+    assert "stage=totp_activate" in caplog.text and "elapsed=64.00s" in caplog.text
+    assert ("http=400" if failure_kind == "http" else "error_type=TimeoutError") in caplog.text
+    for sensitive in ("browser-token-private", "enrollment-private", "JBSWY3DPEHPK3PXP", "user@example.test"):
+        assert sensitive not in caplog.text
 
 
 def test_browser_totp_failed_enroll_retains_matched_refreshed_token_after_password(browser_mfa_replay, monkeypatch):
@@ -2460,6 +2487,65 @@ def test_password_reauth_real_mail_provider_uses_isolated_retry_budget(
     for sensitive in (account.email, "012345", "999999", "Ab3!cdefgh123", "private-mail-token", "private-query-token", "private-response-token"):
         assert sensitive not in caplog.text
         assert sensitive not in diagnostic
+
+
+@pytest.mark.parametrize("new_mail_arrives", [True, False])
+def test_password_reauth_waits_for_fresh_detail_mail_when_snapshot_is_empty(
+    password_reauth_driver, monkeypatch, caplog, new_mail_arrives,
+):
+    import time
+    from datetime import datetime
+    from config import email as email_cfg, twofa
+    from core import email_provider, generic_api_mail_client as mail
+
+    real_wait = email_provider.wait_for_otp
+    driver = password_reauth_driver()
+    monkeypatch.setattr(email_provider, "wait_for_otp", real_wait)
+    monkeypatch.setattr(email_provider, "resolve_email_source", lambda email: "generic_api")
+    monkeypatch.setattr(email_cfg, "USE_EMAIL_SERVICE", True)
+    monkeypatch.setattr(twofa, "TWOFA_OTP_POLL_INTERVAL", 1)
+    monkeypatch.setattr(twofa, "TWOFA_OTP_SETTLE_SECONDS", 0)
+    monkeypatch.setattr(mail, "time", SimpleNamespace(
+        time=account_export.time.time, monotonic=account_export.time.monotonic,
+        sleep=account_export.time.sleep, strftime=time.strftime, localtime=time.localtime,
+    ))
+    account = mail.GenericApiEmailAccount("user@example.test", "https://mail.example.test/private-mail-token")
+    monkeypatch.setattr(mail, "get_account_context", lambda email: account)
+    requested_at = account_export.time.time()
+    calls = []
+    def get(*args, **kwargs):
+        calls.append(driver.clock.now)
+        fresh = new_mail_arrives and len(calls) >= 4
+        received_at = datetime.fromtimestamp(requested_at + 3 if fresh else requested_at - 45)
+        timestamp = received_at.strftime("%Y年%m月%d日 %H:%M:%S (北京时间)")
+        code = "012345" if fresh else "999999"
+        return SimpleNamespace(status_code=200, text=(
+            f'<div class="time">{timestamp}</div>'
+            f'<script>const htmlContent = "Your verification code is {code}";</script>'
+        ))
+    monkeypatch.setattr(mail.requests, "Session", lambda: SimpleNamespace(get=get))
+    resend = Mock(return_value=False)
+    monkeypatch.setattr(account_export, "_password_click_resend", resend)
+    with caplog.at_level("INFO", logger="core.account_export"):
+        result = account_export._setup_password_with_driver(
+            driver=driver, session=object(), email=account.email, password="Ab3!cdefgh123", timeout_seconds=30,
+        )
+    assert result["ok"] is new_mail_arrives, result
+    assert "邮箱历史快照 codes=0 message_ids=0" in caplog.text
+    assert len(calls) >= 4
+    if new_mail_arrives:
+        assert calls == [0, 1, 2, 3]
+        assert driver.submitted_codes == [("email", "012345")]
+        assert driver.password_values == ["Ab3!cdefgh123"]
+        resend.assert_not_called()
+    else:
+        assert result["code"] == "password_email_code_wait_failed"
+        assert driver.submitted_codes == driver.password_values == []
+        assert "password" not in result
+        resend.assert_called_once()
+    assert driver.clock.now <= 30
+    for sensitive in ("012345", "999999", "Ab3!cdefgh123", "private-mail-token"):
+        assert sensitive not in caplog.text
 
 
 @pytest.mark.parametrize("detail, expected, http_status", [

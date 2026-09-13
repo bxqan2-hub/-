@@ -1048,13 +1048,16 @@ def snapshot_current_otp(email: str, timeout: float = 8.0) -> str | None:
             verify=False,
         )
         if resp.status_code != 200:
+            logger.warning("[GenericAPI] stage=mail_snapshot http=%s timeout=%.1fs；后续按请求时间过滤",
+                           resp.status_code, request_timeout)
             return None
         text = resp.text or ""
         structured = _extract_structured_api_code(text, after_ts=None)
         inline = _extract_inline_messages_html_otp(text, after_ts=None)
         return structured[0] if structured else (inline[0] if inline else _extract_code(text))
     except Exception as exc:
-        logger.debug("[GenericAPI] 读取历史 OTP 快照失败，继续注册：type=%s", type(exc).__name__)
+        logger.warning("[GenericAPI] stage=mail_snapshot error_type=%s timeout=%.1fs；后续按请求时间过滤",
+                       type(exc).__name__, request_timeout)
         return None
     finally:
         try:
@@ -1343,7 +1346,9 @@ def fetch_latest_otp(
                 pass
             elif resp.status_code == 200:
                 no_code_reason = ""
-                structured = _extract_structured_api_code(text, after_ts=after_ts)
+                # Keep timestamp metadata until the common freshness gate below;
+                # a rejected structured response must not fall back to raw regex.
+                structured = _extract_structured_api_code(text, after_ts=None)
                 inline_html = bool(re.search(
                     r"<(?:article|div|a)\b[^>]*class=[\"'][^\"']*\b(?:mail-card|card|mail)\b",
                     text,
@@ -1374,6 +1379,15 @@ def fetch_latest_otp(
                     page_meta = _extract_generic_page_timestamp(text)
                     if page_meta:
                         structured_meta = {**structured_meta, **page_meta}
+                if (
+                    code and after_ts and structured_meta.get("msg_ts")
+                    and structured_meta.get("source") in {"generic_detail_page", "structured_api"}
+                    and float(structured_meta["msg_ts"]) + 2 < float(after_ts)
+                ):
+                    logger.debug("[GenericAPI] stage=mail_freshness source=%s skipped=before_request",
+                                 structured_meta["source"])
+                    code = None
+                    no_code_reason = "取码接口尚未出现本次请求之后的新验证码邮件"
                 if excluded_code_is_stale(code, structured_meta):
                     last_error = f"取码接口仍返回已被拒绝的旧验证码 {mask_otp(code)}"
                     logger.debug("[GenericAPI] 跳过已被 OpenAI 拒绝的旧 OTP=%s", mask_otp(code))
