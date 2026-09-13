@@ -482,6 +482,9 @@ def list_price_tiers(
                         continue
                     tiers.append({"provider_id": supplier_id, "price": float(price), "count": count,
                                   "rank": None, "within_budget": limit is None or price <= limit})
+                # 价格上限是购买条件，超出预算的档位不进入前端列表，避免出现灰色“买不了”行。
+                if limit is not None:
+                    tiers = [tier for tier in tiers if tier["within_budget"]]
                 if tiers:
                     meta = names.get(country_id, {})
                     grouped.append({"id": country_id, "name": meta.get("name") or f"国家 {country_id}",
@@ -490,6 +493,8 @@ def list_price_tiers(
             # HeroSMS 保持原 endpoint 和服务汇总口径，不冒充供应商档位。
             for item in list_affordable_countries(service=service_code, max_price="", http=http):
                 if country_filter and item["id"] != country_filter:
+                    continue
+                if limit is not None and Decimal(str(item["price"])) > limit:
                     continue
                 grouped.append({"id": item["id"], "name": item["name"], "iso": item["iso"], "tiers": [{
                     "provider_id": "", "price": item["price"], "count": item["count"], "rank": None,
