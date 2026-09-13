@@ -2410,6 +2410,12 @@
       </svg>
       <span class="sidebar-item-label">账号</span>
     </button>
+    <button type="button" data-tab="sms" class="sidebar-item">
+      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10M7 13h6"/>
+      </svg>
+      <span class="sidebar-item-label">接码中心</span>
+    </button>
     <button type="button" data-tab="extract" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M4 4h16v5H4zM4 15h16v5H4z"/><path d="M8 9v6M16 9v6"/>
@@ -2886,6 +2892,25 @@
         </table>
       </div>
       <div class="jobs-v2-pager" id="pager-mail-status-v2"></div>
+    </section>
+  </div>
+
+  <!-- ============ 接码中心 ============ -->
+  <div id="tab-sms" class="hidden">
+    <h1 class="register-title">接码中心</h1>
+    <section class="codex-panel-v2" style="padding:12px;margin-bottom:12px" aria-label="接码操作">
+      <strong>接码平台</strong>
+      <select id="smsCenterProviderV2" class="outlook-v2-native-select"><option value="herosms">HeroSMS</option><option value="smsbower">SMSBower</option></select>
+      <select id="smsCenterCountryV2" class="outlook-v2-native-select"><option value="auto">自动选国家</option></select>
+      <input id="smsCenterMaxPriceV2" value="0.15" placeholder="最高价" style="width:80px">
+      <button type="button" class="jobs-tb-btn" id="btnSmsCenterLoadV2">查询价格/库存</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSmsCenterApplyV2">应用平台与国家</button>
+      <button type="button" class="jobs-tb-btn" id="btnSmsCenterRefreshV2">刷新账号分组</button>
+      <span id="smsCenterStatusV2" class="config-card-v2-hint"></span>
+    </section>
+    <section class="accounts-panel-v2" style="padding:12px" aria-label="接码账号分组">
+      <div class="account-group-control"><span class="account-group-label">分组</span><select id="smsCenterGroupV2"><option value="">全部分组</option></select></div>
+      <div class="codex-table-v2-wrap"><table class="codex-table-v2"><thead><tr><th>邮箱</th><th>分组</th><th>2FA</th><th>Codex</th><th>状态</th></tr></thead><tbody id="smsCenterAccountsV2"></tbody></table></div>
     </section>
   </div>
 
@@ -8429,6 +8454,47 @@ async function loadCodexSmsOffersV2() {
     if (offersBox) offersBox.textContent = `查询失败：${err.message}`;
   }
 }
+async function loadSmsCenterAccountsV2() {
+  const group = $('#smsCenterGroupV2')?.value || '';
+  const result = await api(`/api/accounts?group=${encodeURIComponent(group)}&limit=500`);
+  const rows = Array.isArray(result) ? result : (result.items || []);
+  const body = $('#smsCenterAccountsV2');
+  if (!body) return;
+  body.innerHTML = rows.map(r => `<tr><td>${esc(r.email || '')}</td><td>${esc(group || '全部')}</td><td>${r.totp_enabled ? '已启用' : '-'}</td><td>${r.codex_agent_has_token ? '已授权' : '-'}</td><td>${esc(r.security_setup_status || r.codex_status || '-')}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">当前分组暂无账号</td></tr>';
+}
+async function loadSmsCenterGroupsV2() {
+  const result = await api('/api/account-groups');
+  const select = $('#smsCenterGroupV2');
+  if (!select) return;
+  select.innerHTML = '<option value="">全部分组</option><option value="default">默认组</option>' + (result.items || []).map(g => `<option value="${esc(g.id)}">${esc(g.name)} (${Number(g.count || 0)})</option>`).join('');
+  await loadSmsCenterAccountsV2();
+}
+async function loadSmsCenterOffersV2() {
+  const provider = $('#smsCenterProviderV2')?.value || 'herosms';
+  const country = $('#smsCenterCountryV2');
+  const status = $('#smsCenterStatusV2');
+  try {
+    const countries = await api(`/api/sms/countries?provider=${encodeURIComponent(provider)}`);
+    country.innerHTML = '<option value="auto">自动选国家</option>' + (countries.countries || []).map(c => `<option value="${esc(c.id)}">${esc(c.name)} (${esc(c.id)})</option>`).join('');
+    const price = $('#smsCenterMaxPriceV2')?.value || '0.15';
+    const prices = await api(`/api/sms/prices?provider=${encodeURIComponent(provider)}&service=dr&max_price=${encodeURIComponent(price)}`);
+    status.textContent = (prices.offers || []).map(o => `${o.name} ${o.price} / ${o.count}`).join('；') || '当前无库存';
+  } catch (err) { status.textContent = `查询失败：${err.message}`; }
+}
+async function applySmsCenterSettingsV2() {
+  const updates = {SMS_PROVIDER: $('#smsCenterProviderV2')?.value || 'herosms', SMS_COUNTRY: $('#smsCenterCountryV2')?.value || 'auto', SMS_MAX_PRICE: $('#smsCenterMaxPriceV2')?.value || '0.15'};
+  await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({updates})});
+  showToast(`已应用 ${updates.SMS_PROVIDER} / ${updates.SMS_COUNTRY}`);
+}
+(function bindSmsCenterV2() {
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  bind('btnSmsCenterLoadV2', loadSmsCenterOffersV2);
+  bind('btnSmsCenterApplyV2', applySmsCenterSettingsV2);
+  bind('btnSmsCenterRefreshV2', loadSmsCenterGroupsV2);
+  const group = document.getElementById('smsCenterGroupV2');
+  if (group) group.addEventListener('change', loadSmsCenterAccountsV2);
+  loadSmsCenterGroupsV2().catch(() => {});
+})();
 async function applyCodexSmsSettingsV2() {
   const updates = {
     SMS_PROVIDER: $('#codexSmsProviderV2')?.value || 'herosms',
