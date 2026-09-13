@@ -1179,6 +1179,69 @@ def build_codex_storage(token_resp: dict, id_claims: dict) -> dict:
     }
 
 
+def build_sub2api_oauth_account(storage: dict, *, email: str) -> dict:
+    """将已保存的 Codex OAuth 凭证转换为 Cockpit Tools 兼容的 sub2 accounts 条目。"""
+    if not isinstance(storage, dict) or storage.get("type", "codex") != "codex":
+        raise ValueError("需要完整 OAuth 凭证，非 callback 回执或 Agent Identity")
+    saved_email = str(storage.get("email") or "").strip()
+    if not saved_email or saved_email.casefold() != email.strip().casefold():
+        raise ValueError("凭证邮箱与所选账号不匹配")
+    credentials = {key: storage[key].strip() for key in ("access_token", "refresh_token", "id_token")
+                   if isinstance(storage.get(key), str) and storage[key].strip()}
+    if not credentials.get("access_token"):
+        raise ValueError("OAuth 凭证缺少 access_token，请先完成接码授权")
+    credentials["email"] = saved_email
+    if credentials.get("refresh_token"):
+        credentials["client_id"] = _cfg.CODEX_CLIENT_ID
+    claims = {}
+    access_exp = None
+    for key in ("id_token", "access_token"):
+        parts = credentials.get(key, "").split(".")
+        value = _decode_jwt_segment(parts[1]) if len(parts) > 1 else {}
+        if not isinstance(value, dict):
+            continue
+        profile = value.get("https://api.openai.com/profile") or {}
+        claimed_email = value.get("email") or (profile.get("email") if isinstance(profile, dict) else None)
+        if claimed_email and str(claimed_email).strip().casefold() != saved_email.casefold():
+            raise ValueError("Token 邮箱与所选账号不匹配")
+        auth_claim = value.get("https://api.openai.com/auth") or {}
+        claimed_account = auth_claim.get("chatgpt_account_id") if isinstance(auth_claim, dict) else None
+        if claimed_account and storage.get("account_id") and claimed_account != storage["account_id"]:
+            raise ValueError("Token 账号 ID 与保存的凭证不匹配")
+        if key == "access_token":
+            access_exp = value.get("exp")
+        claims.update(value)  # opaque token 保留原值；JWT 仅用于元数据解析，不作为验签结果。
+    auth = claims.get("https://api.openai.com/auth") or {}
+    auth = auth if isinstance(auth, dict) else {}
+    for key, value in {
+        "chatgpt_account_id": storage.get("account_id") or auth.get("chatgpt_account_id"),
+        "chatgpt_user_id": auth.get("chatgpt_user_id") or auth.get("user_id"),
+        "organization_id": auth.get("organization_id"),
+        "plan_type": auth.get("chatgpt_plan_type"),
+    }.items():
+        if isinstance(value, str) and value.strip():
+            credentials[key] = value.strip()
+    expiry = None
+    try:
+        if access_exp:
+            expiry = datetime.fromtimestamp(float(access_exp), timezone.utc)
+        elif storage.get("expired"):
+            expiry = datetime.fromisoformat(str(storage["expired"]).replace("Z", "+00:00"))
+            if expiry.tzinfo is None:
+                expiry = None
+    except (ValueError, TypeError, OverflowError, OSError):
+        pass
+    if expiry:
+        credentials["expires_at"] = expiry.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    item = {"name": saved_email, "platform": "openai", "type": "oauth",
+            "credentials": credentials, "concurrency": 3, "priority": 50}
+    if not credentials.get("refresh_token"):
+        if not expiry:
+            raise ValueError("仅 access_token 的凭证缺少明确过期时间")
+        item.update(expires_at=int(expiry.timestamp()), auto_pause_on_expired=True)
+    return item
+
+
 def _timedelta_seconds(seconds: int):
     from datetime import timedelta
     return timedelta(seconds=int(seconds))

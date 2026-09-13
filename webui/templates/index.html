@@ -2733,7 +2733,8 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnSmsCenterStartV2" disabled title="使用已保存的接码设置，为选中账号获取手机号和短信验证码">接码</button>
           <button type="button" class="jobs-tb-btn" id="btnSmsLogV2" title="查看所选账号或最近一次接码日志；也可用每行的日志按钮">日志</button>
           <span id="smsCenterProgressV2" class="sms-center-progress" role="status">尚未开始接码</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedCpaV2" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载CPA</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedCpaV2" disabled title="优先导出本地 OAuth 凭证，打包为 CPA 兼容 ZIP">导出 CPA</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnDownloadSelectedSub2V2" disabled title="将选中账号接码成功后的 OAuth 凭证导出为 sub2api JSON，不需要 Agent Token">导出 sub2</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" title="全局停止账号页面的所有后台操作：补密码/2FA、查活、查套餐、GCash/GoPay 资格、Checkout、OAICS、AT 和 Codex">全局停止</button>
         </div>
         <div class="acc-v2-btn-group">
@@ -5654,7 +5655,7 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnCheckSelectedPlansV2', 'btnCheckSelectedCheckoutKindV2', 'btnCheckSelectedQualificationsV2', 'btnCheckSelectedAccountMailV2',
    'btnExtractSelectedOaicsV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
-    'btnSmsCenterStartV2', 'btnDownloadSelectedCpaV2',
+    'btnSmsCenterStartV2', 'btnDownloadSelectedCpaV2', 'btnDownloadSelectedSub2V2',
     'btnCopySelectedCredentialsV2', 'btnCopySelectedCredentialsUrlV2', 'btnCopySelectedAccountMailboxV2', 'btnCopySelectedTokensV2', 'btnDownloadSelectedTxtV2',
     'btnArchiveSelectedAccountsV2', 'btnPurgeSelectedAccountsV2',
   ];
@@ -6614,25 +6615,27 @@ async function downloadSelectedAccountTxt() {
   showToast(`已下载 ${lines.length} 个账号 TXT`);
 }
 
-async function downloadSelectedCpa() {
+async function downloadSelectedCodex(format = 'cpa') {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
   const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const missingCodex = selectedAccounts.filter(a => (a.codex_status || '') !== 'success').length;
-  let msg = `确定从 CPA 下载选中的 ${ids.length} 个账号的 CPA/Codex JSON 吗？\n\n会按账号邮箱匹配 CPA auth-files，成功的文件会打包成 ZIP。`;
-  if (missingCodex) msg += `\n\n其中 ${missingCodex} 个账号本地 Codex 状态不是 success，若 CPA 端没有文件会写入 manifest 错误清单。`;
+  const isSub2 = format === 'sub2';
+  const label = isSub2 ? 'sub2' : 'CPA';
+  let msg = `导出选中的 ${ids.length} 个账号为 ${label} 格式？\n\n${isSub2 ? '读取本地接码回调凭证，生成可导入 sub2api 的 JSON；不读取 Agent Token。' : '本地完整凭证优先，缺失时查询 CPA；每个账号一个 JSON，打包为 ZIP。'}`;
+  if (missingCodex) msg += `\n\n其中 ${missingCodex} 个账号接码状态不是 success，缺少完整凭证的账号会跳过并报告。`;
   if (!confirm(msg)) return;
-  const btn = $('#btnDownloadSelectedCpaV2');
+  const btn = $(isSub2 ? '#btnDownloadSelectedSub2V2' : '#btnDownloadSelectedCpaV2');
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '下载中…';
   try {
-    // 先由服务端准备 ZIP，再用同源 GET 顶层下载。
+    // 共用原预生成下载链路，凭据仅进入下载文件，不放进普通 API 响应。
     // 这样比隐藏 iframe / blob URL 更像普通用户点击下载，Chrome 不容易挂起或标记“不安全下载”。
-    const r = await api('/api/accounts/download-cpa-bulk', {
+    const r = await api('/api/accounts/download-codex-bulk', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, prepare: true}),
+      body: JSON.stringify({account_ids: ids, format, prepare: true}),
     });
     if (!r.download_url) throw new Error('服务端未返回下载地址');
     const a = document.createElement('a');
@@ -6642,10 +6645,10 @@ async function downloadSelectedCpa() {
     document.body.appendChild(a);
     a.click();
     setTimeout(() => a.remove(), 1000);
-    showToast(`已生成 ZIP，开始下载${r.error_count ? `（${r.error_count} 个失败见 manifest）` : ''}`);
+    showToast(`已导出 ${r.added_count} 个账号为 ${label}${r.error_count ? `；${r.error_count} 个失败：${r.errors?.[0]?.error || '缺少完整凭证'}` : ''}`);
     setTimeout(loadCodex, 1200);
   } catch(err) {
-    showToast('下载 CPA 失败: ' + err.message);
+    showToast(`导出 ${label} 失败: ` + err.message);
   } finally {
     setTimeout(() => {
       btn.textContent = old;
@@ -7361,7 +7364,8 @@ async function findSelectedAccountsInEmailPool() {
   bind('btnGenerateSelectedAgentV2', generateSelectedCodexAgents);
   bind('btnDownloadSelectedAgentV2', downloadSelectedCodexAgents);
   bind('btnUploadSelectedAgentSub2V2', uploadSelectedCodexAgentSub2);
-  bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
+  bind('btnDownloadSelectedCpaV2', () => downloadSelectedCodex('cpa'));
+  bind('btnDownloadSelectedSub2V2', () => downloadSelectedCodex('sub2'));
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnCopySelectedCredentialsV2', copySelectedAccountPasswordTwoFa);
   bind('btnCopySelectedCredentialsUrlV2', e => copySelectedAccountPasswordTwoFa(e, true));

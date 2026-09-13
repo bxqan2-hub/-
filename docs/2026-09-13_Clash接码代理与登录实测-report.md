@@ -92,3 +92,12 @@ Roxy 官方文档的 open 示例列有 headless，但同页说明启动参数 `-
    ```
 
 8. **未做/存疑**：短信交付端具体故障未定因；没有收到有效短信，callback/Token 保存/CPA/sub2 导出未实测；换号后的远端授权恢复未验证；真正无头按用户确认暂缓；其他浏览器后端与注册复用 Profile 未实测；取消已确认但实际账单金额未核对。保留原有三项无关 untracked 路径，不纳入提交。
+
+## 回调成功后的 OAuth 导出修复（2026-09-13）
+
+- 根因：账号页原来的 `上传 sub2` 只处理 Agent Identity；接码回调保存的是 Codex OAuth storage，因此回调成功后没有对应的 OAuth sub2 导出入口。旧 CPA 批量下载还优先依赖远端 CPA，导致本地刚保存的回调凭证没有形成统一导出链。
+- 修复：账号页保留原选择框和按钮风格，新增蓝色“导出 sub2”，与“导出 CPA”共用 `/api/accounts/download-codex-bulk`。本地 `codex-*.json` 优先读取；CPA 输出兼容 ZIP，sub2 输出 `sub2api-data` v1 JSON，字段按 Cockpit Tools 的 OAuth 格式生成。Agent Identity 上传路径未改。
+- 身份边界：导出前逐个校验账号邮箱、Token 中的邮箱和 `chatgpt_account_id`；sub2 保留 access/refresh/id token、client_id、过期时间及公开账号元数据，不导出密码、TOTP 或其他数据库字段。没有完整本地 OAuth 时，sub2 不调用远端；CPA 才保留旧远端 CPA 兼容回退。
+- 实测：账号 ID 255 `cubit_betel9d@icloud.com` 使用已完成回调的本地文件生成 `accounts-sub2-20260913-100927.json`（1 个 OAuth 账号，三类 Token 字段齐全）和 `accounts-cpa-20260913-100927.zip`（凭证 JSON + manifest），下载 HTTP 200，内容与本地凭证语义一致；未重新接码、未产生新扣费。
+- 验证：OAuth 导出/API 测试 46 passed；内联 JavaScript `node --check` 通过；选中账号后两个导出按钮按选择状态启用，导出接口不触发 SMS 请求。生成文件位于 Git 忽略的 `codex_accounts/`。
+- 当前边界：本次只验证文件生成和 schema，不向第三方 sub2 服务执行导入；Roxy 真无头仍按用户先前选择暂缓。

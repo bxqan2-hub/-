@@ -421,3 +421,10 @@
 - 修复失效授权页仍空等/补提交、页面核验晚于取号、平台日志写死 HeroSMS；回归 142 passed / 9 subtests。密码 checkpoint、MFA activate 成功门禁与 Token 边界未改。
 - Roxy 152 实测忽略无头参数；用户选择保留 Roxy、暂缓真正无头。保留现有参数但跳过接码可见窗口居中，不把配置 True 当作无头成功。完整证据、上游 hash、安全复核及 R8 见 `docs/2026-09-13_Clash接码代理与登录实测-report.md`。
 - 用户要求修复后再次正式复测：17:21:48–17:25:03，一个任务沿原两次配置取号 2 次，仍未收到短信。invalid_auth_step 本次及时终止，未再空等 120 秒；真实短信交付及后续回调未通过，结果与取消核对追加同一报告，不自动扩大付费次数。
+
+## OAuth sub2 导出对照与实测（2026-09-13）
+
+- 接码成功后保存的 `core/codex_oauth.py:build_codex_storage` 是完整 OAuth storage；固定 GPT 上游 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 raw `core/codex_oauth.py` 已复核，SHA256 `289ad64b1fc91d3d7fcd0eba2895986754e63b8d0c313d6f8bf895ca32544cba`。本地只新增格式转换，不改变上游授权/Token 交换。
+- Cockpit Tools 对照固定 commit `cc4a3f4a1573143f8551fa27825aec443e2df09f` 的 `src/utils/codexExportFormats.ts`，SHA256 `b47b24e78b0a033533f9525c37ff42576ad66311e9b77bc65a6fc0e8cf215558`。本地 `build_sub2api_oauth_account` 生成同一 `sub2api-data` v1 OAuth schema，保留 refresh token，access token-only 仅在有明确 expiry 时允许。
+- `webui/app.py:api_accounts_download_codex_bulk` 替代旧 CPA-only endpoint：账号页选择 → format → 本地 OAuth 读取/身份校验 → CPA ZIP 或 sub2 JSON → 一次性 prepared download。旧 `/api/accounts/download-cpa-bulk` 与旧 handler 已删除；Agent Identity 生成/上传接口不变。
+- 实测账号 ID 255 已生成并下载 sub2 与 CPA 文件，HTTP 200；本地三类 Token 身份对照通过，导出 metadata 不含 Token。定向测试 `tests/test_codex_oauth_export.py`、WebUI helper、retry logging 共 46 passed，inline JavaScript syntax 通过。

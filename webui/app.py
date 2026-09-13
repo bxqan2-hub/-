@@ -2856,168 +2856,141 @@ def create_app(auth_code: str | None = None) -> Flask:
             },
         )
 
-    @app.post("/api/accounts/download-cpa-bulk")
-    def api_accounts_download_cpa_bulk():
-        """
-        从账号列表选中的账号直接到 CPA auth-files 下载 Codex CPA JSON，并打包为 ZIP。
-        Body: {"account_ids": [1,2,...]} 或 {"ids": [...]}
-        """
+    @app.post("/api/accounts/download-codex-bulk")
+    def api_accounts_download_codex_bulk():
+        """按选中账号导出 OAuth：本地凭证优先，CPA ZIP 或 sub2 JSON。"""
         import io
-        import json as _json
         import zipfile
-        from datetime import datetime as _dt
-        from core.codex_oauth import download_cpa_codex_auth_text, list_cpa_codex_auth_files
+        from datetime import datetime, timezone
+        from core.codex_oauth import (
+            build_sub2api_oauth_account, download_cpa_codex_auth_text, list_cpa_codex_auth_files,
+        )
 
         data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求内容应为对象"}), 400
         if not data and request.form:
-            ids_text = (request.form.get("account_ids") or request.form.get("ids") or "").strip()
             try:
-                ids = _json.loads(ids_text) if ids_text else []
-            except Exception:
-                ids = [x.strip() for x in ids_text.split(",") if x.strip()]
+                ids = json.loads(request.form.get("account_ids") or request.form.get("ids") or "[]")
+            except ValueError:
+                return jsonify({"ok": False, "error": "account_ids 应为 JSON 数组"}), 400
+            export_format = request.form.get("format") or "cpa"
         else:
             ids = data.get("account_ids") or data.get("ids") or []
-        if not isinstance(ids, list) or not ids:
-            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
-        if len(ids) > 1000:
-            return jsonify({"ok": False, "error": "单次最多下载 1000 个账号"}), 400
+            export_format = data.get("format") or "cpa"
+        if export_format not in ("cpa", "sub2"):
+            return jsonify({"ok": False, "error": "导出格式应为 cpa 或 sub2"}), 400
+        if not isinstance(ids, list) or not ids or len(ids) > 1000:
+            return jsonify({"ok": False, "error": "account_ids 应包含 1–1000 个账号 ID"}), 400
 
-        try:
-            cpa_files = list_cpa_codex_auth_files()
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"读取 CPA auth-files 失败: {type(exc).__name__}: {exc}"}), 502
-
-        def _match_cpa_file(email: str, local_filename: str = "") -> dict | None:
-            """在已缓存的 CPA 文件列表中匹配，避免每个账号都重新请求 auth-files。"""
-            email_l = str(email or "").strip().lower()
-            local_name_l = str(local_filename or "").strip().lower()
-            local_stem_l = local_name_l[:-5] if local_name_l.endswith(".json") else local_name_l
-
-            def score(item: dict) -> int:
-                name_l = str(item.get("name") or "").lower()
-                item_email_l = str(item.get("email") or "").lower()
-                s = 0
-                if local_name_l and name_l == local_name_l:
-                    s = max(s, 100)
-                if local_stem_l and name_l.startswith(local_stem_l):
-                    s = max(s, 80)
-                if email_l and item_email_l == email_l:
-                    s = max(s, 70)
-                if email_l and email_l in name_l:
-                    s = max(s, 60)
-                if local_stem_l.endswith("-cpa-callback"):
-                    base = local_stem_l[:-len("-cpa-callback")]
-                    if base and name_l.startswith(base + "-"):
-                        s = max(s, 75)
-                return s
-
-            ranked = sorted(((score(item), item) for item in cpa_files), key=lambda x: x[0], reverse=True)
-            return ranked[0][1] if ranked and ranked[0][0] > 0 else None
-
-        # 建立 email -> 本地 codex 文件名索引；有本地文件名时传给 CPA 匹配逻辑可提升命中率。
-        local_by_email: dict[str, str] = {}
-        try:
-            for item in db.list_codex_accounts():
-                email_key = str(item.get("email") or "").strip().lower()
-                fname = str(item.get("filename") or "").strip()
-                if email_key and fname and email_key not in local_by_email:
-                    local_by_email[email_key] = fname
-        except Exception:
-            local_by_email = {}
-
-        errors = []
-        added = []
-        used_names = set()
-        seen_ids = set()
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for raw_id in ids:
-                try:
-                    acc_id = int(raw_id)
-                except (TypeError, ValueError):
-                    errors.append({"id": raw_id, "error": "ID 非法"})
-                    continue
-                if acc_id in seen_ids:
-                    continue
-                seen_ids.add(acc_id)
-
-                acc = db.get_account(acc_id)
-                if not acc:
-                    errors.append({"id": acc_id, "error": "账号不存在"})
-                    continue
-                email = str(acc.get("email") or "").strip()
-                if not email:
-                    errors.append({"id": acc_id, "error": "账号缺少 email"})
-                    continue
-
-                local_filename = local_by_email.get(email.lower(), "")
-                try:
-                    meta = _match_cpa_file(email=email, local_filename=local_filename)
-                    cpa_name_hint = str((meta or {}).get("name") or "").strip()
-                    if not cpa_name_hint:
-                        raise RuntimeError(f"[Codex][CPA] 未在 CPA auth-files 中找到匹配的 Codex 凭证: {email}")
-                    cpa_text, cpa_name, meta = download_cpa_codex_auth_text(
-                        cpa_name=cpa_name_hint,
-                    )
-                    arcname = cpa_name
+        local_by_email = {}
+        for item in db.list_codex_accounts():
+            email_key = str(item.get("email") or "").strip().casefold()
+            if email_key and item.get("filename"):
+                local_by_email.setdefault(email_key, []).append(item["filename"])
+        cpa_files = None
+        errors, added, documents, sub2_accounts = [], [], [], []
+        seen_ids, used_names = set(), set()
+        for raw_id in ids:
+            if not str(raw_id).isascii() or not str(raw_id).isdigit() or int(raw_id) <= 0:
+                errors.append({"id": raw_id, "error": "ID 非法"})
+                continue
+            acc_id = int(raw_id)
+            if acc_id in seen_ids:
+                continue
+            seen_ids.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc or not str(acc.get("email") or "").strip():
+                errors.append({"id": acc_id, "error": "账号不存在或缺少邮箱"})
+                continue
+            email = str(acc["email"]).strip()
+            local_filename, filename, storage = "", "", None
+            try:
+                for candidate in local_by_email.get(email.casefold(), []):
+                    content, candidate_name = db.read_codex_credential(candidate)
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict) and parsed.get("type", "codex") == "codex" and parsed.get("access_token"):
+                        local_filename = filename = candidate_name
+                        storage = parsed
+                        break
+                if storage is None:
+                    # sub2 文件只转换本地 OAuth；旧 CPA 记录保留远端文件读取能力。
+                    if export_format != "cpa":
+                        raise ValueError("本地没有完整 OAuth 凭证")
+                    if cpa_files is None:
+                        cpa_files = list_cpa_codex_auth_files()
+                    meta = next((item for item in cpa_files
+                                 if str(item.get("email") or "").strip().casefold() == email.casefold()), None)
+                    if meta is None:
+                        prefix = f"codex-{email.casefold()}"
+                        meta = next((item for item in cpa_files
+                                     if str(item.get("name") or "").casefold() == prefix + ".json"
+                                     or any(str(item.get("name") or "").casefold() == f"{prefix}-{plan}.json"
+                                            for plan in ("free", "plus", "team", "pro", "enterprise"))), None)
+                    if not meta or not meta.get("name"):
+                        raise ValueError("未找到对应邮箱的 CPA 文件")
+                    content, filename, _ = download_cpa_codex_auth_text(cpa_name=meta["name"])
+                    storage = json.loads(content)
+                # 同时验证本地/远端凭证与所选账号身份；不从 Agent Token 字段取值。
+                sub2_account = build_sub2api_oauth_account(storage, email=email)
+                if export_format == "sub2":
+                    sub2_accounts.append(sub2_account)
+                else:
+                    portable = {key: storage.get(key, "") for key in (
+                        "id_token", "access_token", "refresh_token", "account_id", "last_refresh",
+                        "email", "type", "expired",
+                    )}
+                    portable["type"] = "codex"
+                    arcname = str(filename).replace("\\", "/").rsplit("/", 1)[-1]
+                    if not arcname.startswith("codex-") or not arcname.endswith(".json"):
+                        arcname = f"codex-{acc_id}.json"
                     if arcname in used_names:
-                        stem, dot, ext = arcname.rpartition(".")
-                        arcname = f"{stem or arcname}-{len(used_names)+1}{dot}{ext}" if dot else f"{arcname}-{len(used_names)+1}"
+                        arcname = f"codex-{acc_id}.json"
                     used_names.add(arcname)
-                    zf.writestr(arcname, cpa_text)
-                    added.append({
-                        "id": acc_id,
-                        "email": email,
-                        "local_filename": local_filename,
-                        "cpa_filename": cpa_name,
-                        "cpa_meta": meta,
-                    })
-                    if local_filename:
-                        try:
-                            db.mark_codex_exported(local_filename)
-                        except Exception:
-                            pass
-                except Exception as exc:
-                    errors.append({"id": acc_id, "email": email, "error": f"{type(exc).__name__}: {exc}"})
-
-            manifest = {
-                "exported_at": _dt.now().isoformat(timespec="seconds"),
-                "source": "accounts-cpa",
-                "count": len(added),
-                "files": added,
-                "errors": errors,
-            }
-            zf.writestr("manifest.json", _json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
-
+                    documents.append((arcname, json.dumps(portable, ensure_ascii=False, indent=2) + "\n"))
+                added.append({"id": acc_id, "email": email, "filename": filename})
+                if local_filename:
+                    try:
+                        db.mark_codex_exported(local_filename)
+                    except Exception as exc:
+                        logger.warning("[Codex 导出] 导出计数更新失败 account_id=%s error_type=%s",
+                                       acc_id, type(exc).__name__)
+            except Exception as exc:
+                errors.append({"id": acc_id, "email": email,
+                               "error": f"导出失败（{type(exc).__name__}）；请确认存在完整且邮箱匹配的 OAuth 凭证"})
         if not added:
-            return jsonify({"ok": False, "error": "没有成功从 CPA 下载任何凭证", "errors": errors}), 502
-        now = _dt.now()
-        dl_name = f"accounts-cpa-bulk-{now.strftime('%Y%m%d-%H%M%S')}.zip"
-        buf.seek(0)
-        zip_bytes = buf.getvalue()
-        if isinstance(data, dict) and data.get("prepare"):
-            download_id = _put_prepared_download(zip_bytes, dl_name, "application/zip")
-            return jsonify({
-                "ok": True,
-                "prepared": True,
-                "download_id": download_id,
-                "download_url": f"/api/downloads/{download_id}",
-                "filename": dl_name,
-                "added_count": len(added),
-                "error_count": len(errors),
-            })
-        return Response(
-            zip_bytes,
-            mimetype="application/zip",
-            headers={
-                "Content-Disposition": f'attachment; filename="{dl_name}"',
-                "Content-Length": str(len(zip_bytes)),
-                "Cache-Control": "no-store, max-age=0",
-                "Pragma": "no-cache",
-                "X-Content-Type-Options": "nosniff",
-                "X-Download-Options": "noopen",
-            },
-        )
+            return jsonify({"ok": False, "error": "没有可导出的完整 OAuth 凭证", "errors": errors}), 404
+
+        now = datetime.now(timezone.utc)
+        if export_format == "sub2":
+            payload = {"type": "sub2api-data", "version": 1,
+                       "exported_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "proxies": [], "accounts": sub2_accounts}
+            content_bytes = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            mimetype, extension = "application/json", "json"
+        else:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for filename, content in documents:
+                    zf.writestr(filename, content)
+                zf.writestr("manifest.json", json.dumps({
+                    "exported_at": now.isoformat(timespec="seconds"), "source": "accounts-codex-cpa",
+                    "count": len(added), "files": added, "errors": errors,
+                }, ensure_ascii=False, indent=2) + "\n")
+            content_bytes, mimetype, extension = buf.getvalue(), "application/zip", "zip"
+        dl_name = f"accounts-{export_format}-{now.strftime('%Y%m%d-%H%M%S')}.{extension}"
+        logger.info("[Codex 导出] format=%s selected=%s exported=%s failed=%s",
+                    export_format, len(seen_ids), len(added), len(errors))
+        if data.get("prepare"):
+            download_id = _put_prepared_download(content_bytes, dl_name, mimetype)
+            return jsonify({"ok": True, "prepared": True, "download_id": download_id,
+                            "download_url": f"/api/downloads/{download_id}", "filename": dl_name,
+                            "added_count": len(added), "error_count": len(errors), "errors": errors})
+        return Response(content_bytes, mimetype=mimetype, headers={
+            "Content-Disposition": f'attachment; filename="{dl_name}"',
+            "Content-Length": str(len(content_bytes)), "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache", "X-Content-Type-Options": "nosniff", "X-Download-Options": "noopen",
+        })
 
     # ----------------------------------------------------------
     # 邮箱池
