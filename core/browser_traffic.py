@@ -624,19 +624,14 @@ class RoxyTrafficOptimizer:
                             request_stage=devtools.fetch.RequestStage.REQUEST,
                         ))
                 for suffix in TELEMETRY_SUFFIXES + OPTIONAL_IDENTITY_SUFFIXES:
-                    for resource in resource_types + (
-                        devtools.network.ResourceType.XHR,
-                        devtools.network.ResourceType.FETCH,
-                        devtools.network.ResourceType.SCRIPT,
-                        devtools.network.ResourceType.STYLESHEET,
-                        devtools.network.ResourceType.DOCUMENT,
-                        devtools.network.ResourceType.OTHER,
-                    ):
-                        for host_pattern in (f"https://{suffix}/*", f"https://*.{suffix}/*"):
-                            patterns.append(devtools.fetch.RequestPattern(
-                                url_pattern=host_pattern, resource_type=resource,
-                                request_stage=devtools.fetch.RequestStage.REQUEST,
-                            ))
+                    for host_pattern in (f"https://{suffix}/*", f"https://*.{suffix}/*"):
+                        # A URL-only pattern covers XHR/fetch/script/document
+                        # variants and avoids a large per-resource pattern
+                        # matrix that older Roxy CDP builds reject.
+                        patterns.append(devtools.fetch.RequestPattern(
+                            url_pattern=host_pattern,
+                            request_stage=devtools.fetch.RequestStage.REQUEST,
+                        ))
             self._devtools = devtools
             self._connection = connection
             connection.add_callback(devtools.fetch.RequestPaused, self._on_request_paused)

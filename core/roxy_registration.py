@@ -234,6 +234,11 @@ def _finish_traffic_optimizer(optimizer: RoxyTrafficOptimizer | None) -> dict:
             json.dumps(dict(list((summary.get("by_path") or {}).items())[:5]), ensure_ascii=False, separators=(",", ":")),
             summary.get("degraded_reason") or "none",
         )
+        if summary.get("errors"):
+            logger.warning(
+                "[Roxy流量] install/runtime errors=%s",
+                json.dumps(summary.get("errors") or [], ensure_ascii=False, separators=(",", ":")),
+            )
         return summary
     except Exception as exc:
         logger.warning("[Roxy流量] 汇总失败，注册结果不受影响：%s: %s", type(exc).__name__, exc)

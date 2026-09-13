@@ -165,6 +165,11 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
                     self.assertIn("https://chatgpt.com/*", urls)
                     self.assertIn("https://statsigapi.net/*", urls)
                     self.assertIn("https://*.statsigapi.net/*", urls)
+                    self.assertTrue(any(
+                        p.kwargs["url_pattern"] == "https://statsigapi.net/*"
+                        and p.kwargs.get("resource_type") is None
+                        for p in patterns
+                    ))
                 self.assertTrue(all(p.kwargs["request_stage"] == optimizer._devtools.fetch.RequestStage.REQUEST for p in patterns))
                 for pattern in patterns:
                     self.assertEqual(pattern.kwargs["request_stage"], optimizer._devtools.fetch.RequestStage.REQUEST)

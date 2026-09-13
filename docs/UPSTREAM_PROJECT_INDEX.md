@@ -436,3 +436,4 @@
 - 共享缓存范围、Profile 隔离、Cookie/Authorization/Set-Cookie 门禁、session/Token/密码/2FA 流程未改；低流量关闭或注册恢复时，Fetch 仍按原路径禁用并恢复联网。
 - Fetch pattern 与唯一 `block_reason` 共用同一判定，避免再增加第二套 URL 黑名单；查询串、片段、编码/路径穿越资源继续放行，遥测与可选身份域允许正常带查询参数被拦截。
 - 验证：`tests/test_browser_traffic.py` 通过 `42 passed, 204 subtests`；注册/代理/OTP/Session 相关回归通过 `144 passed, 230 subtests`。尚未启动真实注册批次，不把单元回归等同于代理账单下降。
+- 19:36 真实批次发现旧版 Roxy CDP 拒绝过大的按资源类型 pattern 矩阵，造成 `candidates=0/hits=0/errors=1`；现将遥测与可选身份域改为 URL-only pattern，并在流量汇总中输出详细安装错误，保留一方资源按类型匹配。
