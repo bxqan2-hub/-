@@ -13,6 +13,7 @@ from config import roxybrowser as _roxy_cfg
 from core.email_provider import wait_for_otp
 from core.humanize import delay as human_delay
 from core import sms_provider
+from core.browser_exit_geo import probe_proxy_exit_geo
 from core.openai_auth import AccountUnusableError, detect_account_unusable_response_body
 from core.roxybrowser_client import RoxyBrowserClient
 from core.roxy_registration import (
@@ -446,6 +447,37 @@ def _resolve_codex_local_proxy(proxy: str | None = None) -> str:
         raise RuntimeError("Codex 接码要求使用本地代理，但 PROXY_POOL/系统代理中未找到本地代理")
     logger.info("[Codex][Browser] 接码/Codex 回退使用本地静态/系统代理：%s", local_proxy)
     return local_proxy
+
+
+def _preflight_codex_proxy(proxy: str) -> dict:
+    """在创建 Roxy Profile 前确认 Codex/接码代理真的可用。
+
+    Codex 补跑此前直接打开 Profile；本地端口失效时浏览器才返回
+    ``ERR_PROXY_CONNECTION_FAILED``，既浪费 Profile 又没有留下明确阶段。
+    复用注册流程的出口探针，在浏览器启动前完成一次真实 HTTP 代理检查。
+    """
+    proxy_url = str(proxy or "").strip()
+    if not proxy_url:
+        raise RuntimeError("stage=proxy_transport; Codex 授权前未解析到本地代理")
+    attempts = max(1, min(3, int(getattr(_roxy_cfg, "ROXY_PROXY_PREFLIGHT_ATTEMPTS", 1) or 1)))
+    geo = probe_proxy_exit_geo(
+        proxy_url,
+        label="Codex代理预检",
+        attempts=attempts,
+        retry_delay=float(getattr(_roxy_cfg, "ROXY_PROXY_PREFLIGHT_RETRY_DELAY", 0.5) or 0.5),
+    )
+    if not str(geo.get("ip") or "").strip():
+        raise RuntimeError(
+            "stage=proxy_transport; Codex 授权前本地代理预检失败；"
+            f"proxy={proxy_url}，请检查代理端口监听和上游出口"
+        )
+    logger.info(
+        "[Codex][Browser] 代理预检通过：proxy=%s exit_ip=%s country=%s",
+        proxy_url,
+        geo.get("ip"),
+        geo.get("country") or "-",
+    )
+    return geo
 
 
 def _install_email_otp_validate_hook(driver) -> None:
@@ -1589,6 +1621,13 @@ def run_roxy_codex_oauth(
     from core import codex_oauth as proto
 
     proxy = _resolve_codex_local_proxy(proxy)
+    if not reuse_existing_profile:
+        try:
+            _preflight_codex_proxy(proxy)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {str(exc)[:220]}"
+            logger.error("[Codex][Browser] 授权前代理预检失败：%s", message)
+            return proto._codex_result(status="failed", email=email, message=message)
 
     max_rounds = 2
     last_result = None
