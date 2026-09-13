@@ -34,5 +34,6 @@
 
 - 原 `/api/sms/prices` 传入 `service=dr`，平台只返回 OpenAI 单一报价，因此界面看不到截图中的多行级别。现对 SMSBower 元数据查询使用 `getPricesV3&service=dr`，解析完整的 `country → provider_id → price/count` 结构；等级字段按 API 实际返回，未返回时明确显示。
 - 新增 `core.sms_provider.list_price_tiers`，保留原 `offers` 兼容字段，同时返回 `countries[].tiers[]`；价格上限与库存过滤仍在服务端执行，取号/短信轮询路径不变。
+- 接码中心的“选此档”会写入 `SMSBOWER_PROVIDER_ID`，并要求固定国家；后端随后向 SMSBower `getNumber` 透传 `providerIds`，避免页面选中的供应商与实际取号脱节。
 - 接码中心改为国家卡片 + 价格档位表，显示级别/服务、ID、库存、成本，并提供“选择国家”按钮；国家下拉始终保留自动项和 API 返回的手动国家项。
 - 直连实测 SMSBower `getPricesV3&service=dr` 返回 122 个国家、1,725 个供应商档位；美国国家 ID 187 返回 19 档。上限 0.15 时界面保留全部档位并标注“超预算”，不再把高价供应商静默隐藏。
