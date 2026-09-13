@@ -3807,13 +3807,14 @@ function debounce(fn, wait=250) {
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','extract','codex','outlook','config'];
+  const allowed = ['register','accounts','sms','extract','codex','outlook','config'];
   if (!allowed.includes(tab)) tab = 'register';
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   window.scrollTo({top: 0, left: 0, behavior: 'auto'});
   if (tab === 'accounts') { loadAccounts(); loadAtValiditySchedule(); }
+  if (tab === 'sms') { loadSmsCenterGroupsV2(); }
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
