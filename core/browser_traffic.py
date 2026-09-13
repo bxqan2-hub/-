@@ -610,19 +610,23 @@ class RoxyTrafficOptimizer:
                 # Pause optional first-party resources and known telemetry /
                 # social-login hosts.  The handler keeps challenge and auth
                 # paths live, so the broad patterns do not become a second
-                # security or session classifier.
-                resource_types = (
-                    devtools.network.ResourceType.IMAGE,
-                    devtools.network.ResourceType.MEDIA,
-                    devtools.network.ResourceType.FONT,
-                    devtools.network.ResourceType.MANIFEST,
-                )
+                # security or session classifier.  Use a URL-only manifest
+                # pattern: older Roxy/CDP builds reject the Manifest resource
+                # enum and then discard every Fetch rule.
                 for host in LOW_TRAFFIC_FIRST_PARTY_HOSTS:
-                    for resource in resource_types:
+                    for resource in (
+                        devtools.network.ResourceType.IMAGE,
+                        devtools.network.ResourceType.MEDIA,
+                        devtools.network.ResourceType.FONT,
+                    ):
                         patterns.append(devtools.fetch.RequestPattern(
                             url_pattern=f"https://{host}/*", resource_type=resource,
                             request_stage=devtools.fetch.RequestStage.REQUEST,
                         ))
+                    patterns.append(devtools.fetch.RequestPattern(
+                        url_pattern=f"https://{host}/*manifest*",
+                        request_stage=devtools.fetch.RequestStage.REQUEST,
+                    ))
                 for suffix in TELEMETRY_SUFFIXES + OPTIONAL_IDENTITY_SUFFIXES:
                     for host_pattern in (f"https://{suffix}/*", f"https://*.{suffix}/*"):
                         # A URL-only pattern covers XHR/fetch/script/document

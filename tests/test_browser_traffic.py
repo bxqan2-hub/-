@@ -162,7 +162,12 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
                     self.assertTrue(any(p.kwargs["url_pattern"] == "https://chatgpt.com/cdn/assets/*" for p in patterns))
                 if low_traffic:
                     urls = {p.kwargs["url_pattern"] for p in patterns}
-                    self.assertIn("https://chatgpt.com/*", urls)
+                    self.assertIn("https://chatgpt.com/*manifest*", urls)
+                    self.assertTrue(any(
+                        p.kwargs["url_pattern"] == "https://chatgpt.com/*manifest*"
+                        and p.kwargs.get("resource_type") is None
+                        for p in patterns
+                    ))
                     self.assertIn("https://statsigapi.net/*", urls)
                     self.assertIn("https://*.statsigapi.net/*", urls)
                     self.assertTrue(any(

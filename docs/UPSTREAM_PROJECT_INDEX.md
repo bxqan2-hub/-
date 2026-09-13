@@ -436,4 +436,11 @@
 - 共享缓存范围、Profile 隔离、Cookie/Authorization/Set-Cookie 门禁、session/Token/密码/2FA 流程未改；低流量关闭或注册恢复时，Fetch 仍按原路径禁用并恢复联网。
 - Fetch pattern 与唯一 `block_reason` 共用同一判定，避免再增加第二套 URL 黑名单；查询串、片段、编码/路径穿越资源继续放行，遥测与可选身份域允许正常带查询参数被拦截。
 - 验证：`tests/test_browser_traffic.py` 通过 `42 passed, 204 subtests`；注册/代理/OTP/Session 相关回归通过 `144 passed, 230 subtests`。尚未启动真实注册批次，不把单元回归等同于代理账单下降。
-- 19:36 真实批次发现旧版 Roxy CDP 拒绝过大的按资源类型 pattern 矩阵，造成 `candidates=0/hits=0/errors=1`；现将遥测与可选身份域改为 URL-only pattern，并在流量汇总中输出详细安装错误，保留一方资源按类型匹配。
+- 19:36 真实批次发现旧版 Roxy CDP 拒绝过大的按资源类型 pattern 矩阵，造成 `candidates=0/hits=0/errors=1`；后续日志进一步确认是 `Manifest` 枚举被拒绝；现移除该枚举，保留 image/media/font 类型 pattern，manifest 使用 URL-only pattern，再由 `block_reason()` 二次判定，并在流量汇总中输出详细安装错误。
+## 本次 Roxy 流量 Fetch 兼容性核对（2026-09-13）
+
+- 现场日志：`注册日志/d9d46d0e-4af4-4770-b7b1-125f170a254b.log`、`注册日志/0f3b87e0-1c8b-4f20-8826-5636346c2910.log` 等。共同证据为 `candidates=0 hits=0 misses=0 blocked=0 errors=1`，安装错误为 `Unknown resource type in fetch filter: 'Manifest'`；因此 `Fetch.enable` 整体未安装，约 10 MiB 回源字节全部按实时网络下载。
+- 对照锁定上游 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `vendor/turb_gpt_free_register/core/browser_traffic.py`：Roxy 低流量规则采用 URL pattern，未把 `Manifest` 资源枚举加入 Fetch filter；静态资源缓存按 JS/CSS 和一方 Host 过滤。
+- 本地修改：`core/browser_traffic.py::RoxyTrafficOptimizer._install_fetch_cache` 移除不兼容的 `Manifest` 枚举；ChatGPT/Auth/CDN 一方 image/media/font 继续使用已支持的资源类型 pattern，manifest 使用 URL-only `*manifest*` pattern，再由既有 `block_reason()` 二次判定路径、查询串和安全白名单；遥测/可选身份域保持 URL-only。没有新增第二套拦截器，也没有改变 2FA 的认证请求。
+- 2FA 复核：重新读取上游 `core/account_export.py`，本地 `setup_2fa_from_selenium` 与上游保持邮箱匹配、同一 driver、显式 `access_token`、`/backend-api/accounts/mfa/enroll` → TOTP → `activate_enrollment` 且仅 `success=true` 保存 Secret 的顺序。
+- 验证：`tests/test_browser_traffic.py tests/test_roxy_registration_otp_recovery.py tests/test_roxy_registration_session_recovery.py tests/test_registration_local_proxy_mode.py` 共 `144 passed, 230 subtests passed`。下一批真实批次以 `errors=[]`、`candidates>0`、`blocked_by_reason` 和热缓存 `hits` 验收。
