@@ -938,6 +938,8 @@
     }
     .account-sms-action:hover:not(:disabled) { color: #fff; background: #377dff; border-color: #377dff; }
     .account-sms-action:disabled { color: #909399; background: #f4f4f5; border-color: #e4e7ed; cursor: not-allowed; }
+    .account-sms-actions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .account-sms-log { color:#64748b; background:#f8fafc; border-color:#cbd5e1; }
     .accounts-table-v2 input[type="checkbox"] {
       width: 16px !important; height: 16px !important;
       min-width: 16px !important; min-height: 16px !important;
@@ -1490,63 +1492,22 @@
     .codex-table-v2 .acc-v2-more-menu button.good { color: #166534; }
     .codex-panel-v2 .jobs-v2-pager { border-top: 1px solid #ebeef5; }
 
-    /* ---- 接码中心 ---- */
-    .sms-center-control-panel, .sms-center-accounts-panel {
-      border: 1px solid #ebeef5; border-radius: 12px; background: #fff;
-      box-shadow: 0 4px 16px rgba(31,42,68,.05); overflow: hidden; margin-bottom: 16px;
-    }
-    .sms-center-control-panel { padding: 20px; background: linear-gradient(135deg,#ffffff 0%,#f8fbff 100%); }
-    .sms-center-panel-head, .sms-center-list-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
-    .sms-center-panel-head h2, .sms-center-list-head h2 { margin:0; color:#303133; font-size:17px; }
-    .sms-center-panel-head p, .sms-center-list-head p { margin:6px 0 0; color:#909399; font-size:12px; line-height:1.5; }
-    .sms-center-status { padding:6px 10px; border-radius:999px; color:#606266; background:#f5f7fa; font-size:12px; white-space:nowrap; }
-    .sms-center-fields { display:grid; grid-template-columns:repeat(3,minmax(180px,1fr)); gap:14px; margin-top:18px; }
+    /* ---- 接码设置（账号页弹窗） ---- */
+    .sms-center-status { padding:6px 10px; border-radius:7px; color:#606266; background:#f5f7fa; font-size:12px; overflow-wrap:anywhere; }
     .sms-center-field { display:flex; flex-direction:column; gap:6px; color:#606266; font-size:13px; font-weight:600; }
-    .sms-center-field select, .sms-center-field input, .sms-center-group-picker select { width:100%; min-height:36px; padding:0 10px; border:1px solid #dcdfe6; border-radius:7px; background:#fff; color:#303133; font:inherit; box-sizing:border-box; }
-    .sms-center-field select:focus, .sms-center-field input:focus, .sms-center-group-picker select:focus { border-color:#409eff; outline:2px solid rgba(64,158,255,.15); }
+    .sms-center-field select, .sms-center-field input { width:100%; min-height:36px; padding:0 10px; border:1px solid #dcdfe6; border-radius:7px; background:#fff; color:#303133; font:inherit; box-sizing:border-box; }
+    .sms-center-field select:focus, .sms-center-field input:focus { border-color:#409eff; outline:2px solid rgba(64,158,255,.15); }
     .sms-center-field small { color:#a0a4ad; font-size:11px; font-weight:400; line-height:1.35; }
-    .sms-center-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; padding-top:16px; border-top:1px solid #f0f2f5; }
+    .sms-center-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:18px; padding-top:16px; border-top:1px solid #f0f2f5; }
     .sms-center-actions .jobs-tb-btn { min-height:36px; padding:0 14px; border-radius:7px; }
-    .sms-center-actions .jobs-tb-btn:not(.jobs-tb-btn--primary):not(.jobs-tb-btn--good) { background:#fff; color:#475569; border-color:#cbd5e1; }
     .sms-center-actions .jobs-tb-btn--primary { background:#377dff; color:#fff; border-color:#377dff; box-shadow:0 3px 8px rgba(55,125,255,.22); }
     .sms-center-actions .jobs-tb-btn--good { background:#19be6b; color:#fff; border-color:#19be6b; box-shadow:0 3px 8px rgba(25,190,107,.2); }
     .sms-center-actions .jobs-tb-btn:hover:not(:disabled) { filter:brightness(.96); transform:translateY(-1px); }
     .sms-center-progress { align-self:center; min-height:32px; padding:7px 10px; border-radius:7px; background:#f0f9ff; color:#2563eb; font-size:12px; line-height:18px; }
-    .sms-center-offer-list { min-height:38px; max-height:720px; overflow:auto; margin-top:14px; padding:10px 12px; border:1px dashed #dcdfe6; border-radius:8px; background:#fafbfc; color:#909399; font-size:12px; line-height:1.6; }
-    .sms-center-offer { display:inline-flex; align-items:center; gap:7px; margin:3px 8px 3px 0; padding:4px 9px; border:1px solid #d9ecff; border-radius:6px; background:#ecf5ff; color:#337ecc; }
-    .sms-tier-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:12px; margin-top:2px; }
-    .sms-country-card { border:1px solid #b7e4d1; border-radius:12px; overflow:hidden; background:linear-gradient(145deg,#ecfff6,#f7fbff); box-shadow:0 3px 10px rgba(31,42,68,.06); }
-    .sms-country-head { display:flex; align-items:center; gap:10px; padding:12px 14px; color:#fff; background:linear-gradient(135deg,#269c68,#2878c8); }
-    .sms-country-flag { width:32px; height:32px; display:grid; place-items:center; border-radius:50%; background:rgba(255,255,255,.2); font-size:20px; }
-    .sms-country-title { flex:1; min-width:0; } .sms-country-title strong { display:block; font-size:15px; } .sms-country-title small { opacity:.85; font-size:11px; }
-    .sms-country-select { border:0; border-radius:6px; padding:6px 9px; color:#17613f; background:#e9fff4; cursor:pointer; font-weight:600; }
-    .sms-tier-table { width:100%; border-collapse:collapse; font-size:12px; color:#435466; }
-    .sms-tier-table th { padding:8px 10px; text-align:left; color:#6b8496; background:rgba(255,255,255,.65); font-weight:600; }
-    .sms-tier-table td { padding:8px 10px; border-top:1px solid rgba(121,185,157,.25); }
-    .sms-tier-badge { display:inline-block; min-width:58px; padding:3px 7px; border-radius:999px; text-align:center; color:#fff; background:linear-gradient(#d89055,#a74d2d); font-size:11px; }
-    .sms-tier-select { border:1px solid #409eff; border-radius:6px; padding:4px 8px; color:#2563eb; background:#eff6ff; cursor:pointer; }
-    .sms-tier-badge:nth-child(even) { background:linear-gradient(#aab5c0,#75818d); }
-    .sms-tier-price { display:inline-block; min-width:64px; padding:6px 8px; border-radius:7px; text-align:center; color:#fff; background:#ff9517; font-weight:700; }
-    .sms-tier-stock.low { color:#d97706; } .sms-tier-empty { padding:18px; text-align:center; color:#8b98a7; }
-    .sms-country-summary { padding:4px; } .sms-summary-title { padding:8px 10px 10px; color:#334155; font-weight:700; } .sms-summary-title small { margin-left:8px; color:#94a3b8; font-weight:400; }
-    .sms-summary-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:6px; } .sms-summary-row { display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; width:100%; padding:9px 10px; border:1px solid #dbeafe; border-radius:8px; background:#fff; color:#475569; text-align:left; cursor:pointer; } .sms-summary-row:hover { border-color:#60a5fa; background:#eff6ff; } .sms-summary-row strong { grid-column:1 / -1; color:#f97316; font-size:12px; }
-    .sms-center-accounts-panel { padding:0; background:#fff; }
-    .sms-center-list-head { padding:18px 20px; border-bottom:1px solid #ebeef5; }
-    .sms-center-group-picker { display:flex; align-items:center; gap:8px; color:#606266; font-size:13px; white-space:nowrap; }
-    .sms-center-group-picker select { min-width:210px; }
-    .sms-center-account-table { min-width:1120px; }
-    .sms-center-account-table th, .sms-center-account-table td { white-space:normal; vertical-align:top; }
-    .sms-center-account-table .sms-cell-profile { min-width:170px; }
-    .sms-center-account-table .sms-cell-security { min-width:220px; }
-    .sms-center-account-table .sms-cell-plan { min-width:190px; }
-    .sms-center-account-table .sms-cell-status { min-width:140px; }
-    .sms-center-account-table tbody tr:hover > td { background:#f5f9ff; }
-    .sms-center-account-table .sms-center-group-badge + .acc-v2-email { margin-top:2px; }
-    .sms-center-group-badge { display:inline-flex; margin-bottom:6px; padding:3px 8px; border-radius:999px; background:#f0f5ff; color:#377dff; font-size:11px; font-weight:600; }
-    .sms-center-account-table .sms-center-field, .sms-center-account-table .acc-v2-sub { white-space:normal; }
-    @media (max-width: 850px) { .sms-center-fields { grid-template-columns:1fr 1fr; } .sms-center-panel-head, .sms-center-list-head { flex-direction:column; } .sms-center-group-picker { width:100%; } .sms-center-group-picker select { flex:1; } }
-    @media (max-width: 560px) { .sms-center-fields { grid-template-columns:1fr; } .sms-center-control-panel { padding:14px; } }
-
+    #smsSettingsModal .sms-settings-dialog { width:min(760px,100%); }
+    .sms-settings-grid { display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:12px; }
+    .sms-settings-summary { margin-top:14px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:8px; background:#f8fafc; color:#475569; font-size:12px; line-height:1.6; }
+    @media (max-width: 560px) { .sms-settings-grid { grid-template-columns:1fr; } }
 
     /* ---- 邮箱池 ---- */
     .outlook-panel-v2 {
@@ -1846,6 +1807,7 @@
     #atQualificationModal:not(.hidden),
     #qualificationQueryModal:not(.hidden),
     #proxyApiImportModal:not(.hidden),
+    #smsSettingsModal:not(.hidden),
     #detectionProxyImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
@@ -2467,12 +2429,6 @@
       </svg>
       <span class="sidebar-item-label">账号</span>
     </button>
-    <button type="button" data-tab="sms" class="sidebar-item">
-      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10M7 13h6"/>
-      </svg>
-      <span class="sidebar-item-label">接码中心</span>
-    </button>
     <button type="button" data-tab="extract" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M4 4h16v5H4zM4 15h16v5H4z"/><path d="M8 9v6M16 9v6"/>
@@ -2773,7 +2729,10 @@
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">停止 / 接码 / Codex</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRetrySelectedCodexV2" disabled title="所选账号重新登录收邮箱 OTP，HeroSMS 自动选择 0.15 上限内的国家和号码，绑定手机后完成 Codex OAuth">一键接码所选账号</button>
+          <button type="button" class="jobs-tb-btn" id="btnSmsSettingsV2" title="设置接码平台、国家选择、供应商和价格">接码设置</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnSmsCenterStartV2" disabled title="使用已保存的接码设置，为选中账号获取手机号和短信验证码">接码</button>
+          <button type="button" class="jobs-tb-btn" id="btnSmsLogV2" title="查看所选账号或最近一次接码日志；也可用每行的日志按钮">日志</button>
+          <span id="smsCenterProgressV2" class="sms-center-progress" role="status">尚未开始接码</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedCpaV2" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载CPA</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" title="全局停止账号页面的所有后台操作：补密码/2FA、查活、查套餐、GCash/GoPay 资格、Checkout、OAICS、AT 和 Codex">全局停止</button>
         </div>
@@ -2952,43 +2911,9 @@
     </section>
   </div>
 
-  <!-- ============ 接码中心 ============ -->
-  <div id="tab-sms" class="hidden">
-    <h1 class="register-title">接码中心</h1>
-    <section class="sms-center-control-panel" aria-label="接码参数与操作">
-      <div class="sms-center-panel-head"><div><h2>接码任务设置</h2><p>先查询国家价格和库存，再选择国家并应用设置。自动模式会按价格优先尝试有库存国家。</p></div><span class="sms-center-status" id="smsCenterStatusV2">等待查询</span></div>
-      <div class="sms-center-fields">
-        <label class="sms-center-field"><span>接码平台</span><select id="smsCenterProviderV2"><option value="herosms">HeroSMS（现有平台）</option><option value="smsbower">SMSBower（第二平台）</option></select><small>两个平台使用各自的 API 地址和 Key。</small></label>
-        <label class="sms-center-field"><span>国家选择模式</span><select id="smsCenterCountryModeV2"><option value="auto">自动选择（按价格和库存）</option><option value="manual">手动选择国家</option></select><small>自动按预算轮询；手动模式使用下方国家 ID。</small></label>
-        <label class="sms-center-field"><span>国家</span><select id="smsCenterCountryV2" disabled><option value="auto">自动分配</option></select><small>选择国家卡片中的“选择国家”即可写入。</small></label>
-        <label class="sms-center-field"><span>服务项目</span><select id="smsCenterServiceV2"><option value="dr">OpenAI（dr）</option></select><small>平台 service 固定为 OpenAI 的 dr。</small></label>
-        <label class="sms-center-field"><span>供应商档位</span><select id="smsCenterSupplierV2"><option value="">自动分配供应商</option></select><small>SMSBower 的供应商 ID；价格和库存来自同一档位。</small></label>
-        <label class="sms-center-field"><span>最高单价</span><input id="smsCenterMaxPriceV2" value="0.15" inputmode="decimal"><small>平台币种单个号码最高价格，例如 0.15。</small></label>
-        <label class="sms-center-field"><span>单号等待时间</span><input id="smsCenterWaitV2" type="number" value="120" min="10"><small>号码分配后最多等待短信多少秒。</small></label>
-        <label class="sms-center-field"><span>轮询间隔</span><input id="smsCenterPollV2" type="number" value="5" min="1"><small>每隔多少秒查询一次短信状态。</small></label>
-      </div>
-      <div class="sms-center-actions"><button type="button" class="jobs-tb-btn" id="btnSmsCenterLoadV2">查询国家价格与库存</button><button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSmsCenterApplyV2">保存并应用设置</button><button type="button" class="jobs-tb-btn" id="btnSmsCenterRefreshV2">刷新账号与分组</button><button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnSmsCenterStartV2">开始接码（选中账号）</button><span id="smsCenterProgressV2" class="sms-center-progress" role="status">尚未开始接码</span></div>
-      <div class="sms-center-offer-list" id="smsCenterOfferListV2"><span>国家价格/库存结果会显示在这里</span></div>
-    </section>
-    <section class="accounts-panel-v2 sms-center-accounts-panel" aria-label="接码账号分组">
-      <div class="sms-center-list-head"><div><h2>选择账号</h2><p>账号资料与账号页面保持一致；勾选后点击上方“开始接码”。</p></div><label class="sms-center-group-picker"><span>账号分组</span><select id="smsCenterGroupV2"><option value="">全部分组</option></select></label></div>
-      <div class="codex-table-v2-wrap"><table class="codex-table-v2 sms-center-account-table"><thead><tr><th class="col-check"><input type="checkbox" id="smsCenterSelectAllV2" title="全选当前页"></th><th>账号 / 出口</th><th>资料</th><th>安全与 2FA</th><th>套餐与资格</th><th>Codex / 状态</th></tr></thead><tbody id="smsCenterAccountsV2"></tbody></table></div>
-      <div class="jobs-v2-pager" id="pager-sms-center-v2"></div>
-    </section>
-  </div>
-
   <!-- ============ Codex 授权 ============ -->
   <div id="tab-codex" class="hidden">
     <h1 class="register-title">Codex 授权</h1>
-    <section class="codex-panel-v2" aria-label="SMSBower 接码选择" style="margin-bottom:12px;padding:12px;">
-      <strong>手机号平台与国家</strong>
-      <select id="codexSmsProviderV2" class="outlook-v2-native-select" style="margin-left:8px"><option value="herosms">HeroSMS</option><option value="smsbower">SMSBower</option></select>
-      <select id="codexSmsCountryV2" class="outlook-v2-native-select" style="margin-left:8px"><option value="auto">自动选国家</option></select>
-      <input id="codexSmsMaxPriceV2" type="text" value="0.15" placeholder="最高价" style="width:80px;margin-left:8px">
-      <button type="button" class="jobs-tb-btn" id="btnLoadCodexSmsPricesV2">查询国家价格/库存</button>
-      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnApplyCodexSmsV2">应用到接码流程</button>
-      <span id="codexSmsOffersV2" class="config-card-v2-hint" style="margin-left:8px"></span>
-    </section>
     <div class="codex-stats-v2" id="codexStatsV2" aria-label="Codex 统计">
       <div class="codex-stat-card codex-stat-card--total">
         <div class="codex-stat-icon" aria-hidden="true">
@@ -3217,6 +3142,35 @@
 </main>
 
 <div id="toast"></div>
+<div id="smsSettingsModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="smsSettingsTitle">
+  <div class="outlook-import-dialog sms-settings-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="smsSettingsTitle">接码设置</h3>
+        <p>保存后，在账号页面勾选账号并点击“接码”即可执行。国家和价格仅显示摘要信息。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseSmsSettings" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="sms-settings-grid">
+        <label class="sms-center-field"><span>接码平台</span><select id="smsCenterProviderV2"><option value="herosms">HeroSMS（现有平台）</option><option value="smsbower">SMSBower（第二平台）</option></select><small>平台 API 和 Key 按各自配置使用。</small></label>
+        <label class="sms-center-field"><span>国家选择</span><select id="smsCenterCountryModeV2"><option value="auto">自动选择（价格/库存优先）</option><option value="manual">手动选择国家</option></select></label>
+        <label class="sms-center-field"><span>国家</span><select id="smsCenterCountryV2" disabled><option value="auto">自动分配</option></select></label>
+        <label class="sms-center-field"><span>服务</span><select id="smsCenterServiceV2"><option value="dr">OpenAI（dr）</option></select></label>
+        <label class="sms-center-field"><span>供应商 / 价格 / 库存</span><select id="smsCenterSupplierV2"><option value="">自动分配</option></select><small>手动选择国家后可选档位；等级按接口实际返回显示。</small></label>
+        <label class="sms-center-field"><span>最高单价（平台币）</span><input id="smsCenterMaxPriceV2" value="0.15" inputmode="decimal"></label>
+        <label class="sms-center-field"><span>单号等待（秒）</span><input id="smsCenterWaitV2" type="number" value="120" min="10"></label>
+        <label class="sms-center-field"><span>轮询间隔（秒）</span><input id="smsCenterPollV2" type="number" value="5" min="1"></label>
+      </div>
+      <div class="sms-settings-summary" id="smsCenterOfferListV2">点击“查询价格/库存”查看摘要。</div>
+      <div class="sms-center-actions">
+        <button type="button" class="jobs-tb-btn" id="btnSmsCenterLoadV2">查询价格/库存</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSmsCenterApplyV2">保存并关闭</button>
+        <span id="smsCenterStatusV2" class="sms-center-status" role="status">等待查询</span>
+      </div>
+    </div>
+  </div>
+</div>
 <div id="outlookImportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="outlookImportTitle">
   <div class="outlook-import-dialog" role="document">
     <div class="outlook-import-head">
@@ -3501,10 +3455,9 @@ let ACCOUNT_OPERATION_CONTROLLER = new AbortController();
 let ACCOUNT_OPERATION_STOPPING = false;
 const GROUP_ACCOUNT_REFRESH_INTERVAL_MS = 10000;
 let lastGroupedAccountRefreshAt = 0;
-let SMS_CENTER_TOTAL = 0;
-const SMS_CENTER_SELECTED = new Set();
 const SMS_CENTER_ACTIVE = new Set();
 let smsCenterProgressTimer = null;
+let smsSettingsOffers = null, smsSettingsRequest = 0;
 
 // ---------- 分页状态 ----------
 function savedPagerSize(id, fallback = 20) {
@@ -3521,7 +3474,6 @@ const PAGERS = {
   outlook:  { page: 1, size: savedPagerSize('outlook') },
   'mail-status': { page: 1, size: savedPagerSize('mail-status') },
   codex:    { page: 1, size: savedPagerSize('codex') },
-  'sms-center': { page: 1, size: savedPagerSize('sms-center', 30) },
 };
 const PAGER_DRAFT_SIZES = Object.create(null);
 
@@ -3547,14 +3499,13 @@ function _renderPager(id, total) {
   const el = document.getElementById('pager-' + id);
   if (el) el.innerHTML = html;
 
-  if (id === 'jobs' || id === 'accounts' || id === 'plus' || id === 'codex' || id === 'outlook' || id === 'mail-status' || id === 'sms-center') {
+  if (id === 'jobs' || id === 'accounts' || id === 'plus' || id === 'codex' || id === 'outlook' || id === 'mail-status') {
     const elV2 = document.getElementById(
       id === 'jobs' ? 'pager-jobs-v2'
         : id === 'accounts' ? 'pager-accounts-v2'
         : id === 'plus' ? 'pager-plus-v2'
         : id === 'codex' ? 'pager-codex-v2'
         : id === 'mail-status' ? 'pager-mail-status-v2'
-        : id === 'sms-center' ? 'pager-sms-center-v2'
         : 'pager-outlook-v2'
     );
     if (elV2) {
@@ -3563,7 +3514,6 @@ function _renderPager(id, total) {
         : id === 'plus' ? 'plusPagerSize'
         : id === 'codex' ? 'codexPagerSize'
         : id === 'mail-status' ? 'mailStatusPagerSize'
-        : id === 'sms-center' ? 'smsCenterPagerSize'
         : 'outlookPagerSize';
       const v2Sizes = [10, 20, 30, 50, 100];
       const pages = [];
@@ -3644,7 +3594,6 @@ function pagerGoTo(id, page) {
     : id === 'outlook' ? OUTLOOK_TOTAL
     : id === 'codex' ? CODEX_TOTAL
     : id === 'mail-status' ? MAIL_STATUS_TOTAL
-    : id === 'sms-center' ? SMS_CENTER_TOTAL
     : (p.size || 20);
   const totalPages = Math.max(1, Math.ceil(Number(total || 0) / p.size) || 1);
   p.page = Math.max(1, Math.min(parseInt(page, 10) || 1, totalPages));
@@ -3655,7 +3604,7 @@ function pagerJump(id, val) {
 }
 
 function _reloadPagedList(id) {
-  ({ jobs: refreshJobs, accounts: loadAccounts, plus: loadPlusAccounts, outlook: loadOutlook, codex: loadCodex, 'mail-status': loadMailStatus, 'sms-center': loadSmsCenterAccountsV2 })[id]?.();
+  ({ jobs: refreshJobs, accounts: loadAccounts, plus: loadPlusAccounts, outlook: loadOutlook, codex: loadCodex, 'mail-status': loadMailStatus })[id]?.();
 }
 function pagerGo(id, dir) {
   PAGERS[id].page = Math.max(1, PAGERS[id].page + dir);
@@ -3878,14 +3827,13 @@ function debounce(fn, wait=250) {
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','sms','extract','codex','outlook','config'];
+  const allowed = ['register','accounts','extract','codex','outlook','config'];
   if (!allowed.includes(tab)) tab = 'register';
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   window.scrollTo({top: 0, left: 0, behavior: 'auto'});
   if (tab === 'accounts') { loadAccounts(); loadAtValiditySchedule(); }
-  if (tab === 'sms') { loadSmsCenterGroupsV2(); loadSmsCenterOffersV2(); }
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
@@ -4188,6 +4136,7 @@ function updateModalScrollLock() {
     || !$('#atQualificationModal').classList.contains('hidden')
     || !$('#qualificationQueryModal').classList.contains('hidden')
     || !$('#proxyApiImportModal').classList.contains('hidden')
+    || !$('#smsSettingsModal').classList.contains('hidden')
     || !$('#detectionProxyImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
@@ -5588,14 +5537,15 @@ function _accountCreatedCell(r) {
 }
 function _smsOauthAction(r) {
   const status = String(r.codex_status || '').toLowerCase();
+  const log = `<button type="button" class="account-sms-action account-sms-log" data-codex-log="${attrEsc(r.email)}" title="查看该账号最近一次接码/Codex日志">日志</button>`;
   if (status === 'deactivated') {
-    return '<button type="button" class="account-sms-action" disabled>已废号</button>';
+    return `<div class="account-sms-actions"><button type="button" class="account-sms-action" disabled>已废号</button>${log}</div>`;
   }
   if (status === 'retrying') {
-    return '<button type="button" class="account-sms-action" disabled>接码中</button>';
+    return `<div class="account-sms-actions"><button type="button" class="account-sms-action" disabled>接码中</button>${log}</div>`;
   }
-  return `<button type="button" class="account-sms-action" data-codex-retry="${attrEsc(r.email)}"
-    title="重新登录收邮箱 OTP，HeroSMS 自动选国家绑手机并完成 Codex OAuth">接码授权</button>`;
+  return `<div class="account-sms-actions"><button type="button" class="account-sms-action" data-codex-retry="${attrEsc(r.email)}"
+    title="重新登录收邮箱 OTP，按接码设置获取手机号并完成 Codex OAuth">接码授权</button>${log}</div>`;
 }
 function renderAccounts() {
   const total = ACCOUNTS_TOTAL;
@@ -5704,7 +5654,7 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnCheckSelectedPlansV2', 'btnCheckSelectedCheckoutKindV2', 'btnCheckSelectedQualificationsV2', 'btnCheckSelectedAccountMailV2',
    'btnExtractSelectedOaicsV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
-    'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2',
+    'btnSmsCenterStartV2', 'btnDownloadSelectedCpaV2',
     'btnCopySelectedCredentialsV2', 'btnCopySelectedCredentialsUrlV2', 'btnCopySelectedAccountMailboxV2', 'btnCopySelectedTokensV2', 'btnDownloadSelectedTxtV2',
     'btnArchiveSelectedAccountsV2', 'btnPurgeSelectedAccountsV2',
   ];
@@ -5735,6 +5685,7 @@ let retryLogEmail = null, retryLogTimer = null;
 
 function openRetryLog(email) {
   retryLogEmail = email;
+  $('#btnSmsLogV2').dataset.email = email;
   $('#retryLogEmail').textContent = email;
   $('#retryLogPanel').classList.remove('hidden');
   updateModalScrollLock();
@@ -6196,7 +6147,7 @@ async function onAccountsBodyClick(e) {
   const btn = e.target.closest('[data-codex-retry]');
   if (!btn) return;
   const email = btn.dataset.codexRetry;
-  if (!confirm(`接码并获取 Codex OAuth？\n\n${email}\n\n流程：\n  • 重新登录并自动收 1 封邮箱 OTP\n  • HeroSMS 自动选择单价不超过 0.15 的最低价有库存国家和号码\n  • 绑定手机并获取短信验证码\n  • 完成 Codex OAuth，生成或提交 CPA JSON\n\n任务会在后台进行（约 1-2 分钟），完成后状态自动更新。`)) return;
+  if (!confirm(`接码并获取 Codex OAuth？\n\n${email}\n\n流程：\n  • 重新登录并自动收 1 封邮箱 OTP\n  • 按账号页“接码设置”选择平台、国家和价格\n  • 绑定手机并获取短信验证码\n  • 完成 Codex OAuth，生成或提交 CPA JSON\n\n任务会在后台进行（约 1-2 分钟），完成后状态自动更新。`)) return;
   btn.disabled = true;
   try {
     const r = await api('/api/codex/retry', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email}) });
@@ -7303,50 +7254,6 @@ async function stopSelectedCodex() {
   }
 }
 
-async function retrySelectedCodex() {
-  const ids = Array.from(ACCOUNT_SELECTED);
-  if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const workers = getCodexBulkWorkers();
-  const workersElV2 = $('#codexBulkWorkersV2');
-  if (workersElV2) workersElV2.value = workers;
-  const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
-  const retryingCount = selectedAccounts.filter(a => (a.codex_status || '') === 'retrying').length;
-  const deactivatedCount = selectedAccounts.filter(a => (a.codex_status || '') === 'deactivated').length;
-  let msg = `一键接码并获取所选 ${ids.length} 个账号的 Codex OAuth？
-
-并发线程数：${workers}
-
-每个账号将自动执行：
-  • 重新登录并收取邮箱 OTP
-  • HeroSMS 选择单价不超过 0.15 的最低价有库存国家和号码
-  • 绑定手机并获取短信验证码
-  • 完成 Codex OAuth，生成或提交 CPA JSON`;
-  if (retryingCount || deactivatedCount) msg += `
-
-其中：补跑中 ${retryingCount} 个、已废号 ${deactivatedCount} 个会自动跳过。`;
-  if (!confirm(msg)) return;
-  const btn = $('#btnRetrySelectedCodexV2');
-  if (!btn) return;
-  btn.disabled = true;
-  try {
-    const r = await api('/api/codex/retry-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, workers}),
-    });
-    const skippedCount = (r.skipped || []).length;
-    showToast(skippedCount ? `已开始 ${r.started_count || 0} 个，跳过 ${skippedCount} 个` : (r.message || '已开始批量补跑'));
-    loadAccounts();
-    const first = (r.started || [])[0];
-    if (first && first.email) openRetryLog(first.email);
-    const poll = setInterval(loadAccounts, 5000);
-    setTimeout(() => clearInterval(poll), 10 * 60 * 1000);
-  } catch(err) {
-    showToast('批量补跑失败: ' + err.message);
-    updateAccountSelectionUi();
-  }
-}
-
 async function copyCurrentPageLines() {
   const ids = ACCOUNTS.map(r => Number(r.id));
   if (!ids.length) { showToast('当前页没有账号'); return; }
@@ -7454,7 +7361,6 @@ async function findSelectedAccountsInEmailPool() {
   bind('btnGenerateSelectedAgentV2', generateSelectedCodexAgents);
   bind('btnDownloadSelectedAgentV2', downloadSelectedCodexAgents);
   bind('btnUploadSelectedAgentSub2V2', uploadSelectedCodexAgentSub2);
-  bind('btnRetrySelectedCodexV2', retrySelectedCodex);
   bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnCopySelectedCredentialsV2', copySelectedAccountPasswordTwoFa);
@@ -8509,112 +8415,77 @@ async function codexDeleteBulk() {
     _codexUpdateSelectedHint();
   }
 }
-async function loadCodexSmsOffersV2() {
-  const provider = $('#codexSmsProviderV2')?.value || 'herosms';
-  const countrySelect = $('#codexSmsCountryV2');
-  const offersBox = $('#codexSmsOffersV2');
-  try {
-    const countries = await api(`/api/sms/countries?provider=${encodeURIComponent(provider)}`);
-    if (countrySelect && Array.isArray(countries.countries)) {
-      countrySelect.innerHTML = '<option value="auto">自动选择（按价格和库存）</option>' + countries.countries.map(c => `<option value="${esc(c.id)}">手动：${esc(c.name)}（ID ${esc(c.id)}）</option>`).join('');
-    }
-    const maxPrice = $('#codexSmsMaxPriceV2')?.value || '0.15';
-    const selected = countrySelect?.value && countrySelect.value !== 'auto' ? `&country=${encodeURIComponent(countrySelect.value)}` : '';
-    const prices = await api(`/api/sms/prices?provider=${encodeURIComponent(provider)}&service=dr&max_price=${encodeURIComponent(maxPrice)}${selected}`);
-    if (offersBox) offersBox.innerHTML = (prices.offers || []).map(o => `<span class="sms-center-offer"><b>${esc(o.name)}</b><span>ID ${esc(o.id)}</span><span>价格 ${esc(o.price)}</span><span>库存 ${esc(o.count)}</span></span>`).join('') || '<span>当前价格上限内无库存，请提高最高单价或切换平台。</span>';
-  } catch (err) {
-    if (offersBox) offersBox.textContent = `查询失败：${err.message}`;
-  }
-}
-async function loadSmsCenterAccountsV2() {
-  const group = $('#smsCenterGroupV2')?.value || '';
-  const p = PAGERS['sms-center'];
-  const result = await api(`/api/accounts?group=${encodeURIComponent(group)}&paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=all`);
-  const rows = Array.isArray(result) ? result : (result.items || []);
-  SMS_CENTER_TOTAL = Number(result.total || rows.length || 0);
-  const totalPages = Math.max(1, Math.ceil(SMS_CENTER_TOTAL / p.size));
-  if (p.page > totalPages) { p.page = totalPages; return loadSmsCenterAccountsV2(); }
-  const body = $('#smsCenterAccountsV2');
-  if (!body) return;
-  body.innerHTML = rows.map(r => `<tr>
-    <td class="col-check"><input type="checkbox" class="sms-center-account-v2" value="${esc(r.id)}" title="选择此账号"${SMS_CENTER_SELECTED.has(Number(r.id)) ? ' checked' : ''}></td>
-    <td class="col-email"><div class="acc-v2-email">#${esc(r.id)} · ${esc(r.email || '-')}</div>${_registrationExitIpLine(r)}${_registrationTrafficLine(r)}</td>
-    <td class="sms-cell-profile"><div class="sms-center-group-badge">${esc(window.SMS_CENTER_GROUP_NAMES_V2?.[String(r.email || '').toLowerCase()] || (group || '默认组'))}</div>${_profileCell(r)}</td>
-    <td class="sms-cell-security">${_twoFaCellV2(r)}</td>
-    <td class="sms-cell-plan">${_planAndMailCell(r)}${_qualificationBadges(r)}</td>
-    <td class="sms-cell-status">${_codexCellV2(r)}<div class="acc-v2-sub">${esc(r.security_setup_status || '安全设置未运行')}</div>${_smsOauthAction(r)}</td>
-  </tr>`).join('') || '<tr><td colspan="6" class="muted" style="text-align:center;padding:32px">当前分组暂无账号</td></tr>';
-  body.querySelectorAll('.sms-center-account-v2').forEach(cb => cb.addEventListener('change', () => {
-    const id = Number(cb.value);
-    if (cb.checked) SMS_CENTER_SELECTED.add(id); else SMS_CENTER_SELECTED.delete(id);
-    updateSmsCenterSelectionUi();
-  }));
-  updateSmsCenterSelectionUi();
-  _renderPager('sms-center', SMS_CENTER_TOTAL);
-}
-function updateSmsCenterSelectionUi() {
-  const checkboxes = Array.from(document.querySelectorAll('.sms-center-account-v2'));
-  const selectedOnPage = checkboxes.filter(cb => cb.checked).length;
-  const selectAll = $('#smsCenterSelectAllV2');
-  if (selectAll) {
-    selectAll.checked = checkboxes.length > 0 && selectedOnPage === checkboxes.length;
-    selectAll.indeterminate = selectedOnPage > 0 && selectedOnPage < checkboxes.length;
-    selectAll.disabled = checkboxes.length === 0;
-  }
-  const progress = $('#smsCenterProgressV2');
-  if (progress && !SMS_CENTER_ACTIVE.size) progress.textContent = SMS_CENTER_SELECTED.size ? `已选择 ${SMS_CENTER_SELECTED.size} 个账号` : '尚未开始接码';
-}
-async function loadSmsCenterGroupsV2() {
-  const result = await api('/api/account-groups');
-  const select = $('#smsCenterGroupV2');
-  if (!select) return;
-  window.SMS_CENTER_GROUP_NAMES_V2 = {};
-  (result.items || []).forEach(g => (g.emails || []).forEach(email => { window.SMS_CENTER_GROUP_NAMES_V2[String(email).toLowerCase()] = g.name; }));
-  select.innerHTML = '<option value="">全部分组</option><option value="default">默认组</option>' + (result.items || []).map(g => `<option value="${esc(g.id)}">${esc(g.name)} (${Number(g.count || 0)})</option>`).join('');
-  await loadSmsCenterAccountsV2();
-}
 async function loadSmsCenterOffersV2() {
-  const provider = $('#smsCenterProviderV2')?.value || 'herosms';
-  const country = $('#smsCenterCountryV2'); const mode = $('#smsCenterCountryModeV2');
-  const supplier = $('#smsCenterSupplierV2'); const status = $('#smsCenterStatusV2');
+  const requestId = ++smsSettingsRequest;
+  const provider = $('#smsCenterProviderV2').value;
+  const country = $('#smsCenterCountryV2');
+  const previousCountry = country.value || 'auto';
+  const status = $('#smsCenterStatusV2');
+  const price = $('#smsCenterMaxPriceV2').value.trim();
+  smsSettingsOffers = null;
+  $('#btnSmsCenterLoadV2').disabled = true;
+  $('#btnSmsCenterApplyV2').disabled = true;
+  status.textContent = '正在查询国家、价格与库存…';
+  renderSmsSettingsOffers();
   try {
-    const previousCountry = country?.value || 'auto';
-    const countries = await api(`/api/sms/countries?provider=${encodeURIComponent(provider)}`);
-    country.innerHTML = '<option value="auto">自动分配（按价格和库存）</option>' + (countries.countries || []).map(c => `<option value="${esc(c.id)}">手动：${esc(c.name)}（ID ${esc(c.id)}）</option>`).join('');
-    if (previousCountry !== 'auto' && Array.from(country.options).some(o => o.value === previousCountry)) country.value = previousCountry;
-    if (mode) { mode.value = previousCountry === 'auto' ? 'auto' : 'manual'; country.disabled = mode.value !== 'manual'; }
-    const price = $('#smsCenterMaxPriceV2')?.value || '0.15'; const service = $('#smsCenterServiceV2')?.value || 'dr';
-    const selected = country?.value && country.value !== 'auto' ? `&country=${encodeURIComponent(country.value)}` : '';
-    const prices = await api(`/api/sms/prices?provider=${encodeURIComponent(provider)}&service=${encodeURIComponent(service)}&max_price=${encodeURIComponent(price)}${selected}`);
-    const cards = Array.isArray(prices.countries) ? prices.countries : []; const offerList = $('#smsCenterOfferListV2');
-    const flag = (iso, name) => { const code=String(iso||'').toUpperCase(); if(code.length===2) return String.fromCodePoint(...[...code].map(c=>127397+c.charCodeAt())); const n=String(name||'').toLowerCase(); return n.includes('united states')||n.includes('美国')?'🇺🇸':n.includes('south africa')||n.includes('南非')?'🇿🇦':n.includes('united kingdom')||n.includes('英国')?'🇬🇧':'🌐'; };
-    if (supplier) supplier.innerHTML = '<option value="">自动分配供应商</option>';
-    const renderTable = c => `<article class="sms-country-card"><div class="sms-country-head"><span class="sms-country-flag">${flag(c.iso, c.eng || c.name)}</span><div class="sms-country-title"><strong>${esc(c.name || `国家 ${c.id}`)}</strong><small>国家 ID ${esc(c.id)} · ${c.tiers.length} 个可购买档位</small></div><button type="button" class="sms-country-select" data-sms-country="${esc(c.id)}">返回国家</button></div><table class="sms-tier-table"><thead><tr><th>供应商</th><th>供应商 ID</th><th>库存</th><th>成本</th><th>操作</th></tr></thead><tbody>${c.tiers.map(t => `<tr><td><span class="sms-tier-badge">供应商</span></td><td>${esc(t.provider_id || '-')}</td><td class="sms-tier-stock ${Number(t.count)<10?'low':''}">${Number(t.count)<10?'少量':`${esc(t.count)} 件`}</td><td><span class="sms-tier-price">${Number(t.price).toFixed(3)} $</span></td><td><button type="button" class="sms-tier-select" data-sms-country="${esc(c.id)}" data-sms-provider="${esc(t.provider_id||'')}" data-sms-price="${esc(t.price)}">选此档</button></td></tr>`).join('')}</tbody></table></article>`;
-    if (offerList) {
-      const selected = country?.value && country.value !== 'auto' ? cards.find(c => String(c.id) === String(country.value)) : null;
-      offerList.innerHTML = selected ? renderTable(selected) : (cards.length ? `<div class="sms-country-summary"><div class="sms-summary-title">可购买国家 <small>选择国家后查看供应商价格档位</small></div><div class="sms-summary-list">${cards.map(c => `<button type="button" class="sms-summary-row" data-sms-country="${esc(c.id)}"><span>${flag(c.iso, c.eng || c.name)} <b>${esc(c.name || `国家 ${c.id}`)}</b></span><span>ID ${esc(c.id)}</span><span>${c.tiers.length} 档</span><strong>最低 ${Number(c.tiers[0].price).toFixed(3)} $</strong></button>`).join('')}</div></div>` : '<div class="sms-tier-empty">当前价格和库存条件下没有可购买国家。</div>');
+    const [countries, prices] = await Promise.all([
+      api(`/api/sms/countries?provider=${encodeURIComponent(provider)}`),
+      api(`/api/sms/prices?provider=${encodeURIComponent(provider)}&service=dr&max_price=${encodeURIComponent(price)}`),
+    ]);
+    if (requestId !== smsSettingsRequest) return;
+    smsSettingsOffers = prices;
+    const currency = prices.currency || '平台币';
+    const available = prices.countries || [];
+    country.innerHTML = '<option value="auto">请选择国家</option>' + available.map(c =>
+      `<option value="${attrEsc(c.id)}">${esc(c.name)}（ID ${esc(c.id)}） · ${Number(c.tiers[0].price).toFixed(3)} ${esc(currency)} 起 · ${c.tiers.length} 档</option>`
+    ).join('');
+    const previousAvailable = previousCountry === 'auto' || available.some(c => String(c.id) === previousCountry);
+    country.value = previousAvailable ? previousCountry : 'auto';
+    if (!previousAvailable) $('#smsCenterCountryModeV2').value = 'auto';
+    renderSmsSettingsOffers();
+    status.textContent = `${available.length} 个可购买国家${previousAvailable ? '' : ' · 原国家当前无库存，已切换自动'} · ${prices.rank_notice || '价格与库存以实时下单为准'}`;
+  } catch (err) {
+    if (requestId === smsSettingsRequest) status.textContent = `查询失败：${err.message}`;
+  } finally {
+    if (requestId === smsSettingsRequest) {
+      $('#btnSmsCenterLoadV2').disabled = false;
+      $('#btnSmsCenterApplyV2').disabled = false;
     }
-    offerList?.querySelectorAll('[data-sms-country]').forEach(btn => btn.addEventListener('click', () => {
-      const id=btn.dataset.smsCountry||'auto'; if(country){ country.value=id; if(mode){mode.value='manual';country.disabled=false;} }
-      if (supplier) { if (btn.dataset.smsProvider) { const sid=btn.dataset.smsProvider; if(!Array.from(supplier.options).some(o=>o.value===sid)) supplier.add(new Option(`供应商 ${sid}`, sid)); supplier.value=sid; } else supplier.value=''; }
-      if (btn.dataset.smsPrice) $('#smsCenterMaxPriceV2').value=btn.dataset.smsPrice;
-      showToast(`已选择国家 ${id}${btn.dataset.smsProvider ? ` / 供应商 ${btn.dataset.smsProvider}` : ''}`);
-      if (!btn.dataset.smsProvider) loadSmsCenterOffersV2().catch(() => {});
-    }));
-    const tierCount=cards.reduce((n,c)=>n+(c.tiers||[]).length,0); status.textContent=`已加载 ${(countries.countries||[]).length} 个国家；${cards.length} 个国家有库存，共 ${tierCount} 个供应商档位${prices.rank_notice?'；'+prices.rank_notice:''}`;
-  } catch (err) { status.textContent = `查询失败：${err.message}`; }
+  }
+}
+function renderSmsSettingsOffers() {
+  const manual = $('#smsCenterCountryModeV2').value === 'manual';
+  const country = $('#smsCenterCountryV2');
+  const supplier = $('#smsCenterSupplierV2');
+  const previousSupplier = supplier.value;
+  country.disabled = !manual;
+  const countries = smsSettingsOffers?.countries || [];
+  const selected = manual ? countries.find(c => String(c.id) === country.value) : null;
+  const tiers = manual ? (selected?.tiers || []) : countries.flatMap(c => c.tiers || []);
+  const currency = smsSettingsOffers?.currency || '平台币';
+  supplier.disabled = !manual || !selected || $('#smsCenterProviderV2').value !== 'smsbower';
+  supplier.innerHTML = '<option value="">自动分配供应商</option>' + (supplier.disabled ? '' : tiers.map(t =>
+    `<option value="${attrEsc(t.provider_id)}">ID ${esc(t.provider_id)} · ${Number(t.price).toFixed(3)} ${esc(currency)} · 库存 ${Number(t.count)}${t.rank ? ` · ${esc(t.rank)}` : ''}</option>`
+  ).join(''));
+  if (Array.from(supplier.options).some(o => o.value === previousSupplier)) supplier.value = previousSupplier;
+  const minPrice = tiers.length ? Math.min(...tiers.map(t => Number(t.price))) : null;
+  $('#smsCenterOfferListV2').textContent = !smsSettingsOffers ? '价格信息尚未就绪，请查询。'
+    : !tiers.length ? '当前国家或价格上限内暂无库存。'
+    : `${manual ? `${selected.name}（ID ${selected.id}）` : '自动选择'} · ${tiers.length} 个档位 · 最低 ${minPrice.toFixed(3)} ${currency} · 库存合计 ${tiers.reduce((n, t) => n + Number(t.count), 0)}`;
 }
 async function applySmsCenterSettingsV2() {
   const updates = {SMS_PROVIDER: $('#smsCenterProviderV2')?.value || 'herosms', SMS_COUNTRY: ($('#smsCenterCountryModeV2')?.value === 'manual' ? ($('#smsCenterCountryV2')?.value || 'auto') : 'auto'), SMS_SERVICE: $('#smsCenterServiceV2')?.value || 'dr', SMS_MAX_PRICE: $('#smsCenterMaxPriceV2')?.value || '0.15', SMS_CODE_WAIT: Number($('#smsCenterWaitV2')?.value || 120), SMS_POLL_INTERVAL: Number($('#smsCenterPollV2')?.value || 5), SMSBOWER_PROVIDER_ID: $('#smsCenterSupplierV2')?.value || ''};
   await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({updates})});
-  showToast(`已应用 ${updates.SMS_PROVIDER} / ${updates.SMS_COUNTRY}`);
+  showToast(`已保存接码设置：${updates.SMS_PROVIDER} / ${updates.SMS_COUNTRY}`);
+  document.getElementById('smsSettingsModal')?.classList.add('hidden');
+  updateModalScrollLock();
 }
 async function startSmsCenterV2() {
-  const ids = Array.from(SMS_CENTER_SELECTED).map(Number).filter(Boolean);
-  if (!ids.length) { showToast('请先勾选要接码的账号'); return; }
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number).filter(Boolean);
+  if (!ids.length) { showToast('请先在账号页面勾选账号'); return; }
   try {
-    await applySmsCenterSettingsV2();
-    const result = await api('/api/codex/retry-bulk', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({account_ids: ids, workers: 1})});
+    const workers = getCodexBulkWorkers();
+    const result = await api('/api/codex/retry-bulk', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({account_ids: ids, workers})});
     SMS_CENTER_ACTIVE.clear(); ids.forEach(id => SMS_CENTER_ACTIVE.add(id));
     $('#smsCenterProgressV2').textContent = `已提交 ${ids.length} 个账号，正在等待状态更新…`;
     clearInterval(smsCenterProgressTimer);
@@ -8642,31 +8513,31 @@ async function pollSmsCenterProgressV2() {
     if (running === 0 && waiting === 0) {
       clearInterval(smsCenterProgressTimer);
       smsCenterProgressTimer = null;
-      await loadSmsCenterAccountsV2();
+      await loadAccounts();
     }
   } catch (_) {}
 }
 (function bindSmsCenterV2() {
   const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  const modal = document.getElementById('smsSettingsModal');
+  const closeModal = () => { modal?.classList.add('hidden'); updateModalScrollLock(); };
+  bind('btnSmsSettingsV2', () => { modal?.classList.remove('hidden'); updateModalScrollLock(); loadSmsCenterOffersV2().catch(() => {}); });
+  bind('btnCloseSmsSettings', closeModal);
+  bind('btnSmsLogV2', async () => {
+    const selected = Array.from(ACCOUNT_SELECTED).map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+    const email = selected[0]?.email || document.getElementById('btnSmsLogV2')?.dataset.email || retryLogEmail;
+    if (!email) { showToast('请先选择账号，或先启动一次接码任务'); return; }
+    openRetryLog(email);
+  });
+  modal?.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) closeModal(); });
   bind('btnSmsCenterLoadV2', loadSmsCenterOffersV2);
   bind('btnSmsCenterApplyV2', applySmsCenterSettingsV2);
   bind('btnSmsCenterStartV2', startSmsCenterV2);
-  bind('btnSmsCenterRefreshV2', loadSmsCenterGroupsV2);
-  const group = document.getElementById('smsCenterGroupV2');
-  if (group) group.addEventListener('change', () => { PAGERS['sms-center'].page = 1; loadSmsCenterAccountsV2(); });
   document.getElementById('smsCenterProviderV2')?.addEventListener('change', loadSmsCenterOffersV2);
   document.getElementById('smsCenterServiceV2')?.addEventListener('change', loadSmsCenterOffersV2);
-  document.getElementById('smsCenterCountryV2')?.addEventListener('change', () => { const supplier=document.getElementById('smsCenterSupplierV2'); if(supplier) supplier.value=''; loadSmsCenterOffersV2(); });
-  document.getElementById('smsCenterCountryModeV2')?.addEventListener('change', e => { const c=document.getElementById('smsCenterCountryV2'); if(c){ c.disabled=e.target.value!=='manual'; if(e.target.value==='auto') c.value='auto'; } });
-  document.getElementById('smsCenterSelectAllV2')?.addEventListener('change', e => {
-    document.querySelectorAll('.sms-center-account-v2').forEach(x => {
-      x.checked = e.target.checked;
-      const id = Number(x.value);
-      if (e.target.checked) SMS_CENTER_SELECTED.add(id); else SMS_CENTER_SELECTED.delete(id);
-    });
-    updateSmsCenterSelectionUi();
-  });
-  loadSmsCenterGroupsV2().catch(() => {});
+  document.getElementById('smsCenterCountryV2')?.addEventListener('change', () => { const supplier=document.getElementById('smsCenterSupplierV2'); if(supplier) supplier.value=''; renderSmsSettingsOffers(); });
+  document.getElementById('smsCenterCountryModeV2')?.addEventListener('change', e => { const c=document.getElementById('smsCenterCountryV2'); if(c && e.target.value==='auto') c.value='auto'; renderSmsSettingsOffers(); });
   loadSmsCenterDefaultsV2().catch(() => loadSmsCenterOffersV2().catch(() => {}));
 })();
 async function loadSmsCenterDefaultsV2() {
@@ -8680,22 +8551,14 @@ async function loadSmsCenterDefaultsV2() {
   if ($('#smsCenterMaxPriceV2') && value('SMS_MAX_PRICE') !== undefined) $('#smsCenterMaxPriceV2').value = value('SMS_MAX_PRICE');
   if ($('#smsCenterWaitV2') && value('SMS_CODE_WAIT') !== undefined) $('#smsCenterWaitV2').value = value('SMS_CODE_WAIT');
   if ($('#smsCenterPollV2') && value('SMS_POLL_INTERVAL') !== undefined) $('#smsCenterPollV2').value = value('SMS_POLL_INTERVAL');
-  if ($('#smsCenterSupplierV2') && value('SMSBOWER_PROVIDER_ID') !== undefined) $('#smsCenterSupplierV2').value = value('SMSBOWER_PROVIDER_ID');
   await loadSmsCenterOffersV2();
+  if ($('#smsCenterSupplierV2') && value('SMSBOWER_PROVIDER_ID') !== undefined && Array.from($('#smsCenterSupplierV2').options).some(option => option.value === String(value('SMSBOWER_PROVIDER_ID')))) $('#smsCenterSupplierV2').value = String(value('SMSBOWER_PROVIDER_ID'));
   const countryEl = $('#smsCenterCountryV2');
   const country = String(value('SMS_COUNTRY') || 'auto');
+  const modeEl = $('#smsCenterCountryModeV2');
   if (countryEl && Array.from(countryEl.options).some(option => option.value === country)) countryEl.value = country;
-}
-async function applyCodexSmsSettingsV2() {
-  const updates = {
-    SMS_PROVIDER: $('#codexSmsProviderV2')?.value || 'herosms',
-    SMS_COUNTRY: $('#codexSmsCountryV2')?.value || 'auto',
-    SMS_MAX_PRICE: $('#codexSmsMaxPriceV2')?.value || '0.15',
-  };
-  try {
-    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({updates})});
-    showToast(`已应用 ${updates.SMS_PROVIDER} / 国家 ${updates.SMS_COUNTRY} / 最高价 ${updates.SMS_MAX_PRICE}`);
-  } catch (err) { showToast('接码设置保存失败: ' + err.message); }
+  if (modeEl) modeEl.value = country !== 'auto' ? 'manual' : 'auto';
+  renderSmsSettingsOffers();
 }
 (function bindCodexV2() {
   const qV2 = $('#qCodexV2');
@@ -8715,8 +8578,6 @@ async function applyCodexSmsSettingsV2() {
   bind('btnCodexDownloadBulkV2', codexDownloadBulkLocal);
   bind('btnCodexDownloadBulkCpaV2', codexDownloadBulkCpa);
   bind('btnCodexDeleteBulkV2', codexDeleteBulk);
-  bind('btnLoadCodexSmsPricesV2', loadCodexSmsOffersV2);
-  bind('btnApplyCodexSmsV2', applyCodexSmsSettingsV2);
   bind('btnCopySelectedCodexEmailsV2', () => copySelectionEmails({filenames:Array.from(CODEX_SELECTED)}));
   bind('btnCopySelectedCodexMailboxV2', e => copySelectionMailboxLines({filenames:Array.from(CODEX_SELECTED)}, e.currentTarget));
   bind('btnLocateSelectedCodexInAccountsV2', () => locateSelectionEmails('accounts', {filenames:Array.from(CODEX_SELECTED)}));
