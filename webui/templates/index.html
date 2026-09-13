@@ -8557,8 +8557,24 @@ async function startSmsCenterV2() {
   document.getElementById('smsCenterServiceV2')?.addEventListener('change', loadSmsCenterOffersV2);
   document.getElementById('smsCenterSelectAllV2')?.addEventListener('change', e => document.querySelectorAll('.sms-center-account-v2').forEach(x => { x.checked = e.target.checked; }));
   loadSmsCenterGroupsV2().catch(() => {});
-  loadSmsCenterOffersV2().catch(() => {});
+  loadSmsCenterDefaultsV2().catch(() => loadSmsCenterOffersV2().catch(() => {}));
 })();
+async function loadSmsCenterDefaultsV2() {
+  const config = await api('/api/config');
+  const value = key => (config.find(item => item.key === key) || {}).value;
+  const provider = String(value('SMS_PROVIDER') || 'herosms');
+  const providerEl = $('#smsCenterProviderV2');
+  if (providerEl) providerEl.value = provider;
+  const serviceEl = $('#smsCenterServiceV2');
+  if (serviceEl && value('SMS_SERVICE')) serviceEl.value = String(value('SMS_SERVICE'));
+  if ($('#smsCenterMaxPriceV2') && value('SMS_MAX_PRICE') !== undefined) $('#smsCenterMaxPriceV2').value = value('SMS_MAX_PRICE');
+  if ($('#smsCenterWaitV2') && value('SMS_CODE_WAIT') !== undefined) $('#smsCenterWaitV2').value = value('SMS_CODE_WAIT');
+  if ($('#smsCenterPollV2') && value('SMS_POLL_INTERVAL') !== undefined) $('#smsCenterPollV2').value = value('SMS_POLL_INTERVAL');
+  await loadSmsCenterOffersV2();
+  const countryEl = $('#smsCenterCountryV2');
+  const country = String(value('SMS_COUNTRY') || 'auto');
+  if (countryEl && Array.from(countryEl.options).some(option => option.value === country)) countryEl.value = country;
+}
 async function applyCodexSmsSettingsV2() {
   const updates = {
     SMS_PROVIDER: $('#codexSmsProviderV2')?.value || 'herosms',
