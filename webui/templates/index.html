@@ -8557,7 +8557,7 @@ async function loadSmsCenterOffersV2() {
     if (offerList) offerList.innerHTML = cards.length ? `<div class="sms-tier-grid">${cards.map(c => `<article class="sms-country-card"><div class="sms-country-head"><span class="sms-country-flag">${flag(c.iso, c.eng || c.name)}</span><div class="sms-country-title"><strong>${esc(c.name || `国家 ${c.id}`)}</strong><small>国家 ID ${esc(c.id)} · ${c.tiers.length} 个供应商档位</small></div><button type="button" class="sms-country-select" data-sms-country="${esc(c.id)}">选择国家</button></div><table class="sms-tier-table"><thead><tr><th>供应商级别</th><th>供应商 ID</th><th>库存</th><th>成本</th><th>操作</th></tr></thead><tbody>${c.tiers.map(t => `<tr class="${t.within_budget ? '' : 'sms-tier-over'}"><td><span class="sms-tier-badge">${esc(t.rank || '供应商')}</span></td><td>${esc(t.provider_id || '-')}</td><td class="sms-tier-stock ${Number(t.count)<10?'low':''}">${Number(t.count)<10?'少量':`${esc(t.count)} 件`}</td><td><span class="sms-tier-price">${Number(t.price).toFixed(3)} $</span>${t.within_budget?'':'<small> 超预算</small>'}</td><td><button type="button" class="sms-tier-select" data-sms-country="${esc(c.id)}" data-sms-provider="${esc(t.provider_id||'')}" data-sms-price="${esc(t.price)}">选此档</button></td></tr>`).join('')}</tbody></table></article>`).join('')}</div>` : '<div class="sms-tier-empty">没有可展示的报价；请检查 API Key 或提高最高单价。</div>';
     offerList?.querySelectorAll('[data-sms-country]').forEach(btn => btn.addEventListener('click', () => {
       const id=btn.dataset.smsCountry||'auto'; if(country){ country.value=id; if(mode){mode.value='manual';country.disabled=false;} }
-      if (btn.dataset.smsProvider && supplier) { const id=btn.dataset.smsProvider; if(!Array.from(supplier.options).some(o=>o.value===id)) supplier.add(new Option(`供应商 ${id}`, id)); supplier.value=id; }
+      if (supplier) { if (btn.dataset.smsProvider) { const sid=btn.dataset.smsProvider; if(!Array.from(supplier.options).some(o=>o.value===sid)) supplier.add(new Option(`供应商 ${sid}`, sid)); supplier.value=sid; } else supplier.value=''; }
       if (btn.dataset.smsPrice) $('#smsCenterMaxPriceV2').value=btn.dataset.smsPrice;
       showToast(`已选择国家 ${id}${btn.dataset.smsProvider ? ` / 供应商 ${btn.dataset.smsProvider}` : ''}`);
     }));
@@ -8588,7 +8588,7 @@ async function startSmsCenterV2() {
   if (group) group.addEventListener('change', loadSmsCenterAccountsV2);
   document.getElementById('smsCenterProviderV2')?.addEventListener('change', loadSmsCenterOffersV2);
   document.getElementById('smsCenterServiceV2')?.addEventListener('change', loadSmsCenterOffersV2);
-  document.getElementById('smsCenterCountryV2')?.addEventListener('change', loadSmsCenterOffersV2);
+  document.getElementById('smsCenterCountryV2')?.addEventListener('change', () => { const supplier=document.getElementById('smsCenterSupplierV2'); if(supplier) supplier.value=''; loadSmsCenterOffersV2(); });
   document.getElementById('smsCenterCountryModeV2')?.addEventListener('change', e => { const c=document.getElementById('smsCenterCountryV2'); if(c){ c.disabled=e.target.value!=='manual'; if(e.target.value==='auto') c.value='auto'; } });
   document.getElementById('smsCenterSelectAllV2')?.addEventListener('change', e => document.querySelectorAll('.sms-center-account-v2').forEach(x => { x.checked = e.target.checked; }));
   loadSmsCenterGroupsV2().catch(() => {});
