@@ -2898,6 +2898,7 @@
       <select id="codexSmsCountryV2" class="outlook-v2-native-select" style="margin-left:8px"><option value="auto">自动选国家</option></select>
       <input id="codexSmsMaxPriceV2" type="text" value="0.15" placeholder="最高价" style="width:80px;margin-left:8px">
       <button type="button" class="jobs-tb-btn" id="btnLoadCodexSmsPricesV2">查询国家价格/库存</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnApplyCodexSmsV2">应用到接码流程</button>
       <span id="codexSmsOffersV2" class="config-card-v2-hint" style="margin-left:8px"></span>
     </section>
     <div class="codex-stats-v2" id="codexStatsV2" aria-label="Codex 统计">
@@ -8428,6 +8429,17 @@ async function loadCodexSmsOffersV2() {
     if (offersBox) offersBox.textContent = `查询失败：${err.message}`;
   }
 }
+async function applyCodexSmsSettingsV2() {
+  const updates = {
+    SMS_PROVIDER: $('#codexSmsProviderV2')?.value || 'herosms',
+    SMS_COUNTRY: $('#codexSmsCountryV2')?.value || 'auto',
+    SMS_MAX_PRICE: $('#codexSmsMaxPriceV2')?.value || '0.15',
+  };
+  try {
+    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({updates})});
+    showToast(`已应用 ${updates.SMS_PROVIDER} / 国家 ${updates.SMS_COUNTRY} / 最高价 ${updates.SMS_MAX_PRICE}`);
+  } catch (err) { showToast('接码设置保存失败: ' + err.message); }
+}
 (function bindCodexV2() {
   const qV2 = $('#qCodexV2');
   if (qV2) qV2.addEventListener('input', debounce(() => {
@@ -8447,6 +8459,7 @@ async function loadCodexSmsOffersV2() {
   bind('btnCodexDownloadBulkCpaV2', codexDownloadBulkCpa);
   bind('btnCodexDeleteBulkV2', codexDeleteBulk);
   bind('btnLoadCodexSmsPricesV2', loadCodexSmsOffersV2);
+  bind('btnApplyCodexSmsV2', applyCodexSmsSettingsV2);
   bind('btnCopySelectedCodexEmailsV2', () => copySelectionEmails({filenames:Array.from(CODEX_SELECTED)}));
   bind('btnCopySelectedCodexMailboxV2', e => copySelectionMailboxLines({filenames:Array.from(CODEX_SELECTED)}, e.currentTarget));
   bind('btnLocateSelectedCodexInAccountsV2', () => locateSelectionEmails('accounts', {filenames:Array.from(CODEX_SELECTED)}));
