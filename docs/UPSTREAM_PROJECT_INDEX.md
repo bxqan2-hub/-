@@ -407,3 +407,4 @@
 - Roxy Codex 授权继续使用 `CODEX_HEADLESS=True`、`CODEX_LOCAL_PROXY`，动态 PKCE/state 地址可选包裹 `chatgpt.com/codex/desktop-auth`，回调仍校验原 state 并按 CPA/sub2 原路径导出。
 - WebUI 新增接码平台、国家、价格/库存查询框及 `/api/sms/countries`、`/api/sms/prices`；查询临时切换平台并由锁保护，不改变默认运行平台。
 - 注册流量列表同时显示新增网络下载与含缓存回放的逻辑总量；近期日志约 2.5–3.3 MiB 是真实新增网络字节，逻辑资源总量约 38–87 MiB，二者未混算。
+- 左侧新增“接码中心”页面：顶部选择平台/国家并查询价格库存、应用设置；底部复用账号分组接口展示同一批账号。
