@@ -4001,9 +4001,6 @@ def run_roxy_registration(
             # 给 OAuth 回调 / session cookie 写入一点时间。
             human_delay("post_auth")
 
-        if traffic_optimizer is not None:
-            traffic_optimizer.set_session_only(True)
-
         logger.info("[Roxy注册] 等待 ChatGPT 跳转并写入 session/accessToken")
         _check_manual_stop()
         session_info = _fetch_or_recover_chatgpt_session(
@@ -4016,6 +4013,10 @@ def run_roxy_registration(
             profile_birthday=birthday,
         )
         access_token = session_info["accessToken"]
+        # Session recovery may still need the login application's JS/DOM.
+        # Tighten requests only after the existing session validator returns.
+        if traffic_optimizer is not None:
+            traffic_optimizer.set_session_only(True)
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
 
@@ -4111,6 +4112,8 @@ def run_roxy_registration(
                 from core.roxy_codex_oauth import run_roxy_codex_oauth
                 logger.info("[Roxy注册][Codex] ENABLE_CODEX_AUTO=True，复用当前注册 Roxy 窗口执行 Codex 授权，不创建新环境")
                 _check_manual_stop()
+                if traffic_optimizer is not None:
+                    traffic_optimizer.set_session_only(False)
                 codex_result = run_roxy_codex_oauth(
                     email,
                     reuse_existing_profile=True,

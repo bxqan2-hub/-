@@ -470,12 +470,13 @@ class RoxyBrowserClient:
         if core_version != "latest" and not re.fullmatch(r"[1-9][0-9]{1,2}", core_version):
             raise ValueError("ROXY_CORE_VERSION 请填 latest 或 Chrome 主版本号（例如 147）")
         body["coreType"] = "Chrome"
-        # Registration workers do not need Roxy's local workbench tab.  That
-        # tab is opened before Selenium attaches and can pull 18–22 MB of
-        # dashboard assets through the profile proxy.  Disable that tab and
-        # bypass loopback in Chrome itself.
-        body.setdefault("openWorkbench", 0)
-        body.setdefault("startupParam", "--proxy-bypass-list=<-loopback>,localhost,127.0.0.1")
+        # Roxy reads workbench settings from fingerInfo, not the root body.
+        # Avoid the optional startup dashboard without changing proxy rules
+        # or the caller's fingerprint settings.  In particular, <-loopback>
+        # removes Chromium's implicit local bypass; it does not enable it.
+        finger_info = dict(body.get("fingerInfo") or {})
+        finger_info.setdefault("openWorkbench", 0)
+        body["fingerInfo"] = finger_info
         if core_version == "latest":
             body.pop("coreVersion", None)
         else:

@@ -1,5 +1,14 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-14 流量执行链与测量更正（当前）
+
+- 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`，重新读取 vendor 下 `core/roxybrowser_client.py`（SHA-256 `6cb5281a320080425544727c6aa1dc95c40f3183d814f381e9f64e002d6c1e9c`）、`core/browser_traffic.py`（`b1e241524cf1068a4943ee6a9140e4c484ee70780466408a29f995e16ab8d98e`）、`core/roxy_registration.py`（`454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`）。
+- 上游继续使用 Profile 创建、CDP/Fetch 路线；本地保留 public/私有头/TTL 门禁和账号隔离。修正本地 `openWorkbench` 为官方 `fingerInfo` 层级，不注入反向 loopback 规则。
+- 本地 session-only 仅在已有 Session 校验成功后启用；补齐真正 Fetch 匹配，保留两个精确 MFA API，可选 Codex 清状态重登前退出该阶段。未修改密码成功 checkpoint、同窗 Token 或 enroll/activate 成功保存边界。
+- 本地计量按 redirect hop、缓存、loopback、请求前/响应后阻断区分；全机 Meta 统计和 CDP payload 估算不再被描述为供应商账单。
+- 新 Profile 共享缓存真实命中与供应商连接采样对照，不支持此前“本地大正文回放放大代理账单”的推断；恢复已有静态缓存默认值及 8 MiB 项目上限、7 天年龄上限。
+- 当前证据、更正、聚焦验证和待完成十账号复测见 `docs/2026-09-14_Roxy十账号流量根因复测-report.md`。本节优先于旧报告中的运行策略描述；不以历史测试替代当前端到端验证。
+
 > 该文件是注册机维护时的固定上游参考入口。修改 ChatGPT 注册、Roxy 浏览器、密码或 2FA 流程前，先查看本索引，再按记录的固定 commit 对照上游实现。
 
 ## 来源与锁定版本

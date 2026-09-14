@@ -121,7 +121,7 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 self.assertLessEqual(mail_reads[1][0], sent_at[0])
 
     def test_registration_saves_refreshed_session_even_when_mfa_returns_failure_or_raises(self):
-        for outcome in ("failure_return", "exception", "success", "absent"):
+        for outcome in ("failure_return", "exception", "success", "absent", "codex"):
             with self.subTest(outcome=outcome), ExitStack() as stack:
                 client = MagicMock()
                 client.profile_proxy = "http://proxy.example:8080"
@@ -129,25 +129,27 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                     "profile-fixture", {}, preflight_exit_geo={"ip": "198.51.100.7"},
                 )
                 session = SimpleNamespace(close=MagicMock())
+                optimizer = MagicMock()
                 setup_result = SimpleNamespace(
                     secret="fixture-secret", access_token="result-at", expires="fresh-expires",
                     password="confirmed-password", password_configured=True, security_ok=True,
                 )
 
                 def setup(*args, **kwargs):
+                    optimizer.set_session_only.assert_called_once_with(True)
                     if outcome != "absent":
                         session._twofa_refreshed_access_token = "refreshed-at"
                         session._twofa_session_expires = "fresh-expires"
                     if outcome == "exception":
                         raise RuntimeError("fixture MFA failure")
-                    return setup_result if outcome == "success" else None
+                    return setup_result if outcome in ("success", "codex") else None
 
                 mocked = {
                     "RoxyBrowserClient": client,
                     "_build_driver": MagicMock(),
                     "_center_browser_window": None,
                     "probe_selenium_driver_exit_geo": {"ip": "198.51.100.7"},
-                    "_start_traffic_optimizer": None,
+                    "_start_traffic_optimizer": optimizer,
                     "_safe_get": None,
                     "human_delay": None,
                     "_page_warmup": None,
@@ -168,10 +170,20 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                     "resolve_email_source": "generic_api",
                 }
                 for name, result in mocked.items():
-                    stack.enter_context(patch.object(roxy_registration, name, return_value=result))
+                    if name == "_fetch_or_recover_chatgpt_session":
+                        def fetch_session(*args, session_info=result, **kwargs):
+                            optimizer.set_session_only.assert_not_called()
+                            return session_info
+                        stack.enter_context(patch.object(roxy_registration, name, side_effect=fetch_session))
+                    else:
+                        stack.enter_context(patch.object(roxy_registration, name, return_value=result))
                 stack.enter_context(patch.object(roxy_registration._cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
                 stack.enter_context(patch.object(roxy_registration._twofa_cfg, "ENABLE_2FA", True))
-                stack.enter_context(patch("config.codex.ENABLE_CODEX_AUTO", False))
+                stack.enter_context(patch("config.codex.ENABLE_CODEX_AUTO", outcome == "codex"))
+                def codex_oauth(*args, **kwargs):
+                    optimizer.set_session_only.assert_called_with(False)
+                    return {"status": "success", "ok": True}
+                codex_mock = stack.enter_context(patch("core.roxy_codex_oauth.run_roxy_codex_oauth", side_effect=codex_oauth))
                 setup_mock = stack.enter_context(patch("core.account_export.maybe_setup_2fa_result", side_effect=setup))
                 save = stack.enter_context(patch.object(roxy_registration, "save_account_data", return_value=706))
                 log = stack.enter_context(patch.object(roxy_registration, "logger"))
@@ -186,8 +198,9 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 self.assertEqual(save.call_args.kwargs["access_token"], expected_token)
                 self.assertEqual(save.call_args.kwargs["extra"]["expires"], expected_expires)
                 self.assertEqual(result["access_token"], expected_token)
-                self.assertEqual(result["success"], outcome == "success")
-                self.assertEqual(bool(save.call_args.kwargs["totp_secret"]), outcome == "success")
+                self.assertEqual(result["success"], outcome in ("success", "codex"))
+                self.assertEqual(bool(save.call_args.kwargs["totp_secret"]), outcome in ("success", "codex"))
+                self.assertEqual(codex_mock.call_count, int(outcome == "codex"))
                 self.assertEqual(setup_mock.call_args.kwargs["access_token"], "registration-at")
                 session.close.assert_called_once()
                 self.assertNotIn("refreshed-at", repr(log.mock_calls))

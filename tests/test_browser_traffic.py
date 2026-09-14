@@ -55,7 +55,7 @@ def _event(url=ASSET_URL, *, request_id="fixture-request", headers=None, resourc
 
 
 class BrowserTrafficClassifierTests(unittest.TestCase):
-    def test_network_enable_uses_default_unbounded_buffer(self):
+    def test_network_enable_uses_runtime_default_buffers(self):
         optimizer = _optimizer(low_traffic=True, static_cache=False)
         optimizer.install()
         enable_calls = [item for item in optimizer.driver.execute_cdp_cmd.call_args_list if item.args[0] == "Network.enable"]
@@ -132,12 +132,15 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
         for path, resource in [
             ("/api/auth/session", "xhr"), ("/api/auth/callback/openai", "document"),
             ("/api/auth/signin/openai", "fetch"), ("/", "document"),
+            ("/backend-api/accounts/mfa/enroll", "fetch"),
+            ("/backend-api/accounts/mfa/user/activate_enrollment", "xhr"),
         ]:
             with self.subTest(path=path):
                 self.assertEqual(block_reason("https://chatgpt.com" + path, resource, session_only=True), "")
         for path, resource in [
             ("/_next/static/app.js", "script"), ("/cdn/assets/site.css", "stylesheet"),
-            ("/backend-api/accounts/mfa/enroll", "fetch"),
+            ("/backend-api/conversations", "fetch"),
+            ("/api/auth/session-telemetry", "xhr"),
         ]:
             with self.subTest(path=path):
                 self.assertEqual(
@@ -157,9 +160,10 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
                 if low_traffic:
                     urls = {p.kwargs["url_pattern"] for p in patterns}
                     self.assertIn("https://auth.openai.com/awe/api/v2/rum*", urls)
-                    self.assertIn("https://chatgpt.com/*manifest*", urls)
+                    self.assertIn("https://chatgpt.com/*", urls)
+                    self.assertIn("https://www.chatgpt.com/*", urls)
                     self.assertTrue(any(
-                        p.kwargs["url_pattern"] == "https://chatgpt.com/*manifest*"
+                        p.kwargs["url_pattern"] == "https://chatgpt.com/*"
                         and p.kwargs.get("resource_type") is None
                         for p in patterns
                     ))
@@ -185,6 +189,57 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
         optimizer._devtools.fetch.fail_request.reset_mock()
         optimizer._on_request_paused(_event("https://cdn.openai.com/assets/config.js?x=.mp4", resource="media"))
         optimizer._devtools.fetch.fail_request.assert_not_called()
+        optimizer._devtools.fetch.continue_request.assert_called_once_with("fixture-request")
+
+    def test_installed_session_policy_routes_scripts_and_preserves_mfa(self):
+        from fnmatch import fnmatchcase
+
+        optimizer = _optimizer(low_traffic=True, static_cache=False)
+        optimizer.install()
+        patterns = [p.kwargs for p in optimizer._devtools.fetch.RequestPattern.call_args_list]
+        cases = [
+            ("https://chatgpt.com/cdn/assets/login.js", "script", False, False),
+            ("https://chatgpt.com/cdn/assets/login.js", "script", True, True),
+            ("https://www.chatgpt.com/backend-api/conversations", "fetch", True, True),
+            ("https://chatgpt.com/backend-api/accounts/mfa/enroll", "fetch", True, False),
+            ("https://chatgpt.com/backend-api/accounts/mfa/user/activate_enrollment", "xhr", True, False),
+            ("https://chatgpt.com/cdn-cgi/challenge-platform/script", "script", True, False),
+            ("https://chatgpt.com/cdn/assets/login.js", "script", False, False),
+        ]
+        for url, resource, session_only, blocked in cases:
+            with self.subTest(url=url, session_only=session_only):
+                # Exercise the installed URL-only route, not just the pure
+                # classifier: the original bug never reached this callback.
+                self.assertTrue(any(
+                    p.get("resource_type") is None and fnmatchcase(url, p["url_pattern"])
+                    for p in patterns
+                ))
+                optimizer.set_session_only(session_only)
+                optimizer._devtools.fetch.fail_request.reset_mock()
+                optimizer._devtools.fetch.continue_request.reset_mock()
+                optimizer._on_request_paused(_event(url, resource=resource))
+                self.assertEqual(optimizer._devtools.fetch.fail_request.call_count, int(blocked))
+                self.assertEqual(optimizer._devtools.fetch.continue_request.call_count, int(not blocked))
+
+    def test_fetch_block_identity_reaches_summary_even_without_loading_failed(self):
+        optimizer = _optimizer(low_traffic=True, static_cache=False)
+        optimizer.capture = True
+        url = "https://auth.openai.com/awe/api/v2/rum"
+        optimizer._on_request_paused(_event(url, resource="xhr"))
+        optimizer.driver.get_log.return_value = [{
+            "method": "Network.requestWillBeSent",
+            "params": {"requestId": "fixture-request", "request": {"url": url, "postData": "x" * 3000}},
+        }]
+        summary = optimizer.finalize()
+        self.assertEqual(summary["uploaded"], 0)
+        self.assertEqual(summary["network_requests"], 0)
+        self.assertEqual(summary["blocked_by_reason"], {"auth_rum": 1})
+
+    def test_failed_fetch_block_is_not_recorded_as_free_traffic(self):
+        optimizer = _optimizer(low_traffic=True, static_cache=False)
+        optimizer._connection.execute.side_effect = [RuntimeError("fixture: Fetch failed"), None]
+        optimizer._on_request_paused(_event("https://auth.openai.com/awe/api/v2/rum", resource="xhr"))
+        self.assertEqual(optimizer._blocked_request_ids, set())
         optimizer._devtools.fetch.continue_request.assert_called_once_with("fixture-request")
 
     def test_cache_scope_is_exact_versioned_public_asset_paths(self):
@@ -690,6 +745,204 @@ class StaticCacheTests(unittest.TestCase):
 
 
 class PerformanceSummaryTests(unittest.TestCase):
+    def test_loopback_and_non_network_transfers_are_not_external_bytes(self):
+        for url in (
+            "http://localhost:9000/asset", "https://LOCALHOST./asset", "http://app.localhost/asset",
+            "http://127.0.0.1/asset", "http://127.4.3.2/asset", "http://[::1]/asset",
+            "http://[::ffff:127.0.0.1]/asset", "data:text/plain,local", "file:///C:/fixture.js",
+        ):
+            with self.subTest(url=url):
+                summary = summarize_performance_logs([
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "local", "request": {"url": url, "postData": "local body"},
+                    }},
+                    {"method": "Network.dataReceived", "params": {"requestId": "local", "encodedDataLength": 300}},
+                    {"method": "Network.loadingFinished", "params": {"requestId": "local", "encodedDataLength": 400}},
+                ])
+                self.assertEqual(summary["observed_transport_bytes"], 0)
+                self.assertEqual(summary["network_requests"], 0)
+                self.assertEqual(summary["by_host"], {})
+                self.assertEqual(summary["uploaded_by_host"], {})
+
+    def test_external_hostnames_containing_localhost_still_count(self):
+        summary = summarize_performance_logs([
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "remote", "request": {"url": "https://localhost.example.test/asset"},
+            }},
+            {"method": "Network.loadingFinished", "params": {"requestId": "remote", "encodedDataLength": 400}},
+        ])
+        self.assertEqual(summary["downloaded"], 400)
+
+    def test_budget_uses_bidirectional_payload_total(self):
+        entries = [
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "post", "request": {"url": "https://example.test/post", "postData": "1234"},
+            }},
+            {"method": "Network.loadingFinished", "params": {"requestId": "post", "encodedDataLength": 5}},
+            {"method": "Network.webSocketCreated", "params": {"requestId": "ws", "url": "wss://example.test/ws"}},
+            {"method": "Network.webSocketFrameSent", "params": {"requestId": "ws", "response": {"opcode": 1, "payloadData": "sent"}}},
+            {"method": "Network.webSocketFrameReceived", "params": {"requestId": "ws", "response": {"opcode": 1, "payloadData": "recv"}}},
+        ]
+        summary = summarize_performance_logs(entries, budget_bytes=16)
+        self.assertEqual(summary["observed_transport_bytes"], 17)
+        self.assertFalse(summary["within_budget"])
+        self.assertTrue(summarize_performance_logs(entries, budget_bytes=17)["within_budget"])
+
+    def test_native_cache_replays_are_excluded_even_with_encoded_lengths(self):
+        for cached_event in [
+            {"method": "Network.requestServedFromCache", "params": {"requestId": "cached"}},
+            *({"method": "Network.responseReceived", "params": {"requestId": "cached", "response": response}} for response in [
+                {"fromDiskCache": True}, {"fromPrefetchCache": True},
+                {"fromServiceWorker": True, "serviceWorkerResponseSource": "cache-storage"},
+                {"fromServiceWorker": True, "serviceWorkerResponseSource": "http-cache"},
+                {"fromServiceWorker": True, "serviceWorkerResponseSource": "fallback-code"},
+            ]),
+        ]:
+            with self.subTest(event=cached_event):
+                summary = summarize_performance_logs([
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "cached", "request": {"url": "https://example.test/asset"},
+                    }},
+                    cached_event,
+                    {"method": "Network.dataReceived", "params": {"requestId": "cached", "encodedDataLength": 300}},
+                    {"method": "Network.loadingFinished", "params": {"requestId": "cached", "encodedDataLength": 400}},
+                ])
+                self.assertEqual(summary["observed_transport_bytes"], 0)
+                self.assertEqual(summary["network_requests"], 0)
+
+    def test_service_worker_network_response_is_not_treated_as_local_cache(self):
+        summary = summarize_performance_logs([
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "sw", "request": {"url": "https://example.test/api"},
+            }},
+            {"method": "Network.responseReceived", "params": {
+                "requestId": "sw", "response": {"fromServiceWorker": True, "serviceWorkerResponseSource": "network"},
+            }},
+            {"method": "Network.loadingFinished", "params": {"requestId": "sw", "encodedDataLength": 400}},
+        ])
+        self.assertEqual(summary["downloaded"], 400)
+        self.assertEqual(summary["network_requests"], 1)
+
+    def test_native_cache_revalidation_still_counts_network_response(self):
+        summary = summarize_performance_logs([
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "cache", "request": {"url": "https://example.test/asset"},
+            }},
+            {"method": "Network.requestServedFromCache", "params": {"requestId": "cache"}},
+            {"method": "Network.responseReceivedExtraInfo", "params": {"requestId": "cache", "statusCode": 304}},
+            {"method": "Network.loadingFinished", "params": {"requestId": "cache", "encodedDataLength": 150}},
+        ])
+        self.assertEqual(summary["downloaded"], 150)
+        self.assertEqual(summary["network_requests"], 1)
+
+    def test_response_side_block_does_not_erase_transferred_bytes(self):
+        for reason in ("corp-not-same-origin", "integrity", "inspector"):
+            with self.subTest(reason=reason):
+                summary = summarize_performance_logs([
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "post", "request": {"url": "https://example.test/post", "postData": "body"},
+                    }},
+                    {"method": "Network.responseReceived", "params": {
+                        "requestId": "post", "response": {"encodedDataLength": 50},
+                    }},
+                    {"method": "Network.dataReceived", "params": {"requestId": "post", "encodedDataLength": 100}},
+                    {"method": "Network.loadingFailed", "params": {"requestId": "post", "blockedReason": reason}},
+                ], blocked_request_ids=["post"])
+                self.assertEqual(summary["uploaded"], 4)
+                self.assertEqual(summary["downloaded"], 100)
+                self.assertEqual(summary["network_requests"], 1)
+
+    def test_block_without_reason_is_still_excluded_when_rejected_before_send(self):
+        summary = summarize_performance_logs([
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "post", "request": {"url": "https://example.test/post", "postData": "body"},
+            }},
+            {"method": "Network.loadingFailed", "params": {"requestId": "post", "errorText": "net::ERR_BLOCKED_BY_CLIENT"}},
+        ])
+        self.assertEqual(summary["observed_transport_bytes"], 0)
+        self.assertEqual(summary["network_requests"], 0)
+
+    def test_redirect_hops_keep_each_sent_post_and_response(self):
+        for final_body in ("next", ""):
+            with self.subTest(final_body=final_body):
+                summary = summarize_performance_logs([
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "post", "request": {"url": "https://first.example.test/a", "postData": "body"},
+                    }},
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "post", "request": {"url": "https://last.example.test/b", "postData": final_body},
+                        "redirectResponse": {"url": "https://first.example.test/a", "encodedDataLength": 200},
+                    }},
+                    {"method": "Network.loadingFinished", "params": {"requestId": "post", "encodedDataLength": 100}},
+                ])
+                self.assertEqual(summary["uploaded"], 4 + len(final_body))
+                self.assertEqual(summary["downloaded"], 300)
+                self.assertEqual(summary["network_requests"], 2)
+                self.assertEqual(summary["by_host"], {"first.example.test": 200, "last.example.test": 100})
+                self.assertEqual(summary["uploaded_by_host"]["first.example.test"], 4)
+
+    def test_blocked_redirect_destination_does_not_erase_previous_sent_post(self):
+        summary = summarize_performance_logs([
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "post", "request": {"url": "https://example.test/a", "postData": "body"},
+            }},
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "post", "request": {"url": "https://example.test/b", "postData": "body"},
+                "redirectResponse": {"url": "https://example.test/a", "encodedDataLength": 200},
+            }},
+            {"method": "Network.loadingFailed", "params": {"requestId": "post", "blockedReason": "inspector"}},
+        ], blocked_request_ids=["post"])
+        self.assertEqual(summary["uploaded"], 4)
+        self.assertEqual(summary["downloaded"], 200)
+        self.assertEqual(summary["network_requests"], 1)
+
+    def test_redirect_loopback_filter_is_per_hop(self):
+        for first_url, last_url, expected in (
+            ("https://example.test/a", "http://localhost:9000/b", 200),
+            ("http://localhost:9000/a", "https://example.test/b", 100),
+        ):
+            with self.subTest(first_url=first_url):
+                summary = summarize_performance_logs([
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "redirect", "request": {"url": first_url, "postData": "body"},
+                    }},
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "redirect", "request": {"url": last_url, "postData": "body"},
+                        "redirectResponse": {"url": first_url, "encodedDataLength": 200},
+                    }},
+                    {"method": "Network.loadingFinished", "params": {"requestId": "redirect", "encodedDataLength": 100}},
+                ])
+                self.assertEqual(summary["uploaded"], 4)
+                self.assertEqual(summary["downloaded"], expected)
+                self.assertEqual(summary["network_requests"], 1)
+
+    def test_cached_redirect_destination_does_not_erase_previous_network_hop(self):
+        summary = summarize_performance_logs([
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "redirect", "request": {"url": "https://example.test/old"},
+            }},
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": "redirect", "request": {"url": "https://example.test/asset"},
+                "redirectResponse": {"url": "https://example.test/old", "encodedDataLength": 200},
+            }},
+            {"method": "Network.loadingFinished", "params": {"requestId": "redirect", "encodedDataLength": 400}},
+        ], cached_request_ids=["redirect"], cached_bytes=400, cache_hits=1)
+        self.assertEqual(summary["downloaded"], 200)
+        self.assertEqual(summary["network_requests"], 1)
+
+    def test_websocket_loopback_is_excluded_and_binary_base64_is_decoded(self):
+        summary = summarize_performance_logs([
+            {"method": "Network.webSocketCreated", "params": {"requestId": "local", "url": "ws://127.0.0.1:9000/ws"}},
+            {"method": "Network.webSocketFrameSent", "params": {"requestId": "local", "response": {"opcode": 1, "payloadData": "local"}}},
+            {"method": "Network.webSocketFrameReceived", "params": {"requestId": "local", "response": {"opcode": 1, "payloadData": "local"}}},
+            {"method": "Network.webSocketCreated", "params": {"requestId": "remote", "url": "wss://example.test/ws"}},
+            {"method": "Network.webSocketFrameSent", "params": {"requestId": "remote", "response": {"opcode": 2, "payloadData": "YWJj"}}},
+            {"method": "Network.webSocketFrameReceived", "params": {"requestId": "remote", "response": {"opcode": 1, "payloadData": "收到"}}},
+        ])
+        self.assertEqual(summary["websocket_sent"], 3)
+        self.assertEqual(summary["websocket_received"], 6)
+        self.assertEqual(summary["observed_transport_bytes"], 9)
+
     def test_summary_uses_encoded_network_bytes_and_cache_bytes(self):
         def entry(method, params):
             return {"message": json.dumps({"message": {"method": method, "params": params}})}

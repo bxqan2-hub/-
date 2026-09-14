@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -40,9 +41,13 @@ LOW_TRAFFIC_RESOURCE_TYPES = {"image", "media", "font", "manifest"}
 # remain live.  The application shell and background API polling otherwise
 # keep downloading bundles while the worker is finishing export/2FA.
 SESSION_REQUIRED_PREFIXES = (
-    "/api/auth/callback/", "/api/auth/session", "/api/auth/csrf",
-    "/api/auth/signin/",
+    "/api/auth/callback/", "/api/auth/signin/",
 )
+SESSION_REQUIRED_PATHS = {
+    "/api/auth/session", "/api/auth/csrf",
+    "/backend-api/accounts/mfa/enroll",
+    "/backend-api/accounts/mfa/user/activate_enrollment",
+}
 # Auth RUM is a browser telemetry batch and is not part of registration,
 # password, OTP, or MFA state.  Its payloads are several megabytes per
 # account, so the low-traffic policy intercepts only this exact endpoint.
@@ -150,7 +155,8 @@ def block_reason(url: str, resource_type: str = "", *, session_only: bool = Fals
             and path.endswith(OPTIONAL_MEDIA_EXTENSIONS)):
         return "optional_media"
     if session_only and host in {"chatgpt.com", "www.chatgpt.com"}:
-        if resource == "document" or lower_path.startswith(SESSION_REQUIRED_PREFIXES):
+        if (resource == "document" or lower_path in SESSION_REQUIRED_PATHS
+                or lower_path.startswith(SESSION_REQUIRED_PREFIXES)):
             return ""
         return "post_auth_" + (resource or "other")
     return ""
@@ -418,37 +424,75 @@ class _CacheLoadCoordinator:
 
 def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int = 0, cache_hits: int = 0,
                                cache_misses: int = 0, cached_request_urls=(), cached_request_ids=(),
+                               blocked_request_ids=(),
                                budget_bytes: int = 3 * 1024 * 1024) -> dict:
-    requests: dict[str, str] = {}
-    request_resource_types: dict[str, str] = {}
+    """Estimate external browser payload bytes, not proxy-billed wire traffic.
+
+    CDP omits transport framing/retransmits and can omit POST bodies. Native
+    cache hits and loopback traffic are not external transfers. Redirects reuse
+    requestId, so each hop must be settled independently before its replacement.
+    """
+    requests: dict[str, dict] = {}
+    hops: list[dict] = []
     websocket_urls: dict[str, str] = {}
     exact_cached_request_ids = {str(request_id) for request_id in (cached_request_ids or ()) if request_id}
-    replayed_request_ids: set[str] = set()
-    blocked_request_ids: set[str] = set()
+    exact_blocked_request_ids = {str(request_id) for request_id in (blocked_request_ids or ()) if request_id}
     cached_url_counts = Counter(str(url) for url in (cached_request_urls or ()) if url)
     downloaded = 0
     uploaded = 0
     websocket_received = 0
     websocket_sent = 0
-    data_received_by_request: dict[str, int] = defaultdict(int)
-    finished_request_ids: set[str] = set()
-    started = 0
+    network_requests = 0
     blocked_by_reason: dict[str, int] = defaultdict(int)
     by_host: dict[str, int] = defaultdict(int)
     by_path: dict[str, int] = defaultdict(int)
     uploaded_by_host: dict[str, int] = defaultdict(int)
     uploaded_by_path: dict[str, int] = defaultdict(int)
-    pending_uploads: dict[str, tuple[int, str]] = {}
 
-    def record_upload(upload_size: int, url: str) -> None:
-        nonlocal uploaded
-        uploaded += upload_size
-        parsed_upload = urlparse(url)
-        if parsed_upload.hostname:
-            upload_host = parsed_upload.hostname.lower()
-            upload_path = f"{upload_host}{parsed_upload.path or '/'}"
-            uploaded_by_host[upload_host] += upload_size
-            uploaded_by_path[upload_path] += upload_size
+    def external_url(url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if parsed.scheme not in {"http", "https", "ws", "wss"} or not host:
+                return False
+            if host == "localhost" or host.endswith(".localhost"):
+                return False
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                return True
+            mapped = getattr(address, "ipv4_mapped", None)
+            return not (address.is_loopback or (mapped and mapped.is_loopback))
+        except ValueError:
+            return False
+
+    def byte_count(value) -> int:
+        try:
+            return max(0, int(float(value or 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def new_hop(request_id: str) -> dict:
+        hop = {"id": request_id, "url": "", "resource": "", "started": False,
+               "upload": 0, "received": 0, "finished": None, "response": False,
+               "response_bytes": 0, "native_cache": False, "revalidated": False,
+               "replayed": False, "redirected": False,
+               "blocked_reason": "", "error": ""}
+        requests[request_id] = hop
+        hops.append(hop)
+        return hop
+
+    def record_response(hop: dict, response: dict) -> None:
+        hop["response"] = True
+        hop["response_bytes"] = max(hop["response_bytes"], byte_count(response.get("encodedDataLength")))
+        if not hop["url"]:
+            hop["url"] = str(response.get("url") or "")
+        # A service worker may fetch live data: fromServiceWorker alone is not
+        # proof of a cache hit. Only explicit local response sources qualify.
+        hop["native_cache"] |= bool(
+            response.get("fromDiskCache") or response.get("fromPrefetchCache")
+            or response.get("serviceWorkerResponseSource") in {"cache-storage", "http-cache", "fallback-code"}
+        )
 
     for raw in entries:
         try:
@@ -465,83 +509,104 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
         if method == "Network.requestWillBeSent":
             request = params.get("request") or {}
             url = str(request.get("url") or "")
-            if url.startswith(("http://", "https://")):
-                requests[request_id] = url
-                request_resource_types[request_id] = str(params.get("type") or "")
-                started += 1
-                post_data = request.get("postData")
-                if post_data:
-                    upload_size = len(str(post_data).encode("utf-8"))
-                    if request_id:
-                        # Network.requestWillBeSent exposes the attempted
-                        # body before Fetch can reject it.  Defer accounting
-                        # until loadingFailed identifies blocked requests so
-                        # a rejected telemetry batch is not reported as proxy
-                        # traffic.
-                        pending_uploads[request_id] = (upload_size, url)
-                    else:
-                        record_upload(upload_size, url)
-                # Fetch.RequestPaused exposes Network.requestId on current
-                # Chromium builds.  Prefer that exact identity so a network
-                # miss followed by a replay of the same URL cannot subtract
-                # the wrong response from encodedDataLength.  URL matching is
-                # retained only as a compatibility fallback for older builds.
-                if request_id and request_id in exact_cached_request_ids:
-                    replayed_request_ids.add(request_id)
-                elif cached_url_counts[url] > 0:
-                    cached_url_counts[url] -= 1
-                    replayed_request_ids.add(request_id)
+            hop = requests.get(request_id)
+            redirect = params.get("redirectResponse")
+            if redirect is not None:
+                hop = hop or new_hop(request_id)
+                record_response(hop, redirect)
+                hop["finished"] = byte_count(redirect.get("encodedDataLength"))
+                hop["redirected"] = True
+                hop = None
+            hop = hop or new_hop(request_id)
+            hop.update(url=url, resource=str(params.get("type") or ""), started=True)
+            post_data = request.get("postData")
+            hop["upload"] = len(str(post_data).encode("utf-8")) if post_data else 0
+            # Exact Fetch identities apply to the final hop, not a preceding
+            # redirect with the same id. URL fallback is for older CDP builds.
+            if request_id not in exact_cached_request_ids and cached_url_counts[url] > 0:
+                cached_url_counts[url] -= 1
+                hop["replayed"] = True
+        elif method == "Network.responseReceived":
+            hop = requests.get(request_id) or new_hop(request_id)
+            record_response(hop, params.get("response") or {})
+        elif method == "Network.requestServedFromCache":
+            hop = requests.get(request_id) or new_hop(request_id)
+            hop["native_cache"] = True
+        elif method == "Network.responseReceivedExtraInfo" and params.get("statusCode") == 304:
+            hop = requests.get(request_id) or new_hop(request_id)
+            hop["revalidated"] = True
         elif method == "Network.loadingFinished":
-            if request_id in replayed_request_ids:
-                continue
-            size = max(0, int(float(params.get("encodedDataLength") or 0)))
-            downloaded += size
-            finished_request_ids.add(request_id)
-            parsed = urlparse(requests.get(request_id, ""))
-            if parsed.hostname:
-                by_host[parsed.hostname.lower()] += size
-                by_path[f"{parsed.hostname.lower()}{parsed.path or '/'}"] += size
+            hop = requests.get(request_id) or new_hop(request_id)
+            hop["finished"] = byte_count(params.get("encodedDataLength"))
         elif method == "Network.dataReceived":
-            if request_id not in replayed_request_ids:
-                data_received_by_request[request_id] += max(
-                    0, int(float(params.get("encodedDataLength") or 0)),
-                )
-        elif method == "Network.loadingFailed" and params.get("blockedReason"):
-            reason = block_reason(
-                requests.get(request_id, ""), request_resource_types.get(request_id, ""),
-            ) or str(params.get("blockedReason") or "blocked")
-            blocked_by_reason[reason] += 1
-            if request_id:
-                blocked_request_ids.add(request_id)
+            hop = requests.get(request_id) or new_hop(request_id)
+            hop["received"] += byte_count(params.get("encodedDataLength"))
+        elif method == "Network.loadingFailed":
+            hop = requests.get(request_id) or new_hop(request_id)
+            hop["blocked_reason"] = str(params.get("blockedReason") or "")
+            hop["error"] = str(params.get("errorText") or "")
         elif method == "Network.webSocketCreated":
             socket_id = str(params.get("requestId") or "")
             if socket_id:
                 websocket_urls[socket_id] = str(params.get("url") or "")
-        elif method == "Network.webSocketFrameSent":
+        elif method in {"Network.webSocketFrameSent", "Network.webSocketFrameReceived"}:
+            if request_id in websocket_urls and not external_url(websocket_urls[request_id]):
+                continue
             frame = params.get("response") or {}
-            websocket_sent += len(str(frame.get("payloadData") or "").encode("utf-8"))
-        elif method == "Network.webSocketFrameReceived":
-            frame = params.get("response") or {}
-            websocket_received += len(str(frame.get("payloadData") or "").encode("utf-8"))
+            payload = str(frame.get("payloadData") or "")
+            if frame.get("opcode", 1) == 1:
+                size = len(payload.encode("utf-8"))
+            else:
+                try:
+                    size = len(base64.b64decode(payload, validate=True))
+                except (ValueError, TypeError):
+                    size = 0
+            if method == "Network.webSocketFrameSent":
+                websocket_sent += size
+            else:
+                websocket_received += size
 
-    for request_id, (upload_size, url) in pending_uploads.items():
-        if request_id not in blocked_request_ids:
-            record_upload(upload_size, url)
-
-    # A few Roxy builds lose loadingFinished while retaining dataReceived.
-    # Count that request once as a fallback so the account meter does not
-    # under-report bytes merely because the terminal event was dropped.
     data_received_fallback = 0
-    for request_id, size in data_received_by_request.items():
-        if not size or request_id in finished_request_ids or request_id in blocked_request_ids:
+    for hop in hops:
+        url = hop["url"]
+        if url and not external_url(url):
             continue
-        data_received_fallback += size
+        request_id = hop["id"]
+        replayed = hop["replayed"] or (not hop["redirected"] and request_id in exact_cached_request_ids)
+        known_blocked = not hop["redirected"] and request_id in exact_blocked_request_ids
+        block = hop["blocked_reason"]
+        client_block = hop["error"] in {"net::ERR_BLOCKED_BY_CLIENT", "net::ERR_BLOCKED_BY_ADMINISTRATOR"}
+        if block or client_block or known_blocked:
+            reason = block_reason(url, hop["resource"]) or block or "inspector"
+            blocked_by_reason[reason] += 1
+        # Response-side CORP/CORS/integrity rejection is not free traffic.
+        # Suppress a body only for a known pre-request rejection and only while
+        # there is no evidence that this particular hop reached the network.
+        sent = hop["response"] or hop["received"] > 0 or hop["finished"] is not None
+        blocked_before_send = not sent and (
+            known_blocked or client_block or block in {"inspector", "csp", "mixed-content", "subresource-filter"}
+        )
+        if replayed or (hop["native_cache"] and not hop["revalidated"]) or blocked_before_send:
+            continue
+        network_requests += int(hop["started"])
+        size = hop["finished"]
+        if size is None:
+            size = max(hop["received"], hop["response_bytes"])
+            data_received_fallback += size
         downloaded += size
-        parsed = urlparse(requests.get(request_id, ""))
+        uploaded += hop["upload"]
+        parsed = urlparse(url)
         if parsed.hostname:
-            by_host[parsed.hostname.lower()] += size
-            by_path[f"{parsed.hostname.lower()}{parsed.path or '/'}"] += size
+            host = parsed.hostname.lower()
+            path = f"{host}{parsed.path or '/'}"
+            if size:
+                by_host[host] += size
+                by_path[path] += size
+            if hop["upload"]:
+                uploaded_by_host[host] += hop["upload"]
+                uploaded_by_path[path] += hop["upload"]
 
+    observed = downloaded + uploaded + websocket_sent + websocket_received
     top_paths = sorted(by_path.items(), key=lambda item: item[1], reverse=True)[:20]
     return {
         "downloaded": downloaded,
@@ -549,15 +614,13 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
         "websocket_sent": websocket_sent,
         "websocket_received": websocket_received,
         "data_received_fallback": data_received_fallback,
-        "observed_transport_bytes": downloaded + uploaded + websocket_sent + websocket_received,
+        "observed_transport_bytes": observed,
         "logical_downloaded": downloaded + max(0, int(cached_bytes)),
         "cached_downloaded": max(0, int(cached_bytes)),
         "cache_saved_bytes": max(0, int(cached_bytes)),
         "cache_hits": max(0, int(cache_hits)),
         "cache_misses": max(0, int(cache_misses)),
-        # A blocked request and a Fetch-fulfilled cache replay never reached
-        # the proxy/network and therefore must not inflate this counter.
-        "network_requests": max(0, started - len(replayed_request_ids) - len(blocked_request_ids)),
+        "network_requests": network_requests,
         "blocked": sum(blocked_by_reason.values()),
         "blocked_by_reason": dict(sorted(blocked_by_reason.items())),
         "by_host": dict(sorted(by_host.items(), key=lambda item: item[1], reverse=True)),
@@ -565,7 +628,7 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
         "uploaded_by_host": dict(sorted(uploaded_by_host.items(), key=lambda item: item[1], reverse=True)),
         "uploaded_by_path": dict(sorted(uploaded_by_path.items(), key=lambda item: item[1], reverse=True)[:20]),
         "budget_bytes": max(0, int(budget_bytes)),
-        "within_budget": downloaded <= max(0, int(budget_bytes)),
+        "within_budget": observed <= max(0, int(budget_bytes)),
     }
 
 
@@ -606,6 +669,7 @@ class RoxyTrafficOptimizer:
         }
         self._cached_urls: list[str] = []
         self._cached_request_ids: list[str] = []
+        self._blocked_request_ids: set[str] = set()
         self._loading_requests: dict[str, str] = {}
         self._install_errors: list[str] = []
         self._degraded_reason = ""
@@ -645,13 +709,7 @@ class RoxyTrafficOptimizer:
         self._performance_drain_thread.start()
 
     def _enable_network_domain(self) -> None:
-        """Enable CDP Network without truncating the traffic event stream.
-
-        The former 2 MiB total/512 KiB per-resource limits silently dropped
-        Network.loadingFinished events once a Profile loaded its application
-        shell.  That made the per-account meter report roughly 2 MiB while
-        the proxy adapter still paid for the full response bytes.
-        """
+        """Enable Network with runtime defaults; payload buffers are not wire meters."""
         self.driver.execute_cdp_cmd("Network.enable", {})
 
     def install(self) -> None:
@@ -673,8 +731,8 @@ class RoxyTrafficOptimizer:
             self._install_fetch_cache()
 
     def set_session_only(self, enabled: bool = True) -> None:
-        # Only a phase marker: password/MFA still need the application shell.
-        # Public versioned files remain reusable; session APIs never qualify.
+        # The existing Fetch callback reads this phase marker. Password/MFA
+        # use native fetch on the retained auth/MFA endpoints, not app bundles.
         with self._lock:
             self._session_only = bool(enabled)
 
@@ -718,6 +776,14 @@ class RoxyTrafficOptimizer:
                                 request_stage=devtools.fetch.RequestStage.REQUEST,
                             ))
             if self.low_traffic:
+                # Register the whole ChatGPT request surface once, so phase
+                # changes also reach scripts/XHR when shared cache is off.
+                # The classifier still allows them until session-only begins.
+                for host in ("chatgpt.com", "www.chatgpt.com"):
+                    patterns.append(devtools.fetch.RequestPattern(
+                        url_pattern=f"https://{host}/*",
+                        request_stage=devtools.fetch.RequestStage.REQUEST,
+                    ))
                 # Pause optional first-party resources and known telemetry /
                 # social-login hosts.  The handler keeps challenge and auth
                 # paths live, so the broad patterns do not become a second
@@ -725,6 +791,8 @@ class RoxyTrafficOptimizer:
                 # pattern: older Roxy/CDP builds reject the Manifest resource
                 # enum and then discard every Fetch rule.
                 for host in LOW_TRAFFIC_FIRST_PARTY_HOSTS:
+                    if host == "chatgpt.com":
+                        continue  # Already covered by its URL-only pattern.
                     for resource in (
                         devtools.network.ResourceType.IMAGE,
                         devtools.network.ResourceType.MEDIA,
@@ -790,6 +858,10 @@ class RoxyTrafficOptimizer:
             resource = _resource_name(event.resource_type)
             if self.low_traffic and block_reason(url, resource, session_only=self._session_only):
                 connection.execute(devtools.fetch.fail_request(request_id, devtools.network.ErrorReason.BLOCKED_BY_CLIENT))
+                network_id = getattr(event, "network_id", None)
+                if network_id:
+                    with self._lock:
+                        self._blocked_request_ids.add(str(network_id))
                 return
             if (not self.static_cache_enabled or not self._fetch_enabled
                     or not is_cacheable_request(url, method, resource, getattr(event.request, "headers", None))):
@@ -948,6 +1020,7 @@ class RoxyTrafficOptimizer:
             stats = dict(self._stats)
             cached_urls = list(self._cached_urls)
             cached_request_ids = list(self._cached_request_ids)
+            blocked_request_ids = set(self._blocked_request_ids)
         summary = summarize_performance_logs(
             entries,
             cached_bytes=stats["cached_bytes"],
@@ -955,10 +1028,11 @@ class RoxyTrafficOptimizer:
             cache_misses=stats["cache_misses"],
             cached_request_urls=cached_urls,
             cached_request_ids=cached_request_ids,
+            blocked_request_ids=blocked_request_ids,
             budget_bytes=self.budget_bytes,
         )
         summary.update({
-            "metrics_version": 3,
+            "metrics_version": 4,
             "downloaded_excludes_cache_replay": True,
             "enabled": self.low_traffic or self.static_cache_enabled,
             "low_traffic": self.low_traffic,

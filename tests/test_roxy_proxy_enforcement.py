@@ -317,7 +317,7 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertIs(body["randomFingerprint"], True)
         self.assertEqual(client._last_profile_create_summary["fingerprint_requested"], True)
 
-    def test_profile_create_disables_workbench_and_bypasses_loopback(self):
+    def test_profile_create_disables_workbench_in_finger_info(self):
         client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
         with ExitStack() as stack:
             for config_patch in self._config_patches():
@@ -328,11 +328,24 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
             self.assertEqual(client.create_profile(), "793")
 
         body = request.call_args.kwargs["json_body"]
-        self.assertEqual(body["openWorkbench"], 0)
-        self.assertEqual(
-            body["startupParam"],
-            "--proxy-bypass-list=<-loopback>,localhost,127.0.0.1",
-        )
+        self.assertEqual(body["fingerInfo"]["openWorkbench"], 0)
+        self.assertNotIn("openWorkbench", body)
+        self.assertNotIn("startupParam", body)
+        self.assertNotIn("startupParam", body["fingerInfo"])
+
+    def test_workbench_default_preserves_caller_fingerprint_settings(self):
+        client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+        finger_info = {"openWorkbench": 1, "language": "en-US", "startupParam": "--mute-audio"}
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            request = stack.enter_context(
+                patch.object(client, "request", return_value={"data": {"dirId": "794"}})
+            )
+            client.create_profile({"fingerInfo": finger_info})
+        body = request.call_args.kwargs["json_body"]
+        self.assertEqual(body["fingerInfo"], finger_info)
+        self.assertIsNot(body["fingerInfo"], finger_info)
 
     def test_create_retries_only_explicit_roxy_busy_response(self):
         client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
