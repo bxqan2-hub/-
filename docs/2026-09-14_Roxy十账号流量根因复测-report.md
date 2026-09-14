@@ -22,6 +22,7 @@
 - 逐账号上传路径复盘（13:09–13:16）定位到 `auth.openai.com/awe/api/v2/rum`：单账号约 2.82–3.09 MB，十账号约 29.8 MB；该请求是 Auth RUM 遥测批次，不参与注册、密码、OTP 或 MFA。此前分类器将其作为 live security/auth 请求放行，因此正好形成每号约 3 MB 的固定异常上传。
 - 低流量策略现在仅对 `https://auth.openai.com/awe/api/v2/rum*` 加 Fetch 精确拦截并记录 `auth_rum`，不扩大到 `auth.openai.com`，挑战、登录页面、OTP/MFA API 继续直连。
 - 新一轮 687–696 证实：`auth_rum` 已命中 198–206 次，但成功账号仍上传 1.58–3.19 MB 的同一路径；时间线显示 Roxy `/browser/open` 后约 13 秒才接入 Selenium，启动页已在拦截器安装前发送首个批次。注册入口现于 Selenium 接入后立即导航 `about:blank`，先取消 Roxy 的存储启动页，再安装拦截器并进入登录页。
+- 计量口径同时修正：`Network.requestWillBeSent` 会先带出 POST `postData`，即使随后被 Fetch 拦截也会被旧逻辑计入 `uploaded`。现在延后到请求终态，`loadingFailed.blockedReason` 的 body 从 `uploaded/observed_transport_bytes` 排除；因此账号表只显示实际到达代理的上传，阻断体量仍由 `blocked_by_reason` 保留用于审计。
 
 ## 下一轮验证
 

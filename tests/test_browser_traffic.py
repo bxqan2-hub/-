@@ -800,6 +800,25 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["network_requests"], 1)
         self.assertEqual(summary["blocked"], 1)
 
+    def test_blocked_post_body_is_excluded_from_transport_upload(self):
+        def entry(method, params):
+            return {"message": json.dumps({"message": {"method": method, "params": params}})}
+
+        summary = summarize_performance_logs([
+            entry("Network.requestWillBeSent", {
+                "requestId": "rum", "type": "XHR",
+                "request": {
+                    "url": "https://auth.openai.com/awe/api/v2/rum",
+                    "postData": "x" * 3000,
+                },
+            }),
+            entry("Network.loadingFailed", {"requestId": "rum", "blockedReason": "inspector"}),
+        ])
+
+        self.assertEqual(summary["uploaded"], 0)
+        self.assertEqual(summary["observed_transport_bytes"], 0)
+        self.assertEqual(summary["blocked_by_reason"], {"auth_rum": 1})
+
     def test_external_blocked_reason_is_preserved_without_reclassifying_images(self):
         def entry(method, params):
             return {"message": json.dumps({"message": {"method": method, "params": params}})}

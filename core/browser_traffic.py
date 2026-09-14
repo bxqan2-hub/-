@@ -438,6 +438,17 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
     by_path: dict[str, int] = defaultdict(int)
     uploaded_by_host: dict[str, int] = defaultdict(int)
     uploaded_by_path: dict[str, int] = defaultdict(int)
+    pending_uploads: dict[str, tuple[int, str]] = {}
+
+    def record_upload(upload_size: int, url: str) -> None:
+        nonlocal uploaded
+        uploaded += upload_size
+        parsed_upload = urlparse(url)
+        if parsed_upload.hostname:
+            upload_host = parsed_upload.hostname.lower()
+            upload_path = f"{upload_host}{parsed_upload.path or '/'}"
+            uploaded_by_host[upload_host] += upload_size
+            uploaded_by_path[upload_path] += upload_size
 
     for raw in entries:
         try:
@@ -461,13 +472,15 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
                 post_data = request.get("postData")
                 if post_data:
                     upload_size = len(str(post_data).encode("utf-8"))
-                    uploaded += upload_size
-                    parsed_upload = urlparse(url)
-                    if parsed_upload.hostname:
-                        upload_host = parsed_upload.hostname.lower()
-                        upload_path = f"{upload_host}{parsed_upload.path or '/'}"
-                        uploaded_by_host[upload_host] += upload_size
-                        uploaded_by_path[upload_path] += upload_size
+                    if request_id:
+                        # Network.requestWillBeSent exposes the attempted
+                        # body before Fetch can reject it.  Defer accounting
+                        # until loadingFailed identifies blocked requests so
+                        # a rejected telemetry batch is not reported as proxy
+                        # traffic.
+                        pending_uploads[request_id] = (upload_size, url)
+                    else:
+                        record_upload(upload_size, url)
                 # Fetch.RequestPaused exposes Network.requestId on current
                 # Chromium builds.  Prefer that exact identity so a network
                 # miss followed by a replay of the same URL cannot subtract
@@ -510,6 +523,10 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
         elif method == "Network.webSocketFrameReceived":
             frame = params.get("response") or {}
             websocket_received += len(str(frame.get("payloadData") or "").encode("utf-8"))
+
+    for request_id, (upload_size, url) in pending_uploads.items():
+        if request_id not in blocked_request_ids:
+            record_upload(upload_size, url)
 
     # A few Roxy builds lose loadingFinished while retaining dataReceived.
     # Count that request once as a fallback so the account meter does not
