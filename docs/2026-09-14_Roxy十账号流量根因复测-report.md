@@ -2,13 +2,13 @@
 
 ## 当前结论与证据更正
 
-目标仍为十个新邮箱完整注册约 20–30 MB，并解释启动、关闭及注册以外的代理消耗。现有复测尚未证明达标。历史记录 642–651 的 Meta 网卡增量约 398.1 MB，账号 CDP 摘要约 98.3 MB；这两个数不是同一统计范围，其差值不是“注册漏计流量”的证明。
+目标仍为十个新邮箱完整注册约 20–30 MB，并解释启动、关闭及注册以外的代理消耗。已复现供应商连接大下载并定位到 Roxy 新 Profile 的组件更新；修复后整批达标仍待验证。历史记录 642–651 的 Meta 网卡增量约 398.1 MB，账号 CDP 摘要约 98.3 MB；这两个数不是同一统计范围，其差值不是“注册漏计流量”的证明。
 
 Meta 已确认是 Mihomo 的全机 TUN，承载多个应用。供应商扣费应对照对应上游代理连接字节与供应商账单；Meta 网卡仅作为全机突发参考。CDP 的 `postData` 是请求体估算，未覆盖压缩上传、TLS、请求头、重传、协议请求及启动前流量，所以 `observed_transport_bytes` 也不是精确账单。
 
 ## 证据与定位
 
-- 每个成功账号仍下载约 5–11 MB 的 ChatGPT 公共 bundle；静态缓存命中关闭后 `cached=0/hits=0`，因此本轮异常不是缓存复用口径造成。
+- 修复缓存前，每个成功账号下载约 5–11 MB 的 ChatGPT 公共 bundle；静态缓存命中关闭后 `cached=0/hits=0`，因此本轮异常不是缓存复用口径造成。
 - `/browser/open` 到 Selenium 接入之间缺少账号级事件。历史并发等待较长，而单账号 653/655 仅 4–6 秒；应分开记录本地生命周期排队与外部网络请求，不以等待时长推算字节。
 - 密码/2FA 阶段与 Meta 峰值的时间重合，只能定位观察窗口，尚不能证明由 `/backend-api/models` 或重认证造成。
 
@@ -17,7 +17,7 @@ Meta 已确认是 Mihomo 的全机 TUN，承载多个应用。供应商扣费应
 - `core/browser_traffic.py::block_reason` 存在 session-only 分类规则；复核发现 low-traffic Fetch patterns 尚未覆盖普通 ChatGPT JS/XHR，所以仅分类器测试通过不足以证明运行时拦截。修复匹配范围前还需保留密码/MFA 必需请求。
 - `stop-webui.bat`：处理“进程在枚举后自行退出”的竞态，避免启动脚本因 `Stop-Process` 偶发找不到 PID 而中止。
 - `core/account_export.py::_validate_2fa_token`：只读 Token 校验改为流式响应并在读取正文前关闭，避免 Cloudflare 403 挑战 HTML 被完整下载。
-- Roxy 启动参数须以实际进程为准，而不是发送日志。当前运行时共享缓存关闭、上限 256 KiB；这会让大 bundle 每个新 Profile 重复下载，尚未恢复教程的共享缓存目标。
+- Roxy 启动参数须以实际进程为准，而不是发送日志。该历史轮次运行时共享缓存关闭、上限 256 KiB；这会让大 bundle 每个新 Profile 重复下载，尚未恢复教程的共享缓存目标。
 - `core/browser_traffic.py::is_cacheable_request`：允许公开 CDN 常见的 `x-client-version`/`x-openai-build-id` 等非敏感请求头，仅继续拒绝认证、条件和设备会话头，避免缓存候选被无关 `x-*` 头全部淘汰。
 - 热缓存实验（677–686）记录 Meta 增量 153.9 MB 下行、39.3 MB 上行。缓存字段是解压后的本地回放体量，和全机网卡同时增长不能证明回放经过供应商代理。此前“缓存回放放大代理账单”的结论撤回，待单请求冷载/本地回放及代理连接字节对照验证。
 - 逐账号上传路径复盘（13:09–13:16）定位到 `auth.openai.com/awe/api/v2/rum`：单账号约 2.82–3.09 MB，十账号约 29.8 MB；该请求是 Auth RUM 遥测批次，不参与注册、密码、OTP 或 MFA。此前分类器将其作为 live security/auth 请求放行，因此正好形成每号约 3 MB 的固定异常上传。
@@ -48,3 +48,54 @@ Meta 已确认是 Mihomo 的全机 TUN，承载多个应用。供应商扣费应
 验证：浏览器流量、Roxy 代理/Session 恢复、密码/2FA 聚焦套件 **337 passed, 260 subtests passed**；流量与配置默认值套件 **80 passed, 247 subtests passed**。十账号新回归仍待完成，当前不宣称全目标达成。
 
 参考：[Roxy 官方 API 字段层级](https://roxybrowser.com/docs/api-documentation/api-endpoint.html)、[Chromium 代理隐式绕行与减法规则](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)。
+
+
+## 14:30–14:40 Cliproxy 十账号与单账号连接定位
+
+用户明确 4.93 GB 是 **Cliproxy** 余额，不是 Clash 套餐；Cliproxy 面板有延迟结算。余额刷新时点不当作字节实际传输时点。
+
+### 707–716：页面压缩有效，但整体仍有额外大下载
+
+- 7 个任务成功、3 个任务失败，最后关闭/删除环境于 14:34:40。
+- 全部十次浏览器双向 payload 观测合计 **21,608,025 B（21.61 MB）**，缓存命中 **443** 次。284,936,648 B 的解压后本地回放不计入实际流量。
+- 14:30:47–14:35:40 的 Cliproxy 匹配连接采样下界 **154,968,588 B（154.97 MB）**；Mihomo 全局 **182,488,176 B**，二者不混算。
+- 7 条大连接合计 **127,143,429 B 下行**，上行仅 8,987 B；14:32:13–14:32:46 的 32.65 秒集中增加 **100,087,397 B**。不是内存“释放”流量，而是实际大下载在短时间发生，叠加供应商面板刷新/延迟结算表现为跳变。
+- 连接采样仍有短连接/关闭尾部遗漏：1459 个有效样本、3 次读取错误、515 条关闭连接尾部未知。154.97 MB 是观测下界，不伪装精确账单。
+
+### 717：单账号因果链
+
+为避免直接再烧十账号，增加一个新邮箱的诊断运行；仅采集 HTTP 元信息、操作系统 TCP/PID 和 Chromium NetLog，不修改业务请求。该任务最后在补密码的邮件阶段失败，但后台大下载已经完整发生。
+
+1. Cliproxy 连接 `1188b60d-f794-4591-9c26-b6aa5de794e8` 于 14:38:43.333 建立，源端口 **58857**，TCP 表精确映射 **RoxyChrome.exe PID 59976**，父进程 **59152**。
+2. NetLog SOCKET source **1372** 的本地地址端口与之吻合；HTTP_STREAM 依赖链指向 URL_REQUEST **1368**。
+3. 目标是 `edgedl.me.gvt1.com` 的 `chrome_component` 下载，文件标识 `oimompecagnajdejgnnjijobebaeigek_4.10.3050.0_win64_….crx3`（Widevine）。HTTP 200、gzip、Content-Length **17,704,052 B**。
+4. 解码后的 CRX **22,692,383 B**，与同一 Profile 在 14:38:48 写入的 `component_crx_cache/7b81444b063f81e77c527c5589e86836cc2f7328deb2772300ccc7dc9e2510c3` 大小一致；还新增了 **7,929,264 B** 的本地建议模型 CRX。磁盘大小仅作交叉核对，外部计量使用 NetLog/代理连接字节。
+5. 浏览器页面/Service Worker CDP 只见普通小请求；Python Token 校验和套餐查询时点晚于主要下载首段。根因位于浏览器后台组件更新，不是缓存 fulfill、本地 Dashboard 或这两条 Python 请求。
+
+### 参数路径的实际缺陷
+
+`_ROXY_PROFILE_EFFICIENCY_ARGS` 早已包含 `--disable-component-update` 等参数，但只放在 `/browser/open` 的 `args`。单元测试验证了发送 payload，真实 RoxyChrome argv 却没有这些参数。
+
+当前运行时确认 `fingerInfo.startupParam` 真正进入 argv。官方 API 规定该字段以 **分号**分隔：把两个 flag 用空格拼接会被作为一个 argv（诊断 NetLog 文件名实际吞入第二个 flag，退出后仍成功落盘）。因此修复应搬迁已有默认参数到 Profile 创建的真实读取字段，而不是追加另一套省流开关。
+
+### 失败分型与密码/MFA复核
+
+先按高/中/低概率核查，再对证据分类：
+
+- 高概率已证实：707 是邮件列表单请求 5 秒 ReadTimeout，连续错误阈值 1 触发终止；711 是 25 秒内没有 after_ts 后的新 OTP；715 是补设密码前同窗只读 Session 返回 HTTP 403。
+- 中概率待核：715 具体是远端挑战还是鉴权状态，当前响应摘要不足；不把它和邮件错误混合。
+- 低概率直接机制排除：真实 HTTP403 重放得到 `stage=session,status=403`，本地 Fetch rejection 得到 `stage=exception,status=null`；Session 精确放行且不缓存。715 尚未发起密码/MFA写操作。
+- 保留账号邮箱匹配、同一浏览器 Cookie/代理、Token 显式透传、密码终态 checkpoint、enroll/activate 成功后保存；不为省流共享账号态或跳过确认。
+
+诊断均保留在忽略目录，不进入 Git：`run/batch707-716-proxy-summary.json`、`run/batch707-717-browser-summary.json`、`run/proxy-controller-diagnostic717.jsonl`、`run/supplier-diagnostic-cdp-717.jsonl` 与 NetLog。原始诊断可能含敏感 URL，仅报告脱敏 host/path/字节及关联 ID。
+
+补充参考：[Roxy startupParam 分号约定与 open args](https://roxybrowser.com/docs/api-documentation/api-endpoint.html)。
+
+
+### 组件明细闭环与最小修复
+
+717 的同一供应商 Socket 编码正文：Widevine 17,704,052 B、输入建议模型差分 4,665,960 B、其他组件 544,456 B，共 **22,914,468 B**；Socket 实收 **22,917,769 B**，余量 3,301 B 为响应头/隧道等传输差异。整个浏览器供应商下行 **28,734,120 B**，后台组件占 **79.75%**。这些是 NetLog 层级量，不包括 Python 请求，也不冒充最终供应商扣费。
+
+已在 `RoxyBrowserClient.create_profile` 将原 7 个效率参数迁移到分号分隔的 `fingerInfo.startupParam`，`open_profile` 删除默认参数注入。保留显式用户参数及配置对象不可变；新 Profile 实际进程 argv 已确认 `--disable-component-update` 等 7 项全部存在。不是只检查发送 payload。
+
+报告证据补充：`run/supplier-diagnostic-717-netlog-summary.json`。不修改系统 Clash 配置、不复用个人 Profile、不共享 Cookie/账号凭据、不干预账号验证；修复限定在项目创建的临时浏览器生命周期。

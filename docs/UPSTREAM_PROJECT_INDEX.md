@@ -1,6 +1,15 @@
 # 上游项目索引：GPT-utral-platform
 
-## 2026-09-14 流量执行链与测量更正（当前）
+## 2026-09-14 Cliproxy 后台组件下载根因（当前）
+
+- 仍锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；再次对照上游 create/open 与本地生命周期实现，保留独立 Profile、随机指纹、代理预检与并发边界。
+- 十账号 Cliproxy 连接下界 154.97 MB 对比 CDP 双向 21.61 MB；单账号 NetLog 将 22.914 MB 组件下载经 sourcePort/PID/SOCKET 关联到 Widevine、输入建议模型及其他 CRX，属于 Chromium 后台更新而非页面资源。
+- 原默认效率参数只放 `/browser/open.args`，真实 argv 缺失。迁移到既有 `create_profile → fingerInfo.startupParam`，按官方分号格式合并；删除 open 的默认注入，保留调用方显式参数。没有新增配置或第二套策略。
+- 空 Profile 的实际 argv 已逐项确认全部 7 个原效率参数存在；100 秒观察和修复后十账号对账结果继续记录在 `docs/2026-09-14_Roxy十账号流量根因复测-report.md`。
+- 用户确认供应商为 Cliproxy，面板有延迟；Mihomo 全局、Cliproxy 匹配连接、CDP payload 与余额账单分别记录，禁止互相替代。
+
+## 2026-09-14 流量执行链与测量更正
+
 
 - 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`，重新读取 vendor 下 `core/roxybrowser_client.py`（SHA-256 `6cb5281a320080425544727c6aa1dc95c40f3183d814f381e9f64e002d6c1e9c`）、`core/browser_traffic.py`（`b1e241524cf1068a4943ee6a9140e4c484ee70780466408a29f995e16ab8d98e`）、`core/roxy_registration.py`（`454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`）。
 - 上游继续使用 Profile 创建、CDP/Fetch 路线；本地保留 public/私有头/TTL 门禁和账号隔离。修正本地 `openWorkbench` 为官方 `fingerInfo` 层级，不注入反向 loopback 规则。

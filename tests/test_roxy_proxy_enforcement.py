@@ -69,7 +69,7 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertEqual(opened.preflight_exit_geo, {})
         probe_proxy_exit_geo.assert_not_called()
 
-    def test_open_merges_profile_efficiency_args_without_reducing_concurrency(self):
+    def test_open_preserves_custom_args_without_injecting_efficiency_defaults(self):
         client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
         with patch.object(client, "create_profile", return_value="created-profile"), \
              patch.object(
@@ -85,15 +85,22 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
 
         body = request.call_args.kwargs["json_body"]
         args = body["args"]
-        self.assertEqual(args[0], "--custom-flag")
-        self.assertEqual(args.count("--custom-flag"), 1)
-        self.assertEqual(args.count("--disable-sync"), 1)
-        self.assertIn("--disable-background-networking", args)
-        self.assertIn("--disable-component-update", args)
-        self.assertIn("--disable-domain-reliability", args)
-        self.assertIn("--disable-breakpad", args)
-        self.assertIn("--metrics-recording-only", args)
-        self.assertIn("--mute-audio", args)
+        self.assertEqual(args, ["--custom-flag", "--disable-sync"])
+
+    def test_open_empty_and_custom_valued_args_keep_previous_normalization(self):
+        for configured, expected in (
+            (None, []), ([], []), ("invalid-list", []),
+            ((" --custom=one ", "--custom=two", "--custom=one", ""), ["--custom=one", "--custom=two"]),
+        ):
+            with self.subTest(configured=configured):
+                client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+                extra = {"args": configured}
+                with patch.object(client, "create_profile", return_value="created-profile"), \
+                     patch("core.roxybrowser_client._cfg.ROXY_OPEN_EXTRA_PARAMS", extra), \
+                     patch.object(client, "request", return_value={"data": {"dirId": "created-profile", "http": "127.0.0.1:9222"}}) as request:
+                    client.open_profile(require_proxy_exit_ip=False)
+                self.assertEqual(request.call_args.kwargs["json_body"]["args"], expected)
+                self.assertEqual(extra, {"args": configured})
 
     def test_failed_proxy_exit_ip_probe_never_creates_or_opens_profile(self):
         client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
@@ -331,7 +338,11 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertEqual(body["fingerInfo"]["openWorkbench"], 0)
         self.assertNotIn("openWorkbench", body)
         self.assertNotIn("startupParam", body)
-        self.assertNotIn("startupParam", body["fingerInfo"])
+        self.assertEqual(body["fingerInfo"]["startupParam"].split(";"), [
+            "--disable-background-networking", "--disable-component-update", "--disable-domain-reliability",
+            "--disable-sync", "--disable-breakpad", "--metrics-recording-only", "--mute-audio",
+        ])
+        self.assertNotIn(" --", body["fingerInfo"]["startupParam"])
 
     def test_workbench_default_preserves_caller_fingerprint_settings(self):
         client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
@@ -344,8 +355,49 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
             )
             client.create_profile({"fingerInfo": finger_info})
         body = request.call_args.kwargs["json_body"]
-        self.assertEqual(body["fingerInfo"], finger_info)
+        self.assertEqual(body["fingerInfo"]["openWorkbench"], 1)
+        self.assertEqual(body["fingerInfo"]["language"], "en-US")
+        self.assertEqual(body["fingerInfo"]["startupParam"].split(";").count("--mute-audio"), 1)
+        self.assertIn("--disable-component-update", body["fingerInfo"]["startupParam"].split(";"))
+        self.assertEqual(finger_info, {"openWorkbench": 1, "language": "en-US", "startupParam": "--mute-audio"})
         self.assertIsNot(body["fingerInfo"], finger_info)
+
+    def test_create_merges_startup_parameters_without_mutating_template_or_losing_values(self):
+        from core.roxybrowser_client import _ROXY_PROFILE_EFFICIENCY_ARGS
+        original = " --custom=one ; --custom=two;--label=two words;--mute-audio=1;--custom=one;; "
+        template = {"fingerInfo": {"language": "en-US", "canvas": "noise", "startupParam": original}}
+        client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            stack.enter_context(patch("core.roxybrowser_client._cfg.ROXY_PROFILE_CREATE_PAYLOAD", template))
+            request = stack.enter_context(patch.object(client, "request", return_value={"data": {"dirId": "795"}}))
+            client.create_profile()
+            body = request.call_args.kwargs["json_body"]
+            # Applying the same create path again is idempotent, not another
+            # policy layer or repeated batch of default flags.
+            client.create_profile({"fingerInfo": body["fingerInfo"]})
+            second = request.call_args.kwargs["json_body"]
+        args = body["fingerInfo"]["startupParam"].split(";")
+        self.assertEqual(args[:4], ["--custom=one", "--custom=two", "--label=two words", "--mute-audio=1"])
+        self.assertEqual(args.count("--custom=one"), 1)
+        self.assertNotIn("--mute-audio", args)
+        self.assertEqual(args[4:], [arg for arg in _ROXY_PROFILE_EFFICIENCY_ARGS if arg != "--mute-audio"])
+        self.assertEqual(second["fingerInfo"], body["fingerInfo"])
+        self.assertEqual(body["fingerInfo"]["language"], "en-US")
+        self.assertEqual(body["fingerInfo"]["canvas"], "noise")
+        self.assertEqual(template, {"fingerInfo": {"language": "en-US", "canvas": "noise", "startupParam": original}})
+        self.assertIs(body["randomFingerprint"], True)
+        self.assertEqual(body["proxyInfo"]["host"], "proxy.example")
+        self.assertEqual(body["proxyInfo"]["port"], "1080")
+
+    def test_create_rejects_invalid_startup_field_before_api_request(self):
+        client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+        for value in (["--custom"], {"arg": "--custom"}, 7):
+            with self.subTest(value=value), patch.object(client, "request") as request:
+                with self.assertRaisesRegex(ValueError, "startupParam"):
+                    client.create_profile({"fingerInfo": {"startupParam": value}})
+                request.assert_not_called()
 
     def test_create_retries_only_explicit_roxy_busy_response(self):
         client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")

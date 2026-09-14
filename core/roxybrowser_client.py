@@ -476,6 +476,25 @@ class RoxyBrowserClient:
         # removes Chromium's implicit local bypass; it does not enable it.
         finger_info = dict(body.get("fingerInfo") or {})
         finger_info.setdefault("openWorkbench", 0)
+        # Move the existing efficiency defaults to Roxy's persisted launch
+        # field: /browser/open args can be accepted but absent from Chromium's
+        # argv. The official startupParam format separates arguments with ';',
+        # not spaces; spaces inside a caller's argument value remain intact.
+        configured_startup = finger_info.get("startupParam")
+        if configured_startup is not None and not isinstance(configured_startup, str):
+            raise ValueError("fingerInfo.startupParam 应为分号分隔的字符串")
+        startup_args = list(dict.fromkeys(
+            arg.strip() for arg in (configured_startup or "").split(";") if arg.strip()
+        ))
+        # De-duplicate caller arguments by full value. Only the defaults yield
+        # to an existing option name, so --flag=value is not overwritten and
+        # two caller-supplied values of the same option are not conflated.
+        configured_names = {arg.partition("=")[0] for arg in startup_args}
+        startup_args.extend(
+            arg for arg in _ROXY_PROFILE_EFFICIENCY_ARGS
+            if arg.partition("=")[0] not in configured_names
+        )
+        finger_info["startupParam"] = ";".join(startup_args)
         body["fingerInfo"] = finger_info
         if core_version == "latest":
             body.pop("coreVersion", None)
@@ -672,15 +691,13 @@ class RoxyBrowserClient:
         if configured_args is None:
             configured_args = []
         elif not isinstance(configured_args, (list, tuple)):
-            logger.warning("[Roxy] open args 不是列表，已忽略无效值并使用性能参数")
+            logger.warning("[Roxy] open args 不是列表，已忽略无效值")
             configured_args = []
-        # Preserve caller-supplied arguments while de-duplicating the small
-        # performance set.  Roxy documents ``args`` as the browser startup
-        # parameter list; keeping the merge here means every concurrent
-        # Profile receives the same optimization without a second launch path.
+        # Keep the caller's existing open-time args behavior. Efficiency
+        # defaults are installed once through create_profile.startupParam.
         merged_args: list[str] = []
         seen_args: set[str] = set()
-        for value in (*configured_args, *_ROXY_PROFILE_EFFICIENCY_ARGS):
+        for value in configured_args:
             arg = str(value or "").strip()
             if arg and arg not in seen_args:
                 merged_args.append(arg)
