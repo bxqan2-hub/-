@@ -3677,6 +3677,15 @@ def run_roxy_registration(
             driver.set_script_timeout(int(_cfg.ROXY_SELENIUM_TIMEOUT))
         except Exception:
             pass
+        # Roxy opens the Profile's stored tab before Selenium attaches.  That
+        # page can finish an Auth RUM batch while the Fetch classifier is not
+        # installed yet (about 3 MB per account).  Cancel the startup tab
+        # immediately; the registration navigation below is the first
+        # network page after traffic interception is active.
+        try:
+            driver.get("about:blank")
+        except Exception as exc:
+            logger.warning("[Roxy流量] 清空 Profile 启动页失败，继续安装拦截器：%s", exc)
         # Install filtering and continuous traffic capture before any
         # browser-side preflight navigation; otherwise those proxy bytes have
         # no matching account-level evidence.

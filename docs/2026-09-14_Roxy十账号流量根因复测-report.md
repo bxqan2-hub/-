@@ -21,9 +21,10 @@
 - 热缓存实验（677–686，停止于第 3 分钟）产生 153.9 MB 下行 + 39.3 MB 上行；同一批账号的缓存字段达到 182.8 MB，证明 CDP `Fetch.fulfillRequest` 回放解压正文会放大 Meta 流量。实验后运行时恢复 `ROXY_STATIC_CACHE=False`、`ROXY_CACHE_MAX_ITEM_BYTES=262144`。
 - 逐账号上传路径复盘（13:09–13:16）定位到 `auth.openai.com/awe/api/v2/rum`：单账号约 2.82–3.09 MB，十账号约 29.8 MB；该请求是 Auth RUM 遥测批次，不参与注册、密码、OTP 或 MFA。此前分类器将其作为 live security/auth 请求放行，因此正好形成每号约 3 MB 的固定异常上传。
 - 低流量策略现在仅对 `https://auth.openai.com/awe/api/v2/rum*` 加 Fetch 精确拦截并记录 `auth_rum`，不扩大到 `auth.openai.com`，挑战、登录页面、OTP/MFA API 继续直连。
+- 新一轮 687–696 证实：`auth_rum` 已命中 198–206 次，但成功账号仍上传 1.58–3.19 MB 的同一路径；时间线显示 Roxy `/browser/open` 后约 13 秒才接入 Selenium，启动页已在拦截器安装前发送首个批次。注册入口现于 Selenium 接入后立即导航 `about:blank`，先取消 Roxy 的存储启动页，再安装拦截器并进入登录页。
 
 ## 下一轮验证
 
-1. 以并发 1 运行 10 个新邮箱，分别记录 `/browser/open` 前后 Meta 增量，验证 `auth_rum` 拦截后每号上传是否降至约 0.2–0.5 MB。
+1. 重新运行 10 个新邮箱，记录 `/browser/open` 前后 Meta 增量，验证启动页清空后首个 RUM 批次是否消失；并按日志 `upload_by_path` 复核每号上传。
 2. 若单账号仍超过 3 MB，继续拆分 Roxy 启动阶段与 ChatGPT 页面阶段；在确认启动开销后再调整 Roxy `args`，不关闭安全挑战域名。
 3. 代理商账单以 Meta 隧道双向字节为准，浏览器 `downloaded/observed` 仅作定位指标。
