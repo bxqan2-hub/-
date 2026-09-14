@@ -16,6 +16,8 @@
 - `core/browser_traffic.py::block_reason` 与 `RoxyTrafficOptimizer._on_request_paused`：Session 建立后仅放行 ChatGPT auth/session/callback 文档及 API，阻止应用壳与后台轮询，避免认证完成后的二次 bundle 下载。
 - `stop-webui.bat`：处理“进程在枚举后自行退出”的竞态，避免启动脚本因 `Stop-Process` 偶发找不到 PID 而中止。
 - `core/account_export.py::_validate_2fa_token`：只读 Token 校验改为流式响应并在读取正文前关闭，避免 Cloudflare 403 挑战 HTML 被完整下载。
+- 复核发现 Roxy 151 会忽略 `/browser/open` 的 `args`；不能把日志中的 open 参数当作进程级优化已生效。另将运行时共享缓存上限设为 256 KiB，避免 CDP 回放解压后的大 bundle 反而放大代理流量。
+- `core/browser_traffic.py::is_cacheable_request`：允许公开 CDN 常见的 `x-client-version`/`x-openai-build-id` 等非敏感请求头，仅继续拒绝认证、条件和设备会话头，避免缓存候选被无关 `x-*` 头全部淘汰。
 
 ## 下一轮验证
 

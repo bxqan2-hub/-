@@ -55,6 +55,10 @@ REPLAY_ALLOWED_HEADERS = {
 }
 CACHE_SCHEMA_VERSION = 3
 CACHE_PRIVATE_REQUEST_HEADERS = {"authorization", "proxy-authorization", "range"}
+CACHE_PRIVATE_X_HEADERS = {
+    "x-api-key", "x-csrf-token", "x-device-id", "x-session-id",
+    "x-openai-token", "x-openai-account-id", "x-auth-token", "x-session-token",
+}
 CACHE_PRIVATE_RESPONSE_HEADERS = {
     "set-cookie", "www-authenticate", "authentication-info", "proxy-authenticate",
     "proxy-authentication-info", "clear-site-data", "accept-ch", "critical-ch",
@@ -180,7 +184,8 @@ def is_cacheable_request(url: str, method: str, resource_type: str, headers=None
         return False
     request_headers = _header_values(headers)
     if (set(request_headers) & CACHE_PRIVATE_REQUEST_HEADERS
-            or any(name.startswith(("if-", "x-")) for name in request_headers)):
+            or any(name.startswith("if-") for name in request_headers)
+            or (set(request_headers) & CACHE_PRIVATE_X_HEADERS)):
         return False
     request_cache_control = request_headers.get("cache-control", "").lower()
     if (any(token in request_cache_control for token in ("no-cache", "no-store", "private"))
