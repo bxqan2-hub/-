@@ -36,6 +36,13 @@ LOW_TRAFFIC_FIRST_PARTY_HOSTS = {
     "oaistatic.com",
 }
 LOW_TRAFFIC_RESOURCE_TYPES = {"image", "media", "font", "manifest"}
+# After the account session is established, only these ChatGPT auth endpoints
+# remain live.  The application shell and background API polling otherwise
+# keep downloading bundles while the worker is finishing export/2FA.
+SESSION_REQUIRED_PREFIXES = (
+    "/api/auth/callback/", "/api/auth/session", "/api/auth/csrf",
+    "/api/auth/signin/",
+)
 SECURITY_SUFFIXES = (
     "arkoselabs.com", "challenges.cloudflare.com", "hcaptcha.com",
     "recaptcha.net", "sentinel.openai.com",
@@ -131,6 +138,10 @@ def block_reason(url: str, resource_type: str = "", *, session_only: bool = Fals
     if (host == PUBLIC_CDN_HOST and resource == "media" and path.startswith("/assets/")
             and path.endswith(OPTIONAL_MEDIA_EXTENSIONS)):
         return "optional_media"
+    if session_only and host in {"chatgpt.com", "www.chatgpt.com"}:
+        if resource == "document" or lower_path.startswith(SESSION_REQUIRED_PREFIXES):
+            return ""
+        return "post_auth_" + (resource or "other")
     return ""
 
 
@@ -729,7 +740,7 @@ class RoxyTrafficOptimizer:
             url = str(getattr(event.request, "url", "") or "")
             method = str(getattr(event.request, "method", "") or "")
             resource = _resource_name(event.resource_type)
-            if self.low_traffic and block_reason(url, resource):
+            if self.low_traffic and block_reason(url, resource, session_only=self._session_only):
                 connection.execute(devtools.fetch.fail_request(request_id, devtools.network.ErrorReason.BLOCKED_BY_CLIENT))
                 return
             if (not self.static_cache_enabled or not self._fetch_enabled

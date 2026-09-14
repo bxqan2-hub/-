@@ -125,14 +125,22 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertEqual(block_reason(url, resource), reason)
 
-    def test_session_only_keeps_application_shell_and_security_requests_live(self):
+    def test_session_only_keeps_auth_navigation_live_and_stops_application_shell(self):
         for path, resource in [
             ("/api/auth/session", "xhr"), ("/api/auth/callback/openai", "document"),
-            ("/_next/static/app.js", "script"), ("/cdn/assets/site.css", "stylesheet"),
-            ("/backend-api/accounts/mfa/enroll", "fetch"), ("/", "document"),
+            ("/api/auth/signin/openai", "fetch"), ("/", "document"),
         ]:
             with self.subTest(path=path):
                 self.assertEqual(block_reason("https://chatgpt.com" + path, resource, session_only=True), "")
+        for path, resource in [
+            ("/_next/static/app.js", "script"), ("/cdn/assets/site.css", "stylesheet"),
+            ("/backend-api/accounts/mfa/enroll", "fetch"),
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    block_reason("https://chatgpt.com" + path, resource, session_only=True),
+                    "post_auth_" + resource,
+                )
 
     def test_install_uses_exact_fetch_asset_and_media_filters_and_clears_legacy_globs(self):
         for static_cache, low_traffic in ((True, False), (False, True), (True, True)):
