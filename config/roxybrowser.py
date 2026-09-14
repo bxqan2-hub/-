@@ -97,9 +97,10 @@ ROXY_AT_RECOVERY_PREFLIGHT_ATTEMPTS: int = 2
 # 字体、图片及安全验证均按当前 Profile 正常请求，流量会高于旧策略。
 # 共享缓存仅接收明确静态路由的版本化 public JS/CSS，包括 chatgpt.com/cdn/assets/；
 # 请求附带的 Cookie 不保存/回放，设置 Cookie 的响应、认证和动态配置保持实时。
-# session 阶段仍缓存公共文件，不阻断应用初始化；浏览器自身缓存由独立 Profile 管理。
+# Roxy 的 Fetch.fulfillRequest 回放体会经过受计费的管理浏览器传输链路，
+# 因此共享缓存默认关闭；浏览器自身缓存仍由独立 Profile 管理。
 ROXY_LOW_TRAFFIC: bool = True
-ROXY_STATIC_CACHE: bool = True
+ROXY_STATIC_CACHE: bool = False
 ROXY_TRAFFIC_CAPTURE: bool = True
 ROXY_TRAFFIC_BUDGET_BYTES: int = 3145728
 ROXY_CACHE_DIR: str = "data/browser_static_cache"

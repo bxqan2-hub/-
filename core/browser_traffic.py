@@ -68,20 +68,6 @@ PUBLIC_STATIC_PATH_PREFIXES = {
     "chatgpt.com": ("/cdn/assets/",),
 }
 
-# Chromium keeps Network-domain event data until the DevTools client drains
-# it.  A registration Profile only needs small request metadata and the
-# Fetch-domain response body; an unbounded Network buffer therefore grows in
-# every concurrent Roxy process without improving the registration flow.
-# These limits are per Profile and do not change the number of workers or
-# renderer processes.  Older Roxy/CDP builds may reject optional limits, so
-# the caller falls back to the normal Network.enable payload.
-_NETWORK_ENABLE_LIMITS = {
-    "maxTotalBufferSize": 2 * 1024 * 1024,
-    "maxResourceBufferSize": 512 * 1024,
-    "maxPostDataSize": 4 * 1024,
-}
-
-
 def _resource_name(resource_type) -> str:
     value = getattr(resource_type, "value", resource_type)
     return str(value or "").strip().lower()
@@ -528,17 +514,13 @@ class RoxyTrafficOptimizer:
         self._degraded_reason = ""
 
     def _enable_network_domain(self) -> None:
-        """Enable CDP Network with a bounded per-Profile event buffer."""
-        try:
-            self.driver.execute_cdp_cmd("Network.enable", dict(_NETWORK_ENABLE_LIMITS))
-            return
-        except Exception as exc:
-            # Keep compatibility with older Roxy runtimes that implement
-            # Network.enable but do not expose the optional buffer fields.
-            logger.info(
-                "[Roxy流量] Network 缓冲上限不被当前 CDP 接受，回退默认配置：%s",
-                type(exc).__name__,
-            )
+        """Enable CDP Network without truncating the traffic event stream.
+
+        The former 2 MiB total/512 KiB per-resource limits silently dropped
+        Network.loadingFinished events once a Profile loaded its application
+        shell.  That made the per-account meter report roughly 2 MiB while
+        the proxy adapter still paid for the full response bytes.
+        """
         self.driver.execute_cdp_cmd("Network.enable", {})
 
     def install(self) -> None:

@@ -55,29 +55,12 @@ def _event(url=ASSET_URL, *, request_id="fixture-request", headers=None, resourc
 
 
 class BrowserTrafficClassifierTests(unittest.TestCase):
-    def test_network_enable_uses_bounded_per_profile_buffers(self):
+    def test_network_enable_uses_default_unbounded_buffer(self):
         optimizer = _optimizer(low_traffic=True, static_cache=False)
         optimizer.install()
         enable_calls = [item for item in optimizer.driver.execute_cdp_cmd.call_args_list if item.args[0] == "Network.enable"]
         self.assertEqual(len(enable_calls), 1)
-        self.assertEqual(enable_calls[0].args[1], {
-            "maxTotalBufferSize": 2 * 1024 * 1024,
-            "maxResourceBufferSize": 512 * 1024,
-            "maxPostDataSize": 4 * 1024,
-        })
-
-    def test_network_enable_falls_back_for_legacy_cdp(self):
-        optimizer = _optimizer(low_traffic=True, static_cache=False)
-        def execute(command, params):
-            if command == "Network.enable" and params:
-                raise RuntimeError("unknown parameter")
-        optimizer.driver.execute_cdp_cmd.side_effect = execute
-        optimizer.install()
-        enable_calls = [item for item in optimizer.driver.execute_cdp_cmd.call_args_list if item.args[0] == "Network.enable"]
-        self.assertEqual([item.args[1] for item in enable_calls], [
-            {"maxTotalBufferSize": 2 * 1024 * 1024, "maxResourceBufferSize": 512 * 1024, "maxPostDataSize": 4 * 1024},
-            {},
-        ])
+        self.assertEqual(enable_calls[0].args[1], {})
 
     def test_recovery_disables_fetch_and_clears_blocked_urls(self):
         optimizer = _optimizer(low_traffic=True)
