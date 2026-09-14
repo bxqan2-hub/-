@@ -5,7 +5,7 @@
 - 仍锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；再次对照上游 create/open 与本地生命周期实现，保留独立 Profile、随机指纹、代理预检与并发边界。
 - 十账号 Cliproxy 连接下界 154.97 MB 对比 CDP 双向 21.61 MB；单账号 NetLog 将 22.914 MB 组件下载经 sourcePort/PID/SOCKET 关联到 Widevine、输入建议模型及其他 CRX，属于 Chromium 后台更新而非页面资源。
 - 原默认效率参数只放 `/browser/open.args`，真实 argv 缺失。迁移到既有 `create_profile → fingerInfo.startupParam`，按官方分号格式合并；删除 open 的默认注入，保留调用方显式参数。没有新增配置或第二套策略。
-- 空 Profile 的实际 argv 已逐项确认全部 7 个原效率参数存在；100 秒观察和修复后十账号对账结果继续记录在 `docs/2026-09-14_Roxy十账号流量根因复测-report.md`。
+- 空 Profile 的实际 argv 已逐项确认全部 7 个原效率参数存在；100 秒驻留 NetLog 组件下载/更新检查均为 0，供应商连接采样约 1.23 MB（不是完整账号成本）。用户等待 Cliproxy 延迟刷新后，再进行独立十账号对账；结果继续记录在 `docs/2026-09-14_Roxy十账号流量根因复测-report.md`。
 - 用户确认供应商为 Cliproxy，面板有延迟；Mihomo 全局、Cliproxy 匹配连接、CDP payload 与余额账单分别记录，禁止互相替代。
 
 ## 2026-09-14 流量执行链与测量更正

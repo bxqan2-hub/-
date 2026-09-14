@@ -99,3 +99,38 @@ Meta 已确认是 Mihomo 的全机 TUN，承载多个应用。供应商扣费应
 已在 `RoxyBrowserClient.create_profile` 将原 7 个效率参数迁移到分号分隔的 `fingerInfo.startupParam`，`open_profile` 删除默认参数注入。保留显式用户参数及配置对象不可变；新 Profile 实际进程 argv 已确认 `--disable-component-update` 等 7 项全部存在。不是只检查发送 payload。
 
 报告证据补充：`run/supplier-diagnostic-717-netlog-summary.json`。不修改系统 Clash 配置、不复用个人 Profile、不共享 Cookie/账号凭据、不干预账号验证；修复限定在项目创建的临时浏览器生命周期。
+
+
+## 14:43–14:45 修复后登录驻留验证（未注册新账号）
+
+- 单独创建新 Profile，确认真实进程 argv 中原有 7 个效率参数全部存在；登录页加载后驻留 100 秒，完成关闭和删除。
+- NetLog **8,687 事件**，组件/CRX/diffgen 下载 **0 次**，`update.googleapis.com` 更新检查 **0 次**。
+- 22 个浏览器供应商 Socket：下行 **1,130,312 B**、上行 **74,362 B**。Controller 供应商窗口下界下行 **1,147,487 B**、上行 **78,795 B**，合计 **1,226,282 B（1.23 MB）**，0 次读取错误。
+- 窗口固定至 **14:45:12.334**，不混入其他后续活动；Mihomo 全局从来不作为该供应商费用。
+- 该结果证明后台组件异常消失，**不把登录驻留的 1.23 MB 冒充完整账号成本**。717 的组件正文 22,914,468 B 与修复后组件 0 B 使用同层级对比，完整十账号仍待复测。
+- 用户仍等待 Cliproxy 余额延迟刷新；为了取得独立的新基准，暂停新增注册与外部探针。收到稳定余额后再启动下一批十个新邮箱。当前没有宣称完成全部目标。
+
+证据：`run/component-fixed-probe-summary.json`、`run/component-fixed-probe-netlog-summary.json`、`run/proxy-controller-component-fixed-probe.jsonl`。
+
+## 本次交付自检（R8）
+
+1. **修改的已有代码**：`core/roxybrowser_client.py:RoxyBrowserClient.create_profile/open_profile`；`core/roxy_registration.py:run_roxy_registration` 更正旧注释；此前本轮 `core/browser_traffic.py:RoxyTrafficOptimizer/summarize_performance_logs`、`webui/app.py:_compact_registration_traffic`、`webui/templates/index.html:_registrationTrafficLine` 和缓存默认值亦已提交。
+2. **新增代码**：没有新增业务函数/模块或独立策略。原 create_profile 内合并既有参数；新增回归用例替代了只检查 open payload 的旧断言，旧断言已删除。
+3. **搬迁**：默认参数注入从 open_profile 移到 create_profile，源注入已删除；未移动文件、未建立备份树。
+4. **配置链路**：无新增配置。已有 `_ROXY_PROFILE_EFFICIENCY_ARGS → create_profile → fingerInfo.startupParam（分号）→ RoxyChrome argv`，实际进程逐项验证通过；原 public 静态缓存参数仍经已有配置对象进入 optimizer。
+5. **死引用回扫**：下列命令输出为空：
+
+   `rg -n 'for value in \(\*configured_args, \*_ROXY_PROFILE_EFFICIENCY_ARGS\)|test_open_merges_profile_efficiency_args_without_reducing_concurrency|缓存省:|实际新增网络下载:' core/roxybrowser_client.py tests/test_roxy_proxy_enforcement.py webui/templates/index.html`
+
+6. **diff**：`4a40d20` +529/−147；`7802625` +122/−8；组件根因修复 `3a0bd25` **+154/−27**（含证据文档）。最终结果记录单独作为文档提交，不追加业务代码。
+7. **测试**：完整聚焦验证 **478 passed，300 subtests passed**；提交后烟雾验证 **130 passed，262 subtests passed**。`git diff --check` 通过。真实 `start-webui.bat 5002` 依赖自检、旧实例替换和 `/login` readiness 全通过，新 WebUI PID 73884。完整套件最后 5 行：
+
+```text
+...................................................... [ 46%]
+........................................................................ [ 61%]
+........................................................................ [ 76%]
+..................................................................................................................               [100%]
+478 passed, 1 warning, 300 subtests passed in 20.27s
+```
+
+8. **未做/存疑**：等待 Cliproxy 延迟刷新后的稳定余额；待新十账号完整复测，尚未证明每个成功账号含全部附加流量稳定 2–3 MB；连接快照尾部缺失与供应商实际计费差异如实保留；715 只读 Session403的远端来源未细分。没有夹带修复邮件服务超时或其他支付模块。既有三项未跟踪文件/目录保持原样，故仅声称本次修改已提交、不称全仓无未跟踪项。
