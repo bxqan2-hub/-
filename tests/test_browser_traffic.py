@@ -112,10 +112,13 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
             ("https://cdn.openai.com/assets/recaptcha/audio.mp3", "media"),
             ("https://cdn.openai.com/assets/hcaptcha/audio.mp3", "media"),
             ("https://cdn.openai.com/assets/challenge/audio.mp3", "media"),
-            ("https://auth.openai.com/awe/api/v2/rum", "xhr"),
         ]:
             with self.subTest(url=url):
                 self.assertEqual(block_reason(url, resource), "")
+        self.assertEqual(
+            block_reason("https://auth.openai.com/awe/api/v2/rum", "xhr"),
+            "auth_rum",
+        )
         for url, resource, reason in [
             ("https://statsigapi.net/v1/config", "xhr", "telemetry"),
             ("https://featuregates.org/v1/initialize", "fetch", "telemetry"),
@@ -153,6 +156,7 @@ class BrowserTrafficClassifierTests(unittest.TestCase):
                     self.assertTrue(any(p.kwargs["url_pattern"] == "https://chatgpt.com/cdn/assets/*" for p in patterns))
                 if low_traffic:
                     urls = {p.kwargs["url_pattern"] for p in patterns}
+                    self.assertIn("https://auth.openai.com/awe/api/v2/rum*", urls)
                     self.assertIn("https://chatgpt.com/*manifest*", urls)
                     self.assertTrue(any(
                         p.kwargs["url_pattern"] == "https://chatgpt.com/*manifest*"

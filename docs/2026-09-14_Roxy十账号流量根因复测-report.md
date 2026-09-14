@@ -19,9 +19,11 @@
 - 复核发现 Roxy 151 会忽略 `/browser/open` 的 `args`；不能把日志中的 open 参数当作进程级优化已生效。另将运行时共享缓存上限设为 256 KiB，避免 CDP 回放解压后的大 bundle 反而放大代理流量。
 - `core/browser_traffic.py::is_cacheable_request`：允许公开 CDN 常见的 `x-client-version`/`x-openai-build-id` 等非敏感请求头，仅继续拒绝认证、条件和设备会话头，避免缓存候选被无关 `x-*` 头全部淘汰。
 - 热缓存实验（677–686，停止于第 3 分钟）产生 153.9 MB 下行 + 39.3 MB 上行；同一批账号的缓存字段达到 182.8 MB，证明 CDP `Fetch.fulfillRequest` 回放解压正文会放大 Meta 流量。实验后运行时恢复 `ROXY_STATIC_CACHE=False`、`ROXY_CACHE_MAX_ITEM_BYTES=262144`。
+- 逐账号上传路径复盘（13:09–13:16）定位到 `auth.openai.com/awe/api/v2/rum`：单账号约 2.82–3.09 MB，十账号约 29.8 MB；该请求是 Auth RUM 遥测批次，不参与注册、密码、OTP 或 MFA。此前分类器将其作为 live security/auth 请求放行，因此正好形成每号约 3 MB 的固定异常上传。
+- 低流量策略现在仅对 `https://auth.openai.com/awe/api/v2/rum*` 加 Fetch 精确拦截并记录 `auth_rum`，不扩大到 `auth.openai.com`，挑战、登录页面、OTP/MFA API 继续直连。
 
 ## 下一轮验证
 
-1. 以并发 1 运行 10 个新邮箱，分别记录 `/browser/open` 前后 Meta 增量。
+1. 以并发 1 运行 10 个新邮箱，分别记录 `/browser/open` 前后 Meta 增量，验证 `auth_rum` 拦截后每号上传是否降至约 0.2–0.5 MB。
 2. 若单账号仍超过 3 MB，继续拆分 Roxy 启动阶段与 ChatGPT 页面阶段；在确认启动开销后再调整 Roxy `args`，不关闭安全挑战域名。
 3. 代理商账单以 Meta 隧道双向字节为准，浏览器 `downloaded/observed` 仅作定位指标。

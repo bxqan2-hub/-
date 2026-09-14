@@ -43,6 +43,10 @@ SESSION_REQUIRED_PREFIXES = (
     "/api/auth/callback/", "/api/auth/session", "/api/auth/csrf",
     "/api/auth/signin/",
 )
+# Auth RUM is a browser telemetry batch and is not part of registration,
+# password, OTP, or MFA state.  Its payloads are several megabytes per
+# account, so the low-traffic policy intercepts only this exact endpoint.
+AUTH_RUM_PATH = "/awe/api/v2/rum"
 SECURITY_SUFFIXES = (
     "arkoselabs.com", "challenges.cloudflare.com", "hcaptcha.com",
     "recaptcha.net", "sentinel.openai.com",
@@ -120,6 +124,8 @@ def block_reason(url: str, resource_type: str = "", *, session_only: bool = Fals
     resource = _resource_name(resource_type)
     host_matches = lambda suffix: host == suffix or host.endswith("." + suffix)
     lower_path = path.lower()
+    if host == "auth.openai.com" and lower_path == AUTH_RUM_PATH:
+        return "auth_rum"
     if any(host_matches(suffix) for suffix in SECURITY_SUFFIXES):
         return ""
     if ("/cdn-cgi/challenge-platform/" in lower_path or "/sentinel/" in lower_path
@@ -724,6 +730,13 @@ class RoxyTrafficOptimizer:
                             url_pattern=host_pattern,
                             request_stage=devtools.fetch.RequestStage.REQUEST,
                         ))
+                # The Auth RUM batch is not required for registration and is
+                # the dominant per-account upload (about 3 MB).  Keep this
+                # one exact path separate from auth pages and challenge URLs.
+                patterns.append(devtools.fetch.RequestPattern(
+                    url_pattern="https://auth.openai.com/awe/api/v2/rum*",
+                    request_stage=devtools.fetch.RequestStage.REQUEST,
+                ))
             self._devtools = devtools
             self._connection = connection
             connection.add_callback(devtools.fetch.RequestPaused, self._on_request_paused)
