@@ -1,6 +1,15 @@
 # 上游项目索引：GPT-utral-platform
 
-## 2026-09-14 后台组件传输已定位，Cliproxy 扣量仍待对账（当前）
+## 2026-09-14 切换 1024proxy 前的生命周期与代理归属收尾（当前）
+
+- 再次读取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `core/roxybrowser_client.py` 与 `core/roxy_registration.py` raw 源码；上游 open 仍以 `setdefault` 接受旧 dirId，保存账号仍记录入口 proxy。两项均按本地独立 Profile/实际代理要求修正，不覆盖上游整文件。
+- 本地 `open_profile` 最终 dirId 绑定选定 Profile，避免旧 open-extra 把新环境的参数和代理绕开；保持维护显式指定 Profile。`run_roxy_registration` 的既有 `proxy_used` 改为实际 `client.profile_proxy` 优先并复用 `mask_proxy_url` 脱敏，真实网络代理不变。
+- 组件修复仍沿唯一既有链路 `create_profile → fingerInfo.startupParam → argv`；新增回归验证 create/open/return/cleanup 同一 Profile、失败清理、实际代理选择与脱敏。当前 workspace 创建/打开配置一致；通用跨工作区维护冲突没有夹带修改。
+- 用户最新 Cliproxy 显示 4.768 GB，相对 4.930 GB 名义减少 162 MB；新授权的 1024proxy 端点为 `us.1024proxy.io:3000`，基准 10.09 GB，凭据只写忽略的运行配置。两个供应商及 Clash 全局分别计量，不混算。
+- 附件第 1.1 节明确 3 MiB 是浏览器响应诊断预算而非供应商账单；十账号低于 40 MB 是本轮用户目标，不是教程保证。按每账号完整生命周期统计，未归属量单列，不平均摊平。完整十账号结果待本轮实测。
+- 离线回归：413 passed、286 subtests passed；保持邮箱匹配、同窗 Cookie/代理、显式 Token、密码成功 checkpoint、MFA activate 成功保存边界。完整证据见 `docs/2026-09-14_Roxy十账号流量根因复测-report.md`。
+
+## 2026-09-14 后台组件传输已定位，Cliproxy 扣量仍待对账（历史暂停记录）
 
 - 仍锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；再次对照上游 create/open 与本地生命周期实现，保留独立 Profile、随机指纹、代理预检与并发边界。
 - 十账号匹配配置代理端点的传输观测为 154.97 MB，对比 CDP 双向 21.61 MB；两者均不代替 Cliproxy 账户扣费。单账号 NetLog 将 22.914 MB 组件下载经 sourcePort/PID/SOCKET 关联到 Widevine、输入建议模型及其他 CRX，属于 Chromium 后台更新而非页面资源。

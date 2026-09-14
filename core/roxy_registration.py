@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
+from config.proxy import mask_proxy_url
 from core.account_export import save_account_data
 from core.browser_exit_geo import probe_selenium_driver_exit_geo
 from core.browser_traffic import RoxyTrafficOptimizer
@@ -4133,7 +4134,7 @@ def run_roxy_registration(
             access_token=access_token,
             totp_secret=totp_secret,
             email_source=resolve_email_source(email),
-            proxy_used=proxy or None,
+            proxy_used=mask_proxy_url(str(client.profile_proxy or "").strip() or proxy or "") or None,
             batch_dir=batch_dir,
             registration_name=name,
             birth_date=birthday,

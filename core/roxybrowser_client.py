@@ -686,7 +686,9 @@ class RoxyBrowserClient:
         params = dict(getattr(_cfg, "ROXY_OPEN_EXTRA_PARAMS", {}) or {})
         # Roxy 官方 /browser/open body: {workspaceId, dirId, args, forceOpen, headless}
         params.setdefault("workspaceId", _workspace_id_value())
-        params.setdefault("dirId", int(pid) if str(pid).isdigit() else pid)
+        # The selected Profile owns the launch settings, proxy, and cleanup.
+        # A stale extra dirId must not redirect this run to an older Profile.
+        params["dirId"] = int(pid) if str(pid).isdigit() else pid
         configured_args = params.get("args")
         if configured_args is None:
             configured_args = []

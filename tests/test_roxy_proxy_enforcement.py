@@ -13,12 +13,14 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         client = RoxyBrowserClient()
         reported = []
         with patch.object(client, "create_profile", return_value="created-profile"), \
-             patch.object(client, "request", side_effect=RuntimeError("open failed")), \
+             patch("core.roxybrowser_client._cfg.ROXY_OPEN_EXTRA_PARAMS", {"dirId": "stale-profile"}), \
+             patch.object(client, "request", side_effect=RuntimeError("open failed")) as request, \
              patch.object(client, "close_profile", return_value=True) as close_profile, \
              patch.object(client, "delete_profile", return_value=True) as delete_profile:
             with self.assertRaisesRegex(RuntimeError, "open failed"):
                 client.open_profile(on_profile_ready=reported.append)
         self.assertEqual(reported, ["created-profile"])
+        self.assertEqual(request.call_args.kwargs["json_body"]["dirId"], "created-profile")
         close_profile.assert_called_once_with("created-profile")
         delete_profile.assert_called_once_with("created-profile")
 
@@ -101,6 +103,68 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
                     client.open_profile(require_proxy_exit_ip=False)
                 self.assertEqual(request.call_args.kwargs["json_body"]["args"], expected)
                 self.assertEqual(extra, {"args": configured})
+
+    def test_fresh_profile_launch_and_cleanup_ignore_stale_extra_profile_id(self):
+        for method, profile_id in (("POST", "fresh-profile"), ("GET", "796")):
+            with self.subTest(method=method, profile_id=profile_id), ExitStack() as stack:
+                for config_patch in self._config_patches():
+                    stack.enter_context(config_patch)
+                extra = {"dirId": "stale-profile", "args": ["--custom", "--custom"]}
+                template = {"fingerInfo": {"language": "en-US", "startupParam": "--custom=one"}}
+                for name, value in {
+                    "ROXY_ONE_PROFILE_PER_ACCOUNT": True,
+                    "ROXY_PROFILE_ID": "",
+                    "ROXY_KEEP_BROWSER_OPEN": False,
+                    "ROXY_DELETE_PROFILE_AFTER_RUN": True,
+                    "ROXY_OPEN_METHOD": method,
+                    "ROXY_OPEN_EXTRA_PARAMS": extra,
+                    "ROXY_PROFILE_CREATE_PAYLOAD": template,
+                }.items():
+                    stack.enter_context(patch(f"core.roxybrowser_client._cfg.{name}", value))
+                client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
+                request = stack.enter_context(patch.object(client, "request", side_effect=[
+                    {"data": {"dirId": profile_id}},
+                    {"data": {"dirId": profile_id, "http": "127.0.0.1:9222"}},
+                    {"code": 0},
+                    {"code": 0},
+                ]))
+                reported = []
+                opened = client.open_profile(on_profile_ready=reported.append)
+                client.cleanup_profile(opened)
+
+                create_body = request.call_args_list[0].kwargs["json_body"]
+                open_body = request.call_args_list[1].kwargs["params" if method == "GET" else "json_body"]
+                close_call, delete_call = request.call_args_list[2:]
+                close_body = close_call.kwargs.get("json_body") or close_call.kwargs["params"]
+                delete_body = delete_call.kwargs.get("json_body") or delete_call.kwargs["params"]
+                expected_id = int(profile_id) if profile_id.isdigit() else profile_id
+                self.assertIn("--disable-component-update", create_body["fingerInfo"]["startupParam"].split(";"))
+                self.assertEqual(open_body["dirId"], expected_id)
+                self.assertEqual(open_body["args"], ["--custom"])
+                self.assertEqual(reported, [profile_id])
+                self.assertEqual(opened.profile_id, profile_id)
+                self.assertTrue(opened.created_by_run)
+                self.assertEqual(close_body["dirId"], expected_id)
+                self.assertEqual(delete_body["dirIds"], [expected_id])
+                self.assertEqual(extra, {"dirId": "stale-profile", "args": ["--custom", "--custom"]})
+                self.assertEqual(template, {"fingerInfo": {"language": "en-US", "startupParam": "--custom=one"}})
+
+    def test_explicit_maintenance_profile_overrides_stale_extra_profile_id(self):
+        client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")
+        extra = {"dirId": "stale-profile", "workspaceId": "maintenance-workspace"}
+        with patch("core.roxybrowser_client._cfg.ROXY_ONE_PROFILE_PER_ACCOUNT", False), \
+             patch("core.roxybrowser_client._cfg.ROXY_PROFILE_ID", "configured-profile"), \
+             patch("core.roxybrowser_client._cfg.ROXY_OPEN_EXTRA_PARAMS", extra), \
+             patch.object(client, "create_profile") as create_profile, \
+             patch.object(client, "request", return_value={"data": {"http": "127.0.0.1:9222"}}) as request:
+            opened = client.open_profile("requested-profile")
+
+        create_profile.assert_not_called()
+        self.assertEqual(request.call_args.kwargs["json_body"]["dirId"], "requested-profile")
+        self.assertEqual(request.call_args.kwargs["json_body"]["workspaceId"], "maintenance-workspace")
+        self.assertEqual(opened.profile_id, "requested-profile")
+        self.assertFalse(opened.created_by_run)
+        self.assertEqual(extra, {"dirId": "stale-profile", "workspaceId": "maintenance-workspace"})
 
     def test_failed_proxy_exit_ip_probe_never_creates_or_opens_profile(self):
         client = RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080")

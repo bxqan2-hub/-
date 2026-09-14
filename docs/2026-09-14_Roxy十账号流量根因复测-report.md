@@ -2,11 +2,42 @@
 
 ## 当前结论与证据更正
 
-目标仍为十个新邮箱完整注册约 20–30 MB，并解释启动、关闭及注册以外的代理消耗。已确认配置代理连接中存在 Chromium 后台组件大下载，但组件传输量与 Cliproxy 实际扣量尚未对齐；既不据此宣称“每个账号额外扣 17 MB”，也不宣称修复后整批达标。历史记录 642–651 的 Meta 网卡增量约 398.1 MB，账号 CDP 摘要约 98.3 MB；这两个数不是同一统计范围，其差值不是“注册漏计流量”的证明。
+用户最新验收目标为十个新邮箱完整生命周期实际扣量低于 40 MB，并解释每个账号启动、关闭及注册以外的代理消耗。已确认配置代理连接中存在 Chromium 后台组件大下载；既不据此宣称“每个账号额外扣 17 MB”，也不宣称修复后整批达标。历史记录 642–651 的 Meta 网卡增量约 398.1 MB，账号 CDP 摘要约 98.3 MB；这两个数不是同一统计范围，其差值不是“注册漏计流量”的证明。
 
 Meta 已确认是 Mihomo 的全机 TUN，承载多个应用。供应商扣费应对照对应上游代理连接字节与供应商账单；Meta 网卡仅作为全机突发参考。CDP 的 `postData` 是请求体估算，未覆盖压缩上传、TLS、请求头、重传、协议请求及启动前流量，所以 `observed_transport_bytes` 也不是精确账单。
 
-## 14:55 本地复核：余额继续变化，计费归因暂未闭环
+## 切换 1024proxy 前的修复与验收依据（当前）
+
+- Cliproxy 后续截图 4.777 → 4.774 → 4.768 GB，相对原始 4.930 GB 累计名义减少 153 → 156 → 162 MB。量级接近原十账号端点观测 154.97 MB，支持超量不只是页面计数误差；截图结算截至时间未知，原余额窗口还包含其他诊断探针，保留逐项对账限制。
+- 用户已授权换入十条 1024proxy 粘性代理，端点 `us.1024proxy.io:3000`，新截图基准 **10.09 GB**。原 Cliproxy 余额不带入新批次；其他流程仍配置的旧端点另行记录。凭据、逐账号原始 NetLog 和运行日志均在 Git 忽略范围。
+- 已证实的大下载修复位于 `RoxyBrowserClient.create_profile`：禁用组件更新等 7 个已有参数经分号分隔的 `fingerInfo.startupParam` 进入真实 argv。此前登录驻留探针组件下载为零，这不是完整账号成本结论。
+- 本次补上 Profile 配置旁路：`open_profile` 原 `params.setdefault("dirId", pid)` 会让残留 extra.dirId 打开旧 Profile，而创建/返回/清理仍指向新 Profile。纯 mock 复现后改为绑定实际选定 pid，防止绕开新环境的省流参数与代理。当前配置无旧 dirId，此项不是已证实旧批次大流量触发点。
+- 本次补上记录缺口：`run_roxy_registration` 之前保存空的入口 proxy，遗漏随机池/预检轮换后的 `client.profile_proxy`。现在既有字段优先实际代理，再回落入口，并复用 `mask_proxy_url` 脱敏；不改变真实网络会话。读取方为 DB/批次 JSON/离线查看页，未发现该字段用于后续网络选路。
+- 密码与 MFA 复核：邮箱匹配、同窗 Cookie/代理、显式 Token、密码成功终态 checkpoint、enroll/activate 成功保存均未改变；实际代理凭据不因计量修复新增到持久摘要或日志。
+- 附件 §1.1（提取段落 58）明确 **3 MiB 是浏览器压缩响应诊断预算，不是代理账单**；§9/§12 要求成功率不下降、热缓存组低于基线并与供应商计量核对，没有承诺固定 30/40 MB。3 MiB × 10 = 31.46 MB，尚不含全部上传及协议开销。40 MB 作为本轮目标检验，不当作教程定理。
+- 本轮按账号关联浏览器全生命周期 NetLog、实际 argv、Python 请求源端口及异步套餐检测账号；连接采样分别输出 1024/旧 Cliproxy/未知归属。初始存量做基准、同连接高水位去重；短连接/尾部缺失仍单列，未归属量不平均分摊。
+
+### 本次代码交付自检（R8，完整实测前）
+
+1. 修改既有代码：`core/roxybrowser_client.py:RoxyBrowserClient.open_profile`、`core/roxy_registration.py:run_roxy_registration`。
+2. 新增业务函数/配置均无；新增测试 `test_fresh_profile_launch_and_cleanup_ignore_stale_extra_profile_id`、`test_explicit_maintenance_profile_overrides_stale_extra_profile_id`，替换 open 的旧 setdefault 及入口代理落盘表达式。没有第二套注册路径。
+3. 无文件搬迁；旧语句已删除，无备份树。
+4. 无新增配置；既有代理池 → client.profile_proxy → mask_proxy_url → save_account_data.proxy_used → DB/导出。运行代理保持完整，记录脱敏。
+5. 死引用回扫：`git grep -n -e 'params.setdefault("dirId"' -- core/roxybrowser_client.py`；`git grep -n 'proxy_used=proxy or None' -- core/roxy_registration.py`，输出为空。
+6. 业务/测试四文件 diff：+85/−7；文档更新单独计入 Git 统计。增加的是防回归断言，未保留被替换业务语句。
+7. 本次本地回归 413 passed、286 subtests passed；`git diff --check` 与诊断脚本语法检查通过。最后五行原始输出如下。
+
+```text
+  C:\Users\Administrator\Desktop\turb-gpt-free-register\.venv\Lib\site-packages\requests\__init__.py:92: RequestsDependencyWarning: Unable to find acceptable character detection dependency (chardet or charset_normalizer).
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+413 passed, 1 warning, 286 subtests passed in 19.86s
+```
+
+8. 未做/存疑：完整十账号实测待执行，尚无新供应商结算终值；一般维护配置的 workspaceId 多来源冲突未扩大修复，当前运行配置一致。既有三个未跟踪项原样保留。requests 字符检测依赖 warning 未夹带处理。
+
+## 14:55 本地复核：余额继续变化，计费归因暂未闭环（历史暂停记录）
 
 用户确认这份 Cliproxy 套餐的端点为 `us.arxlabs.io:3010`，与采样端点一致。用户同时明确要求等待、暂停任何新增耗流量操作；当前不启动注册、外网探针、代理检测或远程推送。
 

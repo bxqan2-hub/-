@@ -121,10 +121,16 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 self.assertLessEqual(mail_reads[1][0], sent_at[0])
 
     def test_registration_saves_refreshed_session_even_when_mfa_returns_failure_or_raises(self):
-        for outcome in ("failure_return", "exception", "success", "absent", "codex"):
-            with self.subTest(outcome=outcome), ExitStack() as stack:
+        for outcome, input_proxy, effective_proxy, saved_proxy in (
+            ("failure_return", None, "socks5h://pool-user:pool-password@pool.example:1080", "socks5h://***:***@pool.example:1080"),
+            ("exception", "http://input-user:input-password@input.example:8080", "http://rotated-user:rotated-password@rotated.example:8080", "http://***:***@rotated.example:8080"),
+            ("success", "http://explicit-user:explicit-password@explicit.example:8080", None, "http://***:***@explicit.example:8080"),
+            ("absent", None, None, None),
+            ("codex", "http://fallback-user:fallback-password@fallback.example:8080", "  ", "http://***:***@fallback.example:8080"),
+        ):
+            with self.subTest(outcome=outcome, proxy=saved_proxy), ExitStack() as stack:
                 client = MagicMock()
-                client.profile_proxy = "http://proxy.example:8080"
+                client.profile_proxy = effective_proxy
                 client.open_profile.return_value = RoxyOpenResult(
                     "profile-fixture", {}, preflight_exit_geo={"ip": "198.51.100.7"},
                 )
@@ -189,12 +195,14 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 log = stack.enter_context(patch.object(roxy_registration, "logger"))
 
                 result = roxy_registration.run_roxy_registration(
-                    "mail@example.test", "Test User", "1990-01-01", otp_code="123456",
+                    "mail@example.test", "Test User", "1990-01-01", proxy=input_proxy, otp_code="123456",
                 )
 
                 expected_token = "registration-at" if outcome == "absent" else "refreshed-at"
                 expected_expires = "old-expires" if outcome == "absent" else "fresh-expires"
                 save.assert_called_once()
+                self.assertEqual(save.call_args.kwargs["proxy_used"], saved_proxy)
+                self.assertEqual(client.profile_proxy, effective_proxy)
                 self.assertEqual(save.call_args.kwargs["access_token"], expected_token)
                 self.assertEqual(save.call_args.kwargs["extra"]["expires"], expected_expires)
                 self.assertEqual(result["access_token"], expected_token)
@@ -204,6 +212,9 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                 self.assertEqual(setup_mock.call_args.kwargs["access_token"], "registration-at")
                 session.close.assert_called_once()
                 self.assertNotIn("refreshed-at", repr(log.mock_calls))
+                for credential in ("pool-user", "pool-password", "input-user", "input-password", "rotated-user", "rotated-password", "explicit-user", "explicit-password", "fallback-user", "fallback-password"):
+                    self.assertNotIn(credential, repr(save.call_args))
+                    self.assertNotIn(credential, repr(log.mock_calls))
 
     def test_proxy_transport_failure_is_classified(self):
         self.assertTrue(
