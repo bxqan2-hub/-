@@ -729,6 +729,20 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["websocket_received"], 4)
         self.assertEqual(summary["observed_transport_bytes"], 62)
 
+    def test_summary_uses_data_received_when_loading_finished_is_missing(self):
+        def entry(method, params):
+            return {"message": json.dumps({"message": {"method": method, "params": params}})}
+
+        summary = summarize_performance_logs([
+            entry("Network.requestWillBeSent", {
+                "requestId": "stream", "request": {"url": "https://chatgpt.com/stream"},
+            }),
+            entry("Network.dataReceived", {"requestId": "stream", "encodedDataLength": 700}),
+        ])
+
+        self.assertEqual(summary["downloaded"], 700)
+        self.assertEqual(summary["data_received_fallback"], 700)
+
     def test_summary_prefers_exact_cache_request_id_for_repeated_url(self):
         def entry(method, params):
             return {"message": json.dumps({"message": {"method": method, "params": params}})}

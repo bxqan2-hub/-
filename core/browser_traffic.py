@@ -406,6 +406,8 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
     uploaded = 0
     websocket_received = 0
     websocket_sent = 0
+    data_received_by_request: dict[str, int] = defaultdict(int)
+    finished_request_ids: set[str] = set()
     started = 0
     blocked_by_reason: dict[str, int] = defaultdict(int)
     by_host: dict[str, int] = defaultdict(int)
@@ -448,10 +450,16 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
                 continue
             size = max(0, int(float(params.get("encodedDataLength") or 0)))
             downloaded += size
+            finished_request_ids.add(request_id)
             parsed = urlparse(requests.get(request_id, ""))
             if parsed.hostname:
                 by_host[parsed.hostname.lower()] += size
                 by_path[f"{parsed.hostname.lower()}{parsed.path or '/'}"] += size
+        elif method == "Network.dataReceived":
+            if request_id not in replayed_request_ids:
+                data_received_by_request[request_id] += max(
+                    0, int(float(params.get("encodedDataLength") or 0)),
+                )
         elif method == "Network.loadingFailed" and params.get("blockedReason"):
             reason = block_reason(
                 requests.get(request_id, ""), request_resource_types.get(request_id, ""),
@@ -470,12 +478,27 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
             frame = params.get("response") or {}
             websocket_received += len(str(frame.get("payloadData") or "").encode("utf-8"))
 
+    # A few Roxy builds lose loadingFinished while retaining dataReceived.
+    # Count that request once as a fallback so the account meter does not
+    # under-report bytes merely because the terminal event was dropped.
+    data_received_fallback = 0
+    for request_id, size in data_received_by_request.items():
+        if not size or request_id in finished_request_ids or request_id in blocked_request_ids:
+            continue
+        data_received_fallback += size
+        downloaded += size
+        parsed = urlparse(requests.get(request_id, ""))
+        if parsed.hostname:
+            by_host[parsed.hostname.lower()] += size
+            by_path[f"{parsed.hostname.lower()}{parsed.path or '/'}"] += size
+
     top_paths = sorted(by_path.items(), key=lambda item: item[1], reverse=True)[:20]
     return {
         "downloaded": downloaded,
         "uploaded": uploaded,
         "websocket_sent": websocket_sent,
         "websocket_received": websocket_received,
+        "data_received_fallback": data_received_fallback,
         "observed_transport_bytes": downloaded + uploaded + websocket_sent + websocket_received,
         "logical_downloaded": downloaded + max(0, int(cached_bytes)),
         "cached_downloaded": max(0, int(cached_bytes)),
