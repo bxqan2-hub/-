@@ -7,11 +7,7 @@ if exist "%ProgramFiles%\nodejs" set "PATH=%ProgramFiles%\nodejs;%PATH%"
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set "PORT=%~1"
-set "DEFAULT_PORT_REQUESTED=0"
-if not defined PORT (
-  set "PORT=5002"
-  set "DEFAULT_PORT_REQUESTED=1"
-)
+if not defined PORT set "PORT=5002"
 
 if not exist .venv\Scripts\python.exe (
   echo [ERR] .venv not found. Run install-integrations.bat first.
@@ -33,20 +29,14 @@ if not exist logs mkdir logs
 if not exist run mkdir run
 rem The shared stop path replaces this project and the requested port without prompting.
 call "%~dp0stop-webui.bat" "%PORT%"
-if not errorlevel 1 goto start_instance
-rem Windows can retain an orphaned listener whose owning PID no longer exists.
-rem Keep the no-argument launcher usable by moving the default instance to 5001.
-if not "%DEFAULT_PORT_REQUESTED%"=="1" exit /b 1
-if not "%PORT%"=="5002" exit /b 1
-echo [WARN] Port 5002 is stuck; retrying WebUI on port 5001.
-set "PORT=5001"
-call "%~dp0stop-webui.bat" "%PORT%"
-if errorlevel 1 exit /b 1
-
-:start_instance
+if errorlevel 1 (
+  echo [ERR] Failed to stop WebUI on port %PORT%. Startup cancelled; port unchanged.
+  exit /b 1
+)
 
 echo Starting WebUI on http://127.0.0.1:%PORT% ...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $root=(Get-Location).Path; $python=Join-Path $root '.venv\Scripts\python.exe'; $argsLine=[char]34+(Join-Path $root 'web.py')+[char]34+' --host 127.0.0.1 --port '+$env:PORT; $child=Start-Process -FilePath $python -ArgumentList $argsLine -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root ('logs\webui-'+$env:PORT+'.log')) -RedirectStandardError (Join-Path $root ('logs\webui-'+$env:PORT+'.err.log')) -PassThru; Set-Content -LiteralPath (Join-Path $root 'run\webui.pid') -Value $child.Id -Encoding ASCII"
+rem WMI starts outside the invoking terminal job; keep hidden output and inherited environment.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $root=(Get-Location).Path; $q=[char]34; $python=Join-Path $root '.venv\Scripts\python.exe'; $command=$q+$env:ComSpec+$q+' /d /c '+$q+$q+$python+$q+' -X utf8 '+$q+(Join-Path $root 'web.py')+$q+' --host 127.0.0.1 --port '+$env:PORT+' 1>'+$q+(Join-Path $root ('logs\webui-'+$env:PORT+'.log'))+$q+' 2>'+$q+(Join-Path $root ('logs\webui-'+$env:PORT+'.err.log'))+$q+$q; $environment=[string[]]@([Environment]::GetEnvironmentVariables().GetEnumerator() | ForEach-Object {$_.Key+'='+$_.Value}); $startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0; EnvironmentVariables=$environment}; $child=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command; CurrentDirectory=$root; ProcessStartupInformation=$startup}; if($child.ReturnValue -ne 0 -or -not $child.ProcessId){throw ('Detached startup failed: '+$child.ReturnValue)}; Set-Content -LiteralPath (Join-Path $root 'run\webui.pid') -Value $child.ProcessId -Encoding ASCII"
 if errorlevel 1 exit /b 1
 rem A process existing is not readiness. Wait for the actual login page with no proxy.
 for /l %%i in (1,1,30) do (
@@ -58,7 +48,7 @@ echo [ERR] Startup did not become ready. See logs\webui-%PORT%.log and logs\webu
 exit /b 1
 
 :ready
-rem Store the real listener PID, not the virtual-environment launcher PID.
+rem Store the real listener PID, not the detached command or virtual-environment launcher PID.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $root=(Get-Location).Path; $entry=[regex]::Escape((Join-Path $root 'web.py')); $owners=@(Get-NetTCPConnection -LocalPort ([int]$env:PORT) -State Listen | Select-Object -ExpandProperty OwningProcess -Unique); $matched=@($owners | ForEach-Object {Get-CimInstance Win32_Process -Filter ('ProcessId='+$_)} | Where-Object {$_.CommandLine -match $entry}); if($matched.Count -ne 1){throw 'Started listener identity changed'}; Set-Content -LiteralPath (Join-Path $root 'run\webui.pid') -Value $matched[0].ProcessId -Encoding ASCII; Write-Host ('Started PID='+$matched[0].ProcessId)"
 if errorlevel 1 exit /b 1
 echo Ready: http://127.0.0.1:%PORT%/
