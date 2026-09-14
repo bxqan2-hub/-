@@ -3672,6 +3672,10 @@ def run_roxy_registration(
             driver.set_script_timeout(int(_cfg.ROXY_SELENIUM_TIMEOUT))
         except Exception:
             pass
+        # Install filtering and continuous traffic capture before any
+        # browser-side preflight navigation; otherwise those proxy bytes have
+        # no matching account-level evidence.
+        traffic_optimizer = _start_traffic_optimizer(driver)
         configured_exit_attempts = getattr(_cfg, "ROXY_BROWSER_EXIT_IP_ATTEMPTS", 0)
         registration_exit_geo = probe_selenium_driver_exit_geo(
             driver,
@@ -3697,8 +3701,6 @@ def run_roxy_registration(
             profile_isolation.get("os") or "-",
         )
         logger.info("[Roxy注册] 开始：%s，profile=%s", email, opened.profile_id)
-        traffic_optimizer = _start_traffic_optimizer(driver)
-
         rejected_otps: set[str] = set()
         resolved_email_source = resolve_email_source(email)
         if otp_code is None and resolved_email_source in {"generic_api", "inbox_mate"}:
