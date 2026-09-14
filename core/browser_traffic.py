@@ -397,11 +397,15 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
                                budget_bytes: int = 3 * 1024 * 1024) -> dict:
     requests: dict[str, str] = {}
     request_resource_types: dict[str, str] = {}
+    websocket_urls: dict[str, str] = {}
     exact_cached_request_ids = {str(request_id) for request_id in (cached_request_ids or ()) if request_id}
     replayed_request_ids: set[str] = set()
     blocked_request_ids: set[str] = set()
     cached_url_counts = Counter(str(url) for url in (cached_request_urls or ()) if url)
     downloaded = 0
+    uploaded = 0
+    websocket_received = 0
+    websocket_sent = 0
     started = 0
     blocked_by_reason: dict[str, int] = defaultdict(int)
     by_host: dict[str, int] = defaultdict(int)
@@ -420,11 +424,15 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
             continue
         request_id = str(params.get("requestId") or "")
         if method == "Network.requestWillBeSent":
-            url = str((params.get("request") or {}).get("url") or "")
+            request = params.get("request") or {}
+            url = str(request.get("url") or "")
             if url.startswith(("http://", "https://")):
                 requests[request_id] = url
                 request_resource_types[request_id] = str(params.get("type") or "")
                 started += 1
+                post_data = request.get("postData")
+                if post_data:
+                    uploaded += len(str(post_data).encode("utf-8"))
                 # Fetch.RequestPaused exposes Network.requestId on current
                 # Chromium builds.  Prefer that exact identity so a network
                 # miss followed by a replay of the same URL cannot subtract
@@ -451,10 +459,24 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
             blocked_by_reason[reason] += 1
             if request_id:
                 blocked_request_ids.add(request_id)
+        elif method == "Network.webSocketCreated":
+            socket_id = str(params.get("requestId") or "")
+            if socket_id:
+                websocket_urls[socket_id] = str(params.get("url") or "")
+        elif method == "Network.webSocketFrameSent":
+            frame = params.get("response") or {}
+            websocket_sent += len(str(frame.get("payloadData") or "").encode("utf-8"))
+        elif method == "Network.webSocketFrameReceived":
+            frame = params.get("response") or {}
+            websocket_received += len(str(frame.get("payloadData") or "").encode("utf-8"))
 
     top_paths = sorted(by_path.items(), key=lambda item: item[1], reverse=True)[:20]
     return {
         "downloaded": downloaded,
+        "uploaded": uploaded,
+        "websocket_sent": websocket_sent,
+        "websocket_received": websocket_received,
+        "observed_transport_bytes": downloaded + uploaded + websocket_sent + websocket_received,
         "logical_downloaded": downloaded + max(0, int(cached_bytes)),
         "cached_downloaded": max(0, int(cached_bytes)),
         "cache_saved_bytes": max(0, int(cached_bytes)),

@@ -705,6 +705,30 @@ class PerformanceSummaryTests(unittest.TestCase):
         self.assertTrue(summary["within_budget"])
         self.assertEqual(summary["blocked_by_reason"], {"telemetry": 1})
 
+    def test_summary_accounts_for_upload_and_websocket_frames(self):
+        def entry(method, params):
+            return {"message": json.dumps({"message": {"method": method, "params": params}})}
+
+        entries = [
+            entry("Network.requestWillBeSent", {
+                "requestId": "post", "request": {
+                    "url": "https://chatgpt.com/backend-api/sentinel/req", "postData": "abcd",
+                },
+            }),
+            entry("Network.loadingFinished", {"requestId": "post", "encodedDataLength": 50}),
+            entry("Network.webSocketCreated", {"requestId": "ws", "url": "wss://chatgpt.com/socket"}),
+            entry("Network.webSocketFrameSent", {"requestId": "ws", "response": {"payloadData": "sent"}}),
+            entry("Network.webSocketFrameReceived", {"requestId": "ws", "response": {"payloadData": "recv"}}),
+        ]
+
+        summary = summarize_performance_logs(entries)
+
+        self.assertEqual(summary["downloaded"], 50)
+        self.assertEqual(summary["uploaded"], 4)
+        self.assertEqual(summary["websocket_sent"], 4)
+        self.assertEqual(summary["websocket_received"], 4)
+        self.assertEqual(summary["observed_transport_bytes"], 62)
+
     def test_summary_prefers_exact_cache_request_id_for_repeated_url(self):
         def entry(method, params):
             return {"message": json.dumps({"message": {"method": method, "params": params}})}

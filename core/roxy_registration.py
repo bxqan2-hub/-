@@ -214,8 +214,12 @@ def _finish_traffic_optimizer(optimizer: RoxyTrafficOptimizer | None) -> dict:
     try:
         summary = optimizer.finalize()
         logger.info(
-            "[Roxy流量] downloaded=%s logical=%s cached=%s hits=%s misses=%s candidates=%s writes=%s blocked=%s requests=%s within_budget=%s errors=%s",
+            "[Roxy流量] downloaded=%s uploaded=%s ws_sent=%s ws_recv=%s observed=%s logical=%s cached=%s hits=%s misses=%s candidates=%s writes=%s blocked=%s requests=%s within_budget=%s errors=%s",
             summary.get("downloaded", 0),
+            summary.get("uploaded", 0),
+            summary.get("websocket_sent", 0),
+            summary.get("websocket_received", 0),
+            summary.get("observed_transport_bytes", 0),
             summary.get("logical_downloaded", 0),
             summary.get("cache_saved_bytes", 0),
             summary.get("cache_hits", 0),
