@@ -9,11 +9,13 @@
 - 每个成功账号仍下载约 5–11 MB 的 ChatGPT 公共 bundle；静态缓存命中关闭后 `cached=0/hits=0`，因此本轮异常不是缓存复用口径造成。
 - `Roxy` `/browser/open` 在 Selenium 连接前通常等待约 40–50 秒；该窗口启动阶段发生的代理流量没有账号级 CDP 事件，属于主要未计量区间。
 - Meta 隧道上行在并发 10 时出现约 151.7 MB，远高于浏览器 postData 观测值，说明代理/浏览器启动阶段存在重试或控制面开销，需继续按并发 1 与 Roxy open 生命周期单独复测。
+- 并发 1 的 Job 653/655 复核显示 `/browser/open` 仅 4–6 秒、启动阶段小于 0.5 MB；主要峰值出现在密码/2FA 重认证和只读 `/backend-api/models` 校验。Meta 网卡同时承载 Roxy UI、Edge/ChatGPT 等其它进程，单看网卡计数会混入非注册流量。
 
 ## 已实施
 
 - `core/browser_traffic.py::block_reason` 与 `RoxyTrafficOptimizer._on_request_paused`：Session 建立后仅放行 ChatGPT auth/session/callback 文档及 API，阻止应用壳与后台轮询，避免认证完成后的二次 bundle 下载。
 - `stop-webui.bat`：处理“进程在枚举后自行退出”的竞态，避免启动脚本因 `Stop-Process` 偶发找不到 PID 而中止。
+- `core/account_export.py::_validate_2fa_token`：只读 Token 校验改为流式响应并在读取正文前关闭，避免 Cloudflare 403 挑战 HTML 被完整下载。
 
 ## 下一轮验证
 
