@@ -430,6 +430,8 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
     blocked_by_reason: dict[str, int] = defaultdict(int)
     by_host: dict[str, int] = defaultdict(int)
     by_path: dict[str, int] = defaultdict(int)
+    uploaded_by_host: dict[str, int] = defaultdict(int)
+    uploaded_by_path: dict[str, int] = defaultdict(int)
 
     for raw in entries:
         try:
@@ -452,7 +454,14 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
                 started += 1
                 post_data = request.get("postData")
                 if post_data:
-                    uploaded += len(str(post_data).encode("utf-8"))
+                    upload_size = len(str(post_data).encode("utf-8"))
+                    uploaded += upload_size
+                    parsed_upload = urlparse(url)
+                    if parsed_upload.hostname:
+                        upload_host = parsed_upload.hostname.lower()
+                        upload_path = f"{upload_host}{parsed_upload.path or '/'}"
+                        uploaded_by_host[upload_host] += upload_size
+                        uploaded_by_path[upload_path] += upload_size
                 # Fetch.RequestPaused exposes Network.requestId on current
                 # Chromium builds.  Prefer that exact identity so a network
                 # miss followed by a replay of the same URL cannot subtract
@@ -530,6 +539,8 @@ def summarize_performance_logs(entries: list[dict | str], *, cached_bytes: int =
         "blocked_by_reason": dict(sorted(blocked_by_reason.items())),
         "by_host": dict(sorted(by_host.items(), key=lambda item: item[1], reverse=True)),
         "by_path": dict(top_paths),
+        "uploaded_by_host": dict(sorted(uploaded_by_host.items(), key=lambda item: item[1], reverse=True)),
+        "uploaded_by_path": dict(sorted(uploaded_by_path.items(), key=lambda item: item[1], reverse=True)[:20]),
         "budget_bytes": max(0, int(budget_bytes)),
         "within_budget": downloaded <= max(0, int(budget_bytes)),
     }

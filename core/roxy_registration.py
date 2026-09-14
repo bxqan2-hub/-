@@ -238,6 +238,11 @@ def _finish_traffic_optimizer(optimizer: RoxyTrafficOptimizer | None) -> dict:
             json.dumps(dict(list((summary.get("by_path") or {}).items())[:5]), ensure_ascii=False, separators=(",", ":")),
             summary.get("degraded_reason") or "none",
         )
+        logger.info(
+            "[Roxy流量] upload_by_host=%s upload_by_path=%s",
+            json.dumps(summary.get("uploaded_by_host") or {}, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(dict(list((summary.get("uploaded_by_path") or {}).items())[:10]), ensure_ascii=False, separators=(",", ":")),
+        )
         if summary.get("errors"):
             logger.warning(
                 "[Roxy流量] install/runtime errors=%s",
