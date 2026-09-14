@@ -1,5 +1,11 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-15 按维护者要求移除浏览器连接时的页面属性注入
+
+- 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新读取上游 roxy_registration，SHA-256 仍为 `454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`。上游 driver 构建路径没有本次移除的页面属性注入 helper；本地其余 driver 连接顺序、日志能力和启动重试均保留。
+- 用户要求移除后自行测试，有问题再指定 Git 回退。删除该本地 helper 与两处 driver 构建调用，不新增开关或备用实现；保留人类化点击/滚动、Roxy 独立 Profile/随机指纹、代理/TLS 检查和流量压缩。
+- 三种 driver 连接分支新增禁止执行页面脚本的回归，旧实现三例均红，移除后全绿；注册、登录、安全设置、密码/MFA 与流量相关合并回归 485 passed、305 subtests。完整范围、运行切换与交付自检见 `docs/2026-09-15_移除浏览器页面属性注入-report.md`。
+
 ## 2026-09-14 指定账号安全设置重复开窗：普通 ChatGPT 登录终态
 
 - 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；本次重新读取上游 roxy_codex_oauth（SHA-256 `8a6b2ab48bac00b3fbcbff84edfd9ad5a27661d047b99607806420d6de16015d`）和 account_export（`985b99e669711d3de50dd6072ba83f660ac74d5ea156bf84f829c8fb258d0547`）；独立 account_security_service 在锁定上游为 404，属于本地扩展。

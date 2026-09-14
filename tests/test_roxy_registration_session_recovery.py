@@ -9,6 +9,43 @@ from core.roxybrowser_client import RoxyOpenResult
 
 
 class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
+    def test_driver_connection_leaves_page_scripts_untouched(self):
+        from config import humanize
+
+        for connection in ("debugger_bundled", "debugger_default", "remote"):
+            with self.subTest(connection=connection), ExitStack() as stack:
+                driver = MagicMock()
+                raw = {"data": {"driver": "C:/fixture/chromedriver.exe"}} if connection == "debugger_bundled" else {}
+                opened = RoxyOpenResult(
+                    "profile-fixture", raw,
+                    debugger_address="127.0.0.1:9222" if connection != "remote" else None,
+                    webdriver_url="http://127.0.0.1:4444" if connection == "remote" else None,
+                )
+                stack.enter_context(patch.object(humanize, "ENABLE_HUMANIZE_BROWSER_ACTIONS", True))
+                bypass = stack.enter_context(patch.object(roxy_registration, "_ensure_local_proxy_bypass"))
+                chrome = stack.enter_context(patch("selenium.webdriver.Chrome", return_value=driver))
+                remote = stack.enter_context(patch("selenium.webdriver.remote.webdriver.WebDriver", return_value=driver))
+
+                self.assertIs(roxy_registration._build_driver(opened), driver)
+                bypass.assert_called_once_with()
+                constructor = remote if connection == "remote" else chrome
+                constructor.assert_called_once()
+                (chrome if connection == "remote" else remote).assert_not_called()
+                kwargs = constructor.call_args.kwargs
+                options = kwargs["options"]
+                self.assertEqual(options.page_load_strategy, "eager")
+                self.assertEqual(options.capabilities["goog:loggingPrefs"], {"performance": "ALL"})
+                if connection == "remote":
+                    self.assertEqual(kwargs["command_executor"], opened.webdriver_url)
+                else:
+                    self.assertEqual(options.experimental_options["debuggerAddress"], opened.debugger_address)
+                    if connection == "debugger_bundled":
+                        self.assertEqual(kwargs["service"].path, raw["data"]["driver"])
+                    else:
+                        self.assertNotIn("service", kwargs)
+                driver.execute_cdp_cmd.assert_not_called()
+                driver.execute_script.assert_not_called()
+
     def test_session_recovery_stops_terminal_page_before_read_or_background_login(self):
         for page_text, expected in (
             ("Route Error (400)", "code=auth_route_error page_status=400"),

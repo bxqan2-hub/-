@@ -167,7 +167,6 @@ def _build_driver(opened: RoxyOpenResult):
             driver = _launch_with_retry(driver_path)
         else:
             driver = _launch_with_retry()
-        _apply_browser_automation_mask(driver)
         return driver
 
     if opened.webdriver_url:
@@ -176,7 +175,6 @@ def _build_driver(opened: RoxyOpenResult):
         options.page_load_strategy = "eager"
         options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
         driver = RemoteWebDriver(command_executor=opened.webdriver_url, options=options)
-        _apply_browser_automation_mask(driver)
         return driver
 
     raise RuntimeError("Roxy 未返回可连接的 Selenium 地址")
@@ -417,35 +415,6 @@ def _browser_actions_enabled() -> bool:
         return bool(getattr(_hcfg, "ENABLE_HUMANIZE_BROWSER_ACTIONS", True))
     except Exception:
         return True
-
-
-def _apply_browser_automation_mask(driver) -> None:
-    """连接 Selenium 后尽量降低明显自动化特征；失败不影响主流程。"""
-    if not _browser_actions_enabled():
-        return
-    try:
-        script = r"""
-        Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
-        if (!window.chrome) window.chrome = {};
-        if (!window.chrome.runtime) window.chrome.runtime = {};
-        const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
-        if (originalQuery) {
-          window.navigator.permissions.query = (parameters) => (
-            parameters && parameters.name === 'notifications'
-              ? Promise.resolve({ state: Notification.permission })
-              : originalQuery(parameters)
-          );
-        }
-        """
-        if hasattr(driver, "execute_cdp_cmd"):
-            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
-        try:
-            driver.execute_script(script)
-        except Exception:
-            pass
-        logger.info("%s 已注入浏览器自动化特征弱化脚本", _log_prefix(driver))
-    except Exception as exc:
-        logger.debug("%s 注入自动化特征弱化脚本失败：%s", _log_prefix(driver), exc)
 
 
 def _human_scroll_to(driver, el) -> None:
