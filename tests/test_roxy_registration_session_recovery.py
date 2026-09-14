@@ -348,12 +348,18 @@ class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
                     self.assertNotIn(credential, repr(log.mock_calls))
 
     def test_proxy_transport_failure_is_classified(self):
-        self.assertTrue(
-            roxy_registration._is_proxy_transport_failure(
-                RuntimeError("unknown error: net::ERR_PROXY_CONNECTION_FAILED")
-            )
-        )
-        self.assertFalse(roxy_registration._is_proxy_transport_failure(RuntimeError("password rejected")))
+        for code in ("ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED", "ERR_SSL_PROTOCOL_ERROR"):
+            with self.subTest(code=code):
+                self.assertTrue(roxy_registration._is_proxy_transport_failure(
+                    RuntimeError(f"unknown error: net::{code}")
+                ))
+        for message in (
+            "password rejected", "Roxy 浏览器出口 IP 与创建前预检不一致",
+            "窗口内出口 IP 复核失败", "invalid session id", "no such window",
+            "GenericApiTransportError: fixture mail transport failure",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(roxy_registration._is_proxy_transport_failure(RuntimeError(message)))
 
     def test_proxy_isolation_failure_is_separate_from_transport(self):
         self.assertTrue(

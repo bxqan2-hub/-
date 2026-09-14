@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import math
+import re
 import time
 from urllib.parse import urlparse
 
@@ -240,7 +241,8 @@ def probe_selenium_driver_exit_geo(
                         return geo
                     logger.warning("[%s] stage=browser_exit_probe endpoint=%s attempt=%s/%s error_type=invalid_geo", label, urlparse(endpoint).hostname, attempt, max_attempts)
                 except Exception as exc:
-                    logger.warning("[%s] stage=browser_exit_probe endpoint=%s attempt=%s/%s error_type=%s timeout=%s", label, urlparse(endpoint).hostname, attempt, max_attempts, type(exc).__name__, timeout_seconds)
+                    net_error = re.search(r"\bnet::(ERR_[A-Z0-9_]{1,64})\b", str(exc))
+                    logger.warning("[%s] stage=browser_exit_probe endpoint=%s attempt=%s/%s error_type=%s net_error=%s timeout=%s", label, urlparse(endpoint).hostname, attempt, max_attempts, type(exc).__name__, net_error.group(1) if net_error else "none", timeout_seconds)
             if attempt >= max_attempts:
                 break
             if delay:
@@ -250,10 +252,12 @@ def probe_selenium_driver_exit_geo(
     except Exception as exc:
         if callable(stop_check):
             stop_check()
+        net_error = re.search(r"\bnet::(ERR_[A-Z0-9_]{1,64})\b", str(exc))
         logger.warning(
-            "[%s] stage=browser_exit_probe 临时标签检查失败 error_type=%s",
+            "[%s] stage=browser_exit_probe 临时标签检查失败 error_type=%s net_error=%s",
             label,
             type(exc).__name__,
+            net_error.group(1) if net_error else "none",
         )
         return {}
     finally:

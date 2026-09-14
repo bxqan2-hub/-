@@ -238,8 +238,7 @@ def _should_disable_failed_registration_email(error: object) -> bool:
         _is_final_session_access_token_timeout(text)
         or "账号已创建但 AT 恢复失败" in text
         or "邮箱提交后进入登录密码页" in text
-        or "auth.openai.com/log-in/password" in text
-        or "/log-in/password" in text
+        or "Email transitioned to an existing-account password page" in text
         or "account_deactivated" in text.lower()
         or "account_disabled" in text.lower()
         or "account_banned" in text.lower()

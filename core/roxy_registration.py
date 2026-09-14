@@ -51,11 +51,12 @@ class ChatGPTSessionExpiredError(RuntimeError):
 
 
 def _is_proxy_transport_failure(value) -> bool:
-    """识别浏览器明确的代理链路失败，交给外层轮换代理节点。"""
+    """识别浏览器明确的代理/TLS 传输失败，与页面业务终态分开。"""
     text = f"{type(value).__name__}: {value}".lower()
     markers = (
         "err_proxy_connection_failed",
         "err_tunnel_connection_failed",
+        "err_ssl_protocol_error",
         "proxy connection failed",
         "proxyerror",
         "socksproxyerror",
@@ -1242,6 +1243,8 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
             return "password"
         state = _email_input_value_state(driver)
         last = state
+        if _is_browser_navigation_error(driver, state):
+            raise RuntimeError("stage=email_navigation type=browser_navigation_error")
         inputs = state.get("inputs") or []
         if inputs:
             values = [str(i.get("value") or "") for i in inputs]
@@ -1394,7 +1397,9 @@ def _wait_for_otp_input(driver, timeout: int = 30) -> str | None:
     raise RuntimeError(f"等待 OTP 输入框超时: stage=otp_dom_ready; state={redact_otp_text(state)}")
 
 
-def _is_browser_navigation_error(driver) -> bool:
+def _is_browser_navigation_error(driver, state: dict | None = None) -> bool:
+    if str((state or {}).get("url") or "").lower().startswith("chrome-error://"):
+        return True
     try:
         return str(driver.current_url or "").lower().startswith("chrome-error://")
     except Exception:

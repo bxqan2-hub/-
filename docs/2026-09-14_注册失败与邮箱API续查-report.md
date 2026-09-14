@@ -56,6 +56,13 @@
    - 在既有 `confirmed()` 保存前复用终态检测，阻止错误页写入；不改变密码策略或正常成功页面。
    - 关联调用方 `_fetch_or_recover_chatgpt_session` 的终态检测移出 callback 容错块，避免新异常语义被吞后继续使用旧 Session。新增回归确认终态不读 Session、不进入后台邮箱恢复。
    - 此项来自本轮代码审计，不作为八个空邮箱历史失败的归因。
+4. **F4：TLS / 导航失败分型和取件前邮箱保护**
+   - Path：`core/roxy_registration.py::_is_proxy_transport_failure`、`_wait_email_submit_next_state`、`_is_browser_navigation_error`；`core/browser_exit_geo.py::probe_selenium_driver_exit_geo`；`core/registration_service.py::_should_disable_failed_registration_email`。
+   - 本轮实测出现 `ERR_SSL_PROTOCOL_ERROR`，补入既有传输分类；出口探测只记录限定长度的 `net::ERR_*` 错误码，不输出原始异常、Token、代理密码、Cookie 或堆栈。
+   - 764 的页面快照 URL 已是 `chrome-error://chromewebdata/`，但驱动 URL 可仍是旧地址。复用原导航错误 helper 检查现有快照，直接报告 `stage=email_navigation`，避免继续等待邮箱提交。766 只有空壳页面与 `Failed to fetch`，没有证据将它也断言为 Chrome 错误页。
+   - 移除仅凭错误文本内 `/log-in/password` 路径就停用邮箱的条件；改用明确已注册/账号停用业务终态。已有网络异常附带该 URL 的离线回归先失败后通过。本次 765 的目标为 `/auth/login`，未触发这一潜在误停用条件。
+   - 本轮十个失败均未增加邮箱失败计数或将邮箱停用；无损回收后的普通失败备注仍影响既有新邮箱优先排序，不改数据库排序策略。
+   - 上游 registration_service 的裸密码 URL 判定同样存在，固定版本文件 SHA-256 `7eb3fb642e67ab0bbf1424113968c01a689a0cbff8e325e8bf15e15c84d1c5bc`；同目录 `browser_exit_geo.py` 为 404，出口 helper 属本地实现。修复仅分型、提前识别错误页和保护邮箱，不增加重试、不跳过出口复核、不关闭 TLS 校验。
 
 ## 上游对照与密码 / 2FA 边界
 
@@ -70,7 +77,56 @@
 - 新短重试使 epoch 浮点预算断言产生约 47.7 ns 舍入误差，`tests/test_twofa_registration.py` 两处测试使用绝对 1 µs 容差，生产预算不变。
 - 已跟踪测试全量尝试：初轮 11 failed、1132 passed（包含已修复的浮点断言）；其后 10 failed、1134 passed、432 subtests。剩余失败为旧支付目录存在断言 1 项，以及 HeroSMS 测试读到本地 SMSBower 配置的 9 项；对应业务代码未修改。单设子进程 `SMS_PROVIDER=herosms` 仍受测试中配置重载影响，不声称全仓绿色。
 - 最终合并相关回归（16 个已跟踪测试文件，覆盖邮箱、Roxy/Session、密码、2FA、缓存和 WebUI helper）：**591 passed、390 subtests**，21.38 秒；`compileall`、`git diff --check`、替换引用回扫通过。
-- 十个新邮箱实测结果在本次运行完成后补入；不以既有流量测试结果替代本轮验证。
+- 最初一次重启准备被执行策略拦截。用户随后明确授权重启与测试后，同一执行工具成功重启原 **5002**，PID 从 9396 更新为 55040，加载 `05b9bd8`；未换端口。下面记录实际运行，取代先前“尚未启动”的中间状态。
+
+### 首轮真实十邮箱：757–766（16:49:09–16:51:54）
+
+- 从 available 池挑选无历史 job、账号及安全 checkpoint 的十个邮箱；`workers=10`，使用当时现有 Cliproxy 配置，未重用旧失败邮箱。
+- **0 成功、10 失败**：代理预检 2（760/762）；窗口出口复核 5（757/758/759/761/763）；登录页 TLS 1（765）；邮箱提交后页面转移 2（764/766）。
+- 八个创建成功的 Profile 均独立、请求随机指纹，最终全部关闭删除。两个仍在运行时抽查的窗口实际包含全部七项省流参数。
+- **0/10 进入邮箱取件 API、OTP、密码或 MFA**，短重试真实覆盖为零。这一轮不能作为邮箱修复通过的证明。
+
+### 是否由上一轮修复造成：独立网络对照
+
+- 两个任务在浏览器创建前的原代理预检即失败，新邮箱/OTP 修改尚未执行。独立 curl 脚本不调用上述新修改，三条代理对 `ipinfo.io`、`chatgpt.com` 共六次探测均为 SSL 错误 35。
+- 配置代理的 HTTPS 请求报 `OPENSSL_internal:WRONG_VERSION_NUMBER`；同目标不显式使用该代理时 HTTP 200。16:54 的同脚本三种 TLS 客户端又均收到 200；未改注册代码或关闭 TLS 校验。该证据支持代理链路存在间歇异常，不支持将网络失败归因邮箱补丁。
+- 16:56:10 WebUI 收到配置保存，代理池变更；用户明确要求后续使用这组新配置。对新池三条候选相隔 30 秒的两轮检查共六次仍失败（一次超时、五次 SSL 35）。
+- 16:58:48 对新配置的一条代理逐阶段抓取：SOCKS greeting `0502`、auth `0100`、CONNECT `05000001`；发送 TLS ClientHello 后收到的首字节为 `485454502f312e31`，即明文 **`HTTP/1.1 403 Forbidden`**，正文 **`msg: connect proxy error`**，而非 TLS record。这直接解释了 SSL 协议报错；现有证据不进一步断言是配额、出口池还是代理链路中的哪一跳故障。
+- 代理池仅由用户保存的配置更新，本次代码修复不改代理凭据、协议、端口或网络校验。下一轮使用用户确认的新配置，结果另记；不宣称错误分型修正能修复代理上游。
+- 网络分型修正后最终相关回归扩至 18 个已跟踪文件：**608 passed、417 subtests**，20.80 秒；仍有 1 个既有 requests 依赖 warning，`compileall`、diff 和死引用检查通过。
+
+## 交付自检（R1–R8）
+
+1. **修改的已有代码**：`core/generic_api_mail_client.py::fetch_latest_otp`；`core/roxy_registration.py::_otp_flow_advanced_state`、`_fill_password_page_if_present.confirmed`、`_fetch_or_recover_chatgpt_session`、`run_roxy_registration`、`_is_proxy_transport_failure`、`_is_browser_navigation_error`、`_wait_email_submit_next_state`；`core/browser_exit_geo.py::probe_selenium_driver_exit_geo`；`core/registration_service.py::_should_disable_failed_registration_email`。其余为对应现有测试和报告/上游索引。
+2. **新增代码及替代关系**：生产代码只新增 `run_roxy_registration.stop_otp_wait_for_page_change` 这个局部回调，替换原来的匿名 lambda（已删除）。单次 yangyang 请求被原位有界重试替换；旧单次早退测试被改名并更新，历史报告引用同步修改。没有新增模块、类或第二套注册路径。新增测试符号如下（测试内部辅助闭包仅服务于相应用例）：
+   - `tests/test_generic_api_yangyang.py`：`test_polling_provider_error_fast_fails_only_after_short_retry`、`test_polling_retries_transient_list_and_detail_without_losing_mail`、`test_polling_terminal_response_after_transient_error_stops_retrying`、`test_polling_retry_budget_is_recomputed_after_pause`、`test_polling_retry_empty_mailbox_resets_error_streak`、`test_polling_empty_mailboxes_do_not_trigger_short_retries`、`test_polling_stops_before_retry_when_browser_has_advanced`、`test_polling_stops_if_browser_advances_during_retry_pause`、`test_polling_retry_pause_or_stop_check_exhaustion_preserves_last_stage`。
+   - `tests/test_roxy_registration_otp_recovery.py`：`test_advanced_state_stops_terminal_page_before_stale_success_signals`、`test_password_checkpoint_stops_terminal_email_verification_page`。
+   - `tests/test_roxy_registration_session_recovery.py`：`test_registration_otp_wait_preserves_page_stop_and_mail_failure_categories`、`test_session_recovery_stops_terminal_page_before_read_or_background_login`。
+   - `tests/test_twofa_registration.py`：只更新现有测试的两处浮点断言，无新增业务符号。本报告为新增交付证据，不是代码备份或替代运行实现。
+3. **搬迁项**：无；不涉及源文件删除。未创建回滚副本或重复工程。
+4. **新增配置项链路**：无新增配置。复用既有 `wait_for_otp` 参数 → `fetch_latest_otp` 主请求/短重试预算；原总预算、旧码筛选和调用方状态读取仍在原路线中。
+5. **死引用回扫**：下列命令排除当前报告中的检索语句本身；输出为空，退出码 1 表示无匹配。
+
+   ```powershell
+   rg -n -F -g '!2026-09-14_注册失败与邮箱API续查-report.md' -e 'test_polling_early_provider_error_keeps_fast_failure' -e 'should_stop=lambda: _otp_flow_advanced_state(driver) is not None' -e 'and otp_wait_state != "email_login"' core tests docs
+   ```
+
+6. **Diff 统计**：实现提交 `05b9bd8` 为 `+515 / −20`；包含接管前遗留的三个未提交文件改动。最终累计统计在文档收尾时核对。
+7. **测试**：最终相关回归覆盖 18 个已跟踪文件；原始完整输出保存于 `run/registration-takeover-transport-tests-20260914.log`。未删除 warning 的发生事实，只用 `--disable-warnings` 折叠重复详情。最后五行：
+
+   ```text
+   ........................................................................ [ 74%]
+   ........................................................................ [ 86%]
+   ........................................................................ [ 98%]
+   ............                                                        [100%]
+   608 passed, 1 warning, 417 subtests passed in 20.80s
+   ```
+8. **未做 / 存疑**：
+   - 已重启原 5002 并完成首轮十邮箱，但全部在网络/页面阶段失败，未覆盖邮箱修复；下一轮使用用户确认的新代理配置。当前不是整个接管任务全部完成。
+   - 八个空邮箱的发信/投递/同步根因仍缺远端证据；两个代理失败保持既有终止边界。
+   - 全量测试的 10 项无关失败与既有 requests 依赖 warning 保留，未扩改支付/短信模块。
+   - 既有邮箱 `requests.Session` 未显式关闭、requests timeout 不是严格墙钟全程截止时间，单列范围外风险；本次未改变它们。
+   - 已跟踪修改全部通过提交与远端管理。接管前存在的三个未跟踪支付路径保持原样；不将它们删除、隐藏或提交来伪造全工作区干净。
 
 ## 原始证据与隐私
 

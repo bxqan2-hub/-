@@ -7,6 +7,8 @@
 - OTP 页面终态通过既有停止回调传回调用方，页面前进或回退登录走既有状态分支；账号停用/Route Error 停止且不继续读旧 Session。密码 `confirmed()` 保存前复核终态，修复错误页路径误判成功的 checkpoint 缺口；四组离线回归已红绿复现。
 - 其余八个空邮箱在 16:39 网页/API 交叉检查中仍均为 0 封，未发现 parser 漏码证据；741 出口漂移、749 窗口出口探测超时独立列账。不将页面审计发现冒充这八例的历史根因。
 - 保留邮箱匹配、同窗 Cookie/代理、显式 Token、密码成功后 checkpoint、MFA activate 成功后保存 Secret，以及只读校验与写操作分离。证据、测试边界与十邮箱复测见 `docs/2026-09-14_注册失败与邮箱API续查-report.md`。
+- 实现 `05b9bd8` 已推送，相关合并回归 591 passed、390 subtests。最初重启被拦截，用户随后明确授权后原 5002 重启为 PID 55040；757–766 十邮箱真实执行，全部在网络/页面阶段失败，0 次调用邮箱取件。新池隧道抓到 TLS ClientHello 后返回明文 `HTTP/1.1 403 Forbidden` / `connect proxy error`，不是邮箱修复分支产生的错误。
+- 本轮进一步修正 SSL transport 分型、出口探测脱敏 `net_error`、快照 Chrome 错误页检测及裸密码页 URL 误停用邮箱条件；不增加重试、不跳过出口/TLS 验证。再次读取上游 registration_service，SHA-256 `7eb3fb642e67ab0bbf1424113968c01a689a0cbff8e325e8bf15e15c84d1c5bc`，确认裸 URL 判定为继承缺陷；出口 helper 为本地实现。用户 16:56 更新并确认使用当前代理池，后续结果在续查报告中单列。
 
 ## 2026-09-14 1024proxy 与 Cliproxy 各十账号复测验收交付（当前）
 

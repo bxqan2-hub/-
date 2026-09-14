@@ -281,6 +281,22 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
                 )
         read_input.assert_not_called()
 
+    def test_email_navigation_error_in_dom_snapshot_keeps_its_stage(self):
+        driver = MagicMock()
+        driver.current_url = "https://chatgpt.com/auth/login?email=mail%40example.test"
+        with patch.object(roxy_registration, "_has_access_token", return_value=False), \
+             patch.object(roxy_registration, "_is_login_password_page", return_value=False), \
+             patch.object(roxy_registration, "_is_email_verification_page", return_value=False), \
+             patch.object(roxy_registration, "_is_signup_password_page", return_value=False), \
+             patch.object(roxy_registration, "_email_input_value_state", return_value={
+                 "inputs": [], "url": "chrome-error://chromewebdata/",
+             }), \
+             patch.object(roxy_registration.time, "time", side_effect=[0.0, 0.0, 20.0]), \
+             patch.object(roxy_registration.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "stage=email_navigation type=browser_navigation_error"):
+                roxy_registration._wait_email_submit_next_state(driver, "mail@example.test", timeout=18)
+        sleep.assert_not_called()
+
     def test_email_navigation_error_propagates_without_nextauth_or_email_replay(self):
         driver = MagicMock()
         error = RuntimeError("stage=email_navigation type=browser_navigation_error")
@@ -1383,18 +1399,34 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         )
 
     def test_existing_account_password_page_disables_mailbox(self):
-        self.assertTrue(
-            registration_service._should_disable_failed_registration_email(
-                "RuntimeError: 邮箱提交后进入登录密码页: auth.openai.com/log-in/password"
-            )
-        )
+        for message in (
+            "RuntimeError: 邮箱提交后进入登录密码页: auth.openai.com/log-in/password",
+            "RuntimeError: Email transitioned to an existing-account password page: url=https://auth.openai.com/log-in/password",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(registration_service._should_disable_failed_registration_email(message))
 
     def test_account_deactivated_disables_mailbox(self):
-        self.assertTrue(
-            registration_service._should_disable_failed_registration_email(
-                "RuntimeError: OpenAI 返回 account_deactivated：该邮箱对应的账号已删除或停用"
-            )
-        )
+        for code in ("account_deactivated", "account_disabled", "account_banned"):
+            with self.subTest(code=code):
+                self.assertTrue(registration_service._should_disable_failed_registration_email(
+                    f"RuntimeError: OpenAI 返回 {code}：该邮箱对应的账号已删除或停用"
+                ))
+
+    def test_transport_error_password_url_does_not_disable_mailbox(self):
+        for error in (
+            "stage=proxy_transport; WebDriverException: net::ERR_SSL_PROTOCOL_ERROR",
+            "WebDriverException: net::ERR_PROXY_CONNECTION_FAILED",
+            "TimeoutException: page navigation timed out",
+            "stage=email_navigation type=browser_navigation_error",
+            "TypeError: Failed to fetch",
+            "stage=proxy_isolation 窗口内出口 IP 复核失败",
+            "WebDriverException: invalid session id",
+        ):
+            with self.subTest(error=error):
+                self.assertFalse(registration_service._should_disable_failed_registration_email(
+                    f"{error}; url=https://auth.openai.com/log-in/password"
+                ))
 
     def test_transient_mail_api_timeout_does_not_disable_mailbox(self):
         self.assertFalse(

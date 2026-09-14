@@ -202,6 +202,47 @@ class RegistrationBrowserExitGeoTests(unittest.TestCase):
         self.assertEqual(driver.script_timeouts, [20])
         self.assertNotIn("private-proxy-password", str(logs.output))
         self.assertIn("error_type=TimeoutException", str(logs.output))
+        self.assertIn("net_error=none", str(logs.output))
+
+    @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json?token=private-token"], 8.0))
+    def test_selenium_probe_logs_only_bounded_network_code_and_restores_tab(self, _settings):
+        from selenium.common.exceptions import WebDriverException
+
+        for code, expected in (
+            ("ERR_SSL_PROTOCOL_ERROR", "ERR_SSL_PROTOCOL_ERROR"),
+            ("ERR_TUNNEL_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED"),
+            ("ERR_" + "A" * 65, "none"),
+        ):
+            for setup_failure in (False, True):
+                with self.subTest(code=code, setup_failure=setup_failure):
+                    driver = _SeleniumDriver(None)
+                    error = WebDriverException(
+                        f"net::{code}; https://private-user:private-password@geo.example/json?token=private-token\n"
+                        "Authorization: Bearer private-access-token; cookie=private-cookie"
+                    )
+                    if setup_failure:
+                        driver.set_page_load_timeout = MagicMock(side_effect=[error, None])
+                    else:
+                        driver.get = MagicMock(side_effect=error)
+                    with self.assertLogs("core.browser_exit_geo", level="WARNING") as logs:
+                        result = probe_selenium_driver_exit_geo(
+                            driver, label="Roxy", restore_page_load_timeout=90, restore_script_timeout=20,
+                        )
+                    self.assertEqual(result, {})
+                    self.assertEqual(driver.closed_handles, ["probe"])
+                    self.assertEqual(driver.current_window_handle, "registration")
+                    self.assertEqual(driver.script_timeouts, [20])
+                    if setup_failure:
+                        driver.set_page_load_timeout.assert_called_with(90)
+                    else:
+                        self.assertEqual(driver.page_load_timeouts, [8, 90])
+                        driver.get.assert_called_once_with("https://geo.example/json?token=private-token")
+                    self.assertIn(f"net_error={expected}", str(logs.output))
+                    self.assertIn("error_type=WebDriverException", str(logs.output))
+                    for private in ("private-user", "private-password", "private-token", "private-access-token", "private-cookie"):
+                        self.assertNotIn(private, str(logs.output))
+                    if expected == "none":
+                        self.assertNotIn(code, str(logs.output))
 
     @patch("core.browser_exit_geo._probe_settings", return_value=(["https://geo.example/json"], 8.0))
     def test_selenium_probe_cancellation_restores_tab_and_propagates(self, _settings):
