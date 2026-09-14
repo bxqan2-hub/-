@@ -1219,18 +1219,47 @@ def fetch_latest_otp(
             )
             return best_otp
         try:
-            yy_result = _fetch_yangyang_otp(
-                session,
-                account.code_url,
-                headers,
-                after_ts=after_ts,
-                exclude_message_ids=excluded_ids,
-                request_timeout=min(
-                    float(request_timeout if request_timeout is not None else getattr(_email_cfg, "GENERIC_API_REQUEST_TIMEOUT", 8) or 8),
-                    deadline - time.time(),
-                ),
-            ) if is_yangyang else None
+            yy_result = None
             if is_yangyang:
+                # 与普通 GET 取码一致：主请求加一次短重试均失败才计为一轮错误。
+                # 每次遍历的列表/详情继续共享预算，短暂停顿后重新计算总剩余时间。
+                for request_attempt in range(2):
+                    budget = (
+                        request_timeout if request_timeout is not None
+                        else getattr(_email_cfg, "GENERIC_API_REQUEST_TIMEOUT", 8) or 8
+                    ) if request_attempt == 0 else (
+                        retry_timeout if retry_timeout is not None
+                        else getattr(_email_cfg, "GENERIC_API_RETRY_TIMEOUT", 5) or 5
+                    )
+                    try:
+                        yy_result = _fetch_yangyang_otp(
+                            session,
+                            account.code_url,
+                            headers,
+                            after_ts=after_ts,
+                            exclude_message_ids=excluded_ids,
+                            request_timeout=min(float(budget), deadline - time.time()),
+                        )
+                        break
+                    except GenericApiMailError as exc:
+                        remaining_after_error = deadline - time.time()
+                        if not exc.retryable or request_attempt or remaining_after_error <= 0:
+                            raise
+                        if stop_requested():
+                            raise GenericApiMailError("验证码页面已进入下一步，停止等待新验证码") from None
+                        remaining_after_error = deadline - time.time()
+                        if remaining_after_error <= 0:
+                            raise
+                        logger.warning(
+                            "[GenericAPI] yangyang 取件瞬时失败，短间隔重试一次：%s",
+                            exc,
+                        )
+                        time.sleep(min(0.8, remaining_after_error / 10))
+                        if stop_requested():
+                            raise GenericApiMailError("验证码页面已进入下一步，停止等待新验证码") from None
+                        if time.time() >= deadline:
+                            # 暂停/浏览器状态检查可能耗尽预算；保留真实失败阶段。
+                            raise
                 consecutive_transport_errors = 0
             fly_result = None
             if (not yy_result) and is_flysms:

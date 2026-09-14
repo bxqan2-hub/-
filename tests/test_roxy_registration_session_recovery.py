@@ -9,6 +9,137 @@ from core.roxybrowser_client import RoxyOpenResult
 
 
 class RoxyRegistrationSessionRecoveryTests(unittest.TestCase):
+    def test_session_recovery_stops_terminal_page_before_read_or_background_login(self):
+        for page_text, expected in (
+            ("Route Error (400)", "code=auth_route_error page_status=400"),
+            ("error_code: account_deactivated", "account_deactivated"),
+        ):
+            with self.subTest(page_text=page_text), \
+                 patch.object(roxy_registration, "_email_otp_page_state", return_value={
+                     "text": page_text, "inputs": [], "errors": [],
+                 }), \
+                 patch.object(roxy_registration, "_fetch_chatgpt_session") as fetch, \
+                 patch.object(roxy_registration, "_resume_chatgpt_login_callback") as callback, \
+                 patch("core.account_liveness.check_account_liveness") as background_login:
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    roxy_registration._fetch_or_recover_chatgpt_session(
+                        MagicMock(), email="mail@example.test", proxy=None, registration_created=True,
+                    )
+                fetch.assert_not_called()
+                callback.assert_not_called()
+                background_login.assert_not_called()
+
+    def test_registration_otp_wait_preserves_page_stop_and_mail_failure_categories(self):
+        for branch in (
+            "route_stop", "deactivated_stop", "route_return", "login_stop",
+            "login_after_error", "login_return", "mail_timeout", "transport_failure",
+            "transport_login",
+        ):
+            with self.subTest(branch=branch), ExitStack() as stack:
+                client = MagicMock()
+                client.profile_proxy = "http://proxy.example:8080"
+                opened = RoxyOpenResult(
+                    "profile-fixture", {}, preflight_exit_geo={"ip": "198.51.100.7"},
+                )
+                client.open_profile.return_value = opened
+                driver = MagicMock()
+                page_state = [None]
+                reads = []
+                terminal = (
+                    "account_deactivated" if branch == "deactivated_stop"
+                    else "OTP page stage=otp_page code=auth_route_error page_status=400"
+                )
+
+                def advanced_state(actual_driver):
+                    self.assertIs(actual_driver, driver)
+                    if isinstance(page_state[0], Exception):
+                        raise page_state[0]
+                    return page_state[0]
+
+                def read_mail(email, **kwargs):
+                    self.assertEqual(email, "mail@example.test")
+                    reads.append(set(kwargs["exclude_codes"]))
+                    if len(reads) > 1:
+                        return "222222"
+                    if branch.startswith(("route", "deactivated")):
+                        page_state[0] = RuntimeError(terminal)
+                    elif branch.startswith("login") or branch == "transport_login":
+                        page_state[0] = "email_login"
+                    if branch.endswith(("_stop", "_return")):
+                        self.assertTrue(kwargs["should_stop"]())
+                        # A later navigation must not erase an already seen stop.
+                        page_state[0] = None
+                    if branch.endswith("_return"):
+                        return "111111"
+                    if branch.startswith("transport"):
+                        raise roxy_registration.GenericApiTransportError("fixture transport failure")
+                    raise roxy_registration.GenericApiMailError("fixture mail wait ended")
+
+                mocked = {
+                    "RoxyBrowserClient": client,
+                    "_build_driver": driver,
+                    "_center_browser_window": None,
+                    "probe_selenium_driver_exit_geo": {"ip": "198.51.100.7"},
+                    "_start_traffic_optimizer": None,
+                    "_safe_get": None,
+                    "human_delay": None,
+                    "_page_warmup": None,
+                    "_maybe_accept": None,
+                    "_check_manual_stop": None,
+                    "_submit_email_and_wait_next": "otp",
+                    "registration_password_required": False,
+                    "_fill_password_page_if_present": None,
+                    "_snapshot_current_email_otp": "000000",
+                    "_prepare_next_email_otp_attempt": "otp",
+                    "_wait_for_otp_input": "profile",
+                    "_complete_profile_page": True,
+                    "_fetch_or_recover_chatgpt_session": {
+                        "accessToken": "registration-at", "user": {"email": "mail@example.test"},
+                    },
+                    "_finish_traffic_optimizer": {},
+                    "resolve_email_source": "generic_api",
+                    "_release_roxy_registration_email_failure": "fixture_failed",
+                    "save_account_data": 706,
+                }
+                calls = {
+                    name: stack.enter_context(patch.object(roxy_registration, name, return_value=value))
+                    for name, value in mocked.items()
+                }
+                stack.enter_context(patch.object(roxy_registration._cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
+                stack.enter_context(patch.object(roxy_registration._cfg, "ROXY_OTP_RETRY_ON_MAIL_TIMEOUT", False))
+                stack.enter_context(patch.object(roxy_registration._twofa_cfg, "ENABLE_2FA", False))
+                stack.enter_context(patch("config.codex.ENABLE_CODEX_AUTO", False))
+                stack.enter_context(patch.object(roxy_registration, "_ROXY_OTP_MAX_ATTEMPTS", 2))
+                stack.enter_context(patch.object(roxy_registration, "_otp_flow_advanced_state", side_effect=advanced_state))
+                stack.enter_context(patch.object(roxy_registration, "wait_for_otp", side_effect=read_mail))
+                type_otp = stack.enter_context(patch.object(roxy_registration, "_type_otp"))
+                log = stack.enter_context(patch.object(roxy_registration, "logger"))
+
+                result = roxy_registration.run_roxy_registration(
+                    "mail@example.test", "Test User", "1990-01-01",
+                )
+
+                recovered = branch.startswith("login")
+                self.assertEqual(result["success"], recovered, result.get("error"))
+                self.assertEqual(len(reads), 2 if recovered else 1)
+                self.assertEqual(calls["_prepare_next_email_otp_attempt"].call_count, int(recovered))
+                self.assertEqual(calls["save_account_data"].call_count, int(recovered))
+                self.assertEqual(calls["_complete_profile_page"].call_count, int(recovered))
+                self.assertEqual(calls["_fetch_or_recover_chatgpt_session"].call_count, int(recovered))
+                if branch.startswith(("route", "deactivated")):
+                    self.assertIn(terminal, result["error"])
+                    self.assertNotIn("GenericApiMailError", result["error"])
+                elif branch.startswith("transport"):
+                    self.assertIn("GenericApiTransportError", result["error"])
+                elif branch == "mail_timeout":
+                    self.assertIn("GenericApiMailError", result["error"])
+                if branch == "login_return":
+                    self.assertEqual(reads[1], {"000000", "111111"})
+                type_otp.assert_not_called()
+                self.assertNotIn("111111", repr(log.mock_calls))
+                driver.quit.assert_called_once()
+                client.cleanup_profile.assert_called_once_with(opened)
+
     def test_registration_callback_keeps_mail_received_during_navigation(self):
         for branch in (
             "wait_verified", "wait_prepare_verified", "input_verified",

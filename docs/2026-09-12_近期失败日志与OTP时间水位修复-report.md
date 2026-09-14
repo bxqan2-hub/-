@@ -88,7 +88,7 @@
 2. 新增生产函数/类/执行器：无。新增测试：
    - `tests/test_roxy_registration_session_recovery.py::test_registration_callback_keeps_mail_received_during_navigation`。
    - `tests/test_roxy_registration_otp_recovery.py::test_auth_route_error_stops_otp_wait_and_replay_without_exposing_page/test_auth_route_error_detection_does_not_reject_generic_page_hints`。
-   - `tests/test_generic_api_yangyang.py::test_polling_final_request_timeout_preserves_wait_deadline/test_polling_final_raw_timeout_preserves_wait_deadline_and_redaction/test_polling_early_provider_error_keeps_fast_failure/test_polling_permanent_error_at_deadline_keeps_provider_failure`。
+   - `tests/test_generic_api_yangyang.py::test_polling_final_request_timeout_preserves_wait_deadline/test_polling_final_raw_timeout_preserves_wait_deadline_and_redaction/test_polling_provider_error_fast_fails_only_after_short_retry/test_polling_permanent_error_at_deadline_keeps_provider_failure`（短重试用例于 2026-09-14 随现有路线修复更新，历史快速失败结论以当天续查报告为准）。
    - `tests/test_account_security_extension.py::test_security_worker_preserves_failure_fields_without_logging_credentials`（六组参数）。
    - 测试补足原有覆盖缺口，不替换仍有效的历史用例；旧的过晚水位、无 deadline 的快速失败判定、原始异常输出已在原位替换/删除。新报告记录本轮证据，不复制工程或作为备份。
 3. 搬迁项：无文件搬迁；`TwoFASetupError` 导入前移到同一函数开头，原内层导入已删除。

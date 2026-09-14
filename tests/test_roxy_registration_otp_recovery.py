@@ -900,6 +900,37 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
         self.assertIn("button[type=\"submit\"],input[type=\"submit\"]", password_target_script)
         self.assertEqual(checkpoints, [])
 
+    def test_password_checkpoint_stops_terminal_email_verification_page(self):
+        for submit_result in ({"ok": True}, {"ok": False, "reason": "missing_password_input"}):
+            for page_text, expected in (
+                ("Route Error (400)", "code=auth_route_error page_status=400"),
+                ("error_code: account_deactivated", "account_deactivated"),
+            ):
+                with self.subTest(submit_result=submit_result, page_text=page_text):
+                    driver = MagicMock()
+                    driver.current_url = "https://auth.openai.com/create-account/password"
+                    checkpoint = MagicMock()
+
+                    def submit(*args, **kwargs):
+                        driver.current_url = "https://auth.openai.com/email-verification"
+                        return submit_result
+
+                    with patch.object(roxy_registration, "_submit_signup_password_direct", side_effect=submit), \
+                         patch.object(roxy_registration, "_has_access_token", return_value=False), \
+                         patch.object(roxy_registration, "_is_signup_password_page", return_value=True), \
+                         patch.object(roxy_registration, "_is_login_password_page", return_value=False), \
+                         patch.object(roxy_registration, "_password_page_state", return_value={"errors": []}), \
+                         patch.object(roxy_registration, "_email_otp_page_state", return_value={
+                             "text": page_text, "inputs": [], "errors": [],
+                         }), \
+                         patch.object(roxy_registration, "human_delay"):
+                        with self.assertRaisesRegex(RuntimeError, expected):
+                            roxy_registration._fill_password_page_if_present(
+                                driver, "mail@example.test", timeout=1, allow_passwordless=False,
+                                password="fixture-password", on_confirmed=checkpoint,
+                            )
+                        checkpoint.assert_not_called()
+
     def test_password_form_noop_is_relocated_and_submitted_once_more(self):
         driver = MagicMock()
         checkpoints = []
@@ -1087,6 +1118,23 @@ class RoxyRegistrationOtpRecoveryTests(unittest.TestCase):
              patch("core.roxy_registration._email_otp_page_state", return_value=verified):
             state = roxy_registration._otp_flow_advanced_state(driver)
         self.assertEqual(state, "email_verified")
+
+    def test_advanced_state_stops_terminal_page_before_stale_success_signals(self):
+        for page_text, expected in (
+            ("Route Error (400)", "code=auth_route_error page_status=400"),
+            ("Route Error (500)", "code=auth_route_error page_status=500"),
+            ("error_code: account_deactivated", "account_deactivated"),
+        ):
+            with self.subTest(page_text=page_text), \
+                 patch.object(roxy_registration, "_email_otp_page_state", return_value={
+                     "text": page_text + " Email verified", "inputs": [], "errors": [],
+                 }), \
+                 patch.object(roxy_registration, "_is_email_verification_page", return_value=True) as verification, \
+                 patch.object(roxy_registration, "_has_access_token", return_value=True) as token:
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    roxy_registration._otp_flow_advanced_state(MagicMock())
+                verification.assert_not_called()
+                token.assert_not_called()
 
     def test_otp_submit_detects_redirect_back_to_email_login(self):
         driver = MagicMock()

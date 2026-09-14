@@ -2220,8 +2220,14 @@ def _is_profile_like(snapshot: dict) -> bool:
 
 def _otp_flow_advanced_state(driver) -> str | None:
     """判断 OTP 流程是否前进，或是否被退回邮箱登录页。"""
+    state = _email_otp_page_state(driver)
+    terminal_error = _email_otp_terminal_error(state)
+    if terminal_error:
+        raise RuntimeError(
+            f"OpenAI 返回 {terminal_error}：该邮箱对应的账号已删除或停用，禁止继续注册"
+        )
     if _is_email_verification_page(driver):
-        if _email_otp_verified_success(_email_otp_page_state(driver)):
+        if _email_otp_verified_success(state):
             return "email_verified"
         return None
     snapshot = _page_snapshot(driver)
@@ -2746,6 +2752,11 @@ def _fill_password_page_if_present(
     allow_passwordless=False，强制在密码页填写并提交密码。
     """
     def confirmed(value: str) -> str:
+        terminal_error = _email_otp_terminal_error(_email_otp_page_state(driver))
+        if terminal_error:
+            raise RuntimeError(
+                f"OpenAI 返回 {terminal_error}：该邮箱对应的账号已删除或停用，禁止继续注册"
+            )
         if on_confirmed is not None:
             try:
                 persisted = on_confirmed(email, value)
@@ -3457,8 +3468,9 @@ def _fetch_or_recover_chatgpt_session(
     # OTP 成功后，auth.openai.com 偶尔会短暂停留在“Email verified / already
     # been verified”确认页，而不是立刻跳回 ChatGPT。这个页面代表邮箱验证
     # 已完成，不应当被当成错误页继续等待 OTP 或直接判定跳转失败。
+    advanced_state = _otp_flow_advanced_state(driver)
     try:
-        if _otp_flow_advanced_state(driver) == "email_verified":
+        if advanced_state == "email_verified":
             logger.info(
                 "%s 检测到 Email verified 确认页，主动恢复 ChatGPT OAuth callback",
                 _log_prefix(driver),
@@ -3785,6 +3797,20 @@ def run_roxy_registration(
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Roxy注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
+                otp_wait_state: str | None = None
+                otp_wait_page_error: RuntimeError | None = None
+
+                def stop_otp_wait_for_page_change() -> bool:
+                    nonlocal otp_wait_state, otp_wait_page_error
+                    try:
+                        otp_wait_state = _otp_flow_advanced_state(driver)
+                    except RuntimeError as page_error:
+                        # Providers may swallow callback exceptions. Return a
+                        # stop signal, then restore the page failure below.
+                        otp_wait_page_error = page_error
+                        return True
+                    return otp_wait_state is not None
+
                 try:
                     current_otp = wait_for_otp(
                         email,
@@ -3793,10 +3819,16 @@ def run_roxy_registration(
                         poll_interval=_ROXY_OTP_POLL_INTERVAL,
                         settle_seconds=_ROXY_OTP_SETTLE_SECONDS,
                         exclude_codes=rejected_otps,
-                        should_stop=lambda: _otp_flow_advanced_state(driver) is not None,
+                        should_stop=stop_otp_wait_for_page_change,
                     )
+                    if otp_wait_page_error is not None:
+                        raise otp_wait_page_error
+                    if otp_wait_state is not None:
+                        raise RuntimeError("OTP wait interrupted by browser page transition")
                 except Exception as exc:
-                    advanced_state = _otp_flow_advanced_state(driver)
+                    if otp_wait_page_error is not None:
+                        raise otp_wait_page_error from None
+                    advanced_state = _otp_flow_advanced_state(driver) or otp_wait_state
                     if advanced_state in ("profile", "logged_in", "email_verified"):
                         logger.info("[Roxy注册][OTP] 取码期间页面已进入下一步：%s，停止继续取旧验证码", advanced_state)
                         if advanced_state == "email_verified":
@@ -3820,6 +3852,7 @@ def run_roxy_registration(
                         raise
                     if (
                         isinstance(exc, GenericApiMailError)
+                        and advanced_state != "email_login"
                         and not bool(getattr(_cfg, "ROXY_OTP_RETRY_ON_MAIL_TIMEOUT", False))
                     ):
                         logger.warning(

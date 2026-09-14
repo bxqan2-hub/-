@@ -2475,8 +2475,9 @@ def test_password_reauth_real_mail_provider_uses_isolated_retry_budget(
                 assert "stage=mail_list; type=ReadTimeout" in diagnostic
                 assert len(requests) == 3 and details == []
                 assert driver.submitted_codes == [] and driver.password_values == []
-                assert driver.clock.now == 30
-            assert all(start + budget <= 30 for _, budget, start in requests)
+                # Unix 时间减去相对时钟会产生亚微秒浮点舍入；不容忍实际预算扩张。
+                assert driver.clock.now == pytest.approx(30, abs=1e-6, rel=0)
+            assert all(start + budget <= 30 + 1e-6 for _, budget, start in requests)
     resend.assert_not_called()
     enroll.assert_not_called()
     password_checkpoint.assert_not_called()

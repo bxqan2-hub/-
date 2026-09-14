@@ -242,7 +242,8 @@ class GenericApiYangyangTests(unittest.TestCase):
              patch.object(generic_client, "_fetch_yangyang_otp", side_effect=GenericApiMailError("stage=mail_detail http_status=503 type=http_error", retryable=True)) as fetch:
             with self.assertRaisesRegex(GenericApiTransportError, "stage=mail_detail http_status=503") as caught:
                 fetch_latest_otp(account.email, max_wait=20, poll_interval=1, max_consecutive_errors=2)
-        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_count, 4)
+        self.assertIn("attempts=2", str(caught.exception))
         self.assertNotIn("尚未出现", str(caught.exception))
 
     def test_polling_preserves_nonretryable_provider_error(self):
@@ -305,15 +306,179 @@ class GenericApiYangyangTests(unittest.TestCase):
         self.assertNotIn("654321", str(caught.exception))
         self.assertEqual(session.get.call_count, 2)
 
-    def test_polling_early_provider_error_keeps_fast_failure(self):
+    def test_polling_provider_error_fast_fails_only_after_short_retry(self):
         account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN/a@example.test")
         with patch.object(generic_client, "get_account_context", return_value=account), \
              patch.object(generic_client.requests, "Session"), \
+             patch.object(generic_client.time, "sleep"), \
              patch.object(generic_client.time, "time", return_value=0.0), \
              patch.object(generic_client, "_fetch_yangyang_otp", side_effect=GenericApiMailError("stage=mail_list type=ReadTimeout", retryable=True)) as fetch:
             with self.assertRaises(GenericApiTransportError):
                 fetch_latest_otp(account.email, max_wait=5, max_consecutive_errors=1)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_polling_retries_transient_list_and_detail_without_losing_mail(self):
+        for stage in ("mail_list", "mail_detail"):
+            for failure in (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError, 408, 425, 429, 500, 503):
+                with self.subTest(stage=stage, failure=str(failure)):
+                    account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN_WITH_SECRET/a@example.test")
+                    clock = [0.0]
+                    session = MagicMock()
+                    mailbox = FakeResponse(data={"items": [
+                        {"id": 99, "received_at": "2026-09-11T10:01:00Z"},
+                        {"id": 1, "received_at": "2026-09-11T09:59:00Z"},
+                        {"id": 2, "received_at": "2026-09-11T10:00:00Z"},
+                    ], "has_more": False})
+                    detail = FakeResponse(data={"subject": "Your ChatGPT code", "body": "Your code is 654321"})
+                    transient = FakeResponse(status_code=failure) if isinstance(failure, int) else failure("TOKEN_WITH_SECRET 654321")
+                    session.get.side_effect = ([mailbox] if stage == "mail_detail" else []) + [transient, mailbox, detail]
+                    with patch.object(generic_client, "get_account_context", return_value=account), \
+                         patch.object(generic_client.requests, "Session", return_value=session), \
+                         patch.object(generic_client.time, "time", side_effect=lambda: clock[0]), \
+                         patch.object(generic_client.time, "monotonic", side_effect=lambda: clock[0]), \
+                         patch.object(generic_client.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                         self.assertLogs(generic_client.logger, level="WARNING") as logs:
+                        code = fetch_latest_otp(
+                            account.email, max_wait=25, request_timeout=5, retry_timeout=5,
+                            max_consecutive_errors=1, settle_seconds=0,
+                            after_ts=datetime(2026, 9, 11, 10, 0, tzinfo=timezone.utc).timestamp(),
+                            exclude_message_ids={"99"}, exclude_codes={"654321"},
+                        )
+                    self.assertEqual(code, "654321")
+                    self.assertEqual([call.kwargs["timeout"] for call in session.get.call_args_list],
+                                     [5.0] * (4 if stage == "mail_detail" else 3))
+                    self.assertFalse(any("/message/99/" in call.args[0] or "/message/1/" in call.args[0]
+                                         for call in session.get.call_args_list))
+                    self.assertEqual(clock[0], 0.8)
+                    for secret in ("TOKEN_WITH_SECRET", "654321"):
+                        self.assertNotIn(secret, "\n".join(logs.output))
+
+    def test_polling_terminal_response_after_transient_error_stops_retrying(self):
+        for stage in ("mail_list", "mail_detail"):
+            for status in (400, 401, 403):
+                with self.subTest(stage=stage, status=status):
+                    account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN_WITH_SECRET/a@example.test")
+                    session = MagicMock()
+                    session.get.side_effect = [requests.exceptions.ReadTimeout("TOKEN_WITH_SECRET 654321")] + (
+                        [FakeResponse(data={"items": [{"id": 2}]})] if stage == "mail_detail" else []
+                    ) + [FakeResponse(status_code=status, text="TOKEN_WITH_SECRET 654321")]
+                    with patch.object(generic_client, "get_account_context", return_value=account), \
+                         patch.object(generic_client.requests, "Session", return_value=session), \
+                         patch.object(generic_client.time, "sleep") as sleep:
+                        with self.assertRaises(GenericApiMailError) as caught:
+                            fetch_latest_otp(account.email, max_wait=25, request_timeout=5,
+                                             retry_timeout=5, max_consecutive_errors=1)
+                    self.assertNotIsInstance(caught.exception, GenericApiTransportError)
+                    self.assertEqual(str(caught.exception), f"stage={stage} http_status={status} type=http_error")
+                    self.assertEqual(session.get.call_count, 3 if stage == "mail_detail" else 2)
+                    sleep.assert_called_once()
+
+    def test_polling_retry_budget_is_recomputed_after_pause(self):
+        account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN/a@example.test")
+        clock = [0.0]
+        budgets = []
+
+        def fetch(*_args, **kwargs):
+            budgets.append(kwargs["request_timeout"])
+            clock[0] += kwargs["request_timeout"]
+            raise GenericApiMailError("stage=mail_detail type=ReadTimeout", retryable=True)
+
+        with patch.object(generic_client, "get_account_context", return_value=account), \
+             patch.object(generic_client.requests, "Session"), \
+             patch.object(generic_client.time, "time", side_effect=lambda: clock[0]), \
+             patch.object(generic_client.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+             patch.object(generic_client, "_fetch_yangyang_otp", side_effect=fetch):
+            with self.assertRaises(GenericApiMailError) as caught:
+                fetch_latest_otp(account.email, max_wait=10, request_timeout=8, retry_timeout=5,
+                                 max_consecutive_errors=1, settle_seconds=0)
+        self.assertNotIsInstance(caught.exception, GenericApiTransportError)
+        self.assertEqual(len(budgets), 2)
+        self.assertEqual(budgets[0], 8.0)
+        self.assertAlmostEqual(budgets[1], 1.8)
+        self.assertEqual(clock[0], 10.0)
+        self.assertIn("stage=mail_detail type=ReadTimeout", str(caught.exception))
+
+    def test_polling_retry_empty_mailbox_resets_error_streak(self):
+        account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN/a@example.test")
+        clock = [0.0]
+        error = GenericApiMailError("stage=mail_list type=ReadTimeout", retryable=True)
+        responses = [error, None, error, ("654321", {})]
+        with patch.object(generic_client, "get_account_context", return_value=account), \
+             patch.object(generic_client.requests, "Session"), \
+             patch.object(generic_client.time, "time", side_effect=lambda: clock[0]), \
+             patch.object(generic_client.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+             patch.object(generic_client, "_fetch_yangyang_otp", side_effect=responses) as fetch:
+            self.assertEqual(fetch_latest_otp(account.email, max_wait=25, poll_interval=1,
+                                             max_consecutive_errors=1, settle_seconds=0), "654321")
+        self.assertEqual(fetch.call_count, 4)
+        self.assertAlmostEqual(clock[0], 2.6)
+
+    def test_polling_empty_mailboxes_do_not_trigger_short_retries(self):
+        account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN/a@example.test")
+        clock = [0.0]
+        with patch.object(generic_client, "get_account_context", return_value=account), \
+             patch.object(generic_client.requests, "Session"), \
+             patch.object(generic_client.time, "time", side_effect=lambda: clock[0]), \
+             patch.object(generic_client.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+             patch.object(generic_client, "_fetch_yangyang_otp", return_value=None) as fetch:
+            with self.assertRaises(GenericApiMailError) as caught:
+                fetch_latest_otp(account.email, max_wait=3, poll_interval=1, max_consecutive_errors=1)
+        self.assertNotIsInstance(caught.exception, GenericApiTransportError)
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(clock[0], 3.0)
+
+    def test_polling_stops_before_retry_when_browser_has_advanced(self):
+        account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN/a@example.test")
+        with patch.object(generic_client, "get_account_context", return_value=account), \
+             patch.object(generic_client.requests, "Session"), \
+             patch.object(generic_client.time, "sleep") as sleep, \
+             patch.object(generic_client, "_fetch_yangyang_otp", side_effect=GenericApiMailError("stage=mail_list type=ReadTimeout", retryable=True)) as fetch:
+            with self.assertRaisesRegex(GenericApiMailError, "验证码页面已进入下一步"):
+                fetch_latest_otp(account.email, max_wait=25, should_stop=MagicMock(side_effect=[False, True]))
         self.assertEqual(fetch.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_polling_stops_if_browser_advances_during_retry_pause(self):
+        account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN/a@example.test")
+        stopped = [False]
+        with patch.object(generic_client, "get_account_context", return_value=account), \
+             patch.object(generic_client.requests, "Session"), \
+             patch.object(generic_client.time, "sleep", side_effect=lambda _seconds: stopped.__setitem__(0, True)), \
+             patch.object(generic_client, "_fetch_yangyang_otp", side_effect=GenericApiMailError("stage=mail_list type=ReadTimeout", retryable=True)) as fetch:
+            with self.assertRaisesRegex(GenericApiMailError, "验证码页面已进入下一步"):
+                fetch_latest_otp(account.email, max_wait=25, should_stop=lambda: stopped[0])
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_polling_retry_pause_or_stop_check_exhaustion_preserves_last_stage(self):
+        for exhausted_during in ("pause", "stop_check"):
+            with self.subTest(exhausted_during=exhausted_during):
+                account = GenericApiEmailAccount("a@example.test", "https://example.test/messages/TOKEN/a@example.test")
+                clock = [0.0]
+
+                def fetch(*_args, **kwargs):
+                    if kwargs["request_timeout"] <= 0:
+                        raise GenericApiMailError("stage=mail_list type=deadline_exhausted", retryable=True)
+                    clock[0] = 8.0
+                    raise GenericApiMailError("stage=mail_detail type=ReadTimeout", retryable=True)
+
+                def stop_check():
+                    if exhausted_during == "stop_check" and clock[0] >= 8.0:
+                        clock[0] = 10.25
+                    return False
+
+                with patch.object(generic_client, "get_account_context", return_value=account), \
+                     patch.object(generic_client.requests, "Session"), \
+                     patch.object(generic_client.time, "time", side_effect=lambda: clock[0]), \
+                     patch.object(generic_client.time, "sleep", side_effect=lambda _seconds: clock.__setitem__(0, 10.25)) as sleep, \
+                     patch.object(generic_client, "_fetch_yangyang_otp", side_effect=fetch) as fetch_mock:
+                    with self.assertRaises(GenericApiMailError) as caught:
+                        fetch_latest_otp(account.email, max_wait=10, request_timeout=8,
+                                         retry_timeout=5, max_consecutive_errors=1, should_stop=stop_check)
+                self.assertNotIsInstance(caught.exception, GenericApiTransportError)
+                self.assertIn("stage=mail_detail type=ReadTimeout", str(caught.exception))
+                self.assertNotIn("deadline_exhausted", str(caught.exception))
+                self.assertEqual(fetch_mock.call_count, 1)
+                self.assertEqual(sleep.call_count, 1 if exhausted_during == "pause" else 0)
 
     def test_polling_permanent_error_at_deadline_keeps_provider_failure(self):
         for status in (401, 403):
