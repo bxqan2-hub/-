@@ -1,6 +1,14 @@
 # 上游项目索引：GPT-utral-platform
 
-## 2026-09-14 切换 1024proxy 前的生命周期与代理归属收尾（当前）
+## 2026-09-14 1024proxy 与 Cliproxy 各十账号复测完成（当前，供应商账单待核）
+
+- 业务仍是 `5ced4b4`，上游锁定不变；本轮仅观测，不扩大用户已接受的小幅流量起伏修复。1024proxy 718–727 与 Cliproxy 728–737 各十个新邮箱注册/密码/2FA 成功，两轮全部 Profile 均实际携带七项效率参数，NetLog 中组件下载/更新检查为零。
+- 主端点独立观测：1024proxy `us.1024proxy.io:3000` **29.250433 MB**（基准 10.09 GB）；Cliproxy `us.arxlabs.io:3010` **26.661866 MB**（新基准 4.74 GB）。各自 SG 辅助端点分别 0.104270 MB 与 0.118342 MB，分开列账；Cliproxy 本轮 1024 端点量为零。
+- Cliproxy 本轮逐账号全部已归属 2.556–2.852 MB，未归属宿主/Python流量约 0.101 MB 单列，不平摊；Controller 同层相加严格守恒。浏览器 NetLog 只用作身份关联与组件归因，不重复叠加。
+- 固定窗口包含辅助结束后至少 60 秒，采样已停止，不再启动新任务，等待两家供应商余额截图。当前低于 40 MB 是连接观测结果，未冒充已完成账单对账。
+- 缓存/代理聚焦回归 96 passed、259 subtests passed；详细表格、采样遗漏边界、证据与尚未实施的小幅阶段竞争见 `docs/2026-09-14_Roxy十账号流量根因复测-report.md`。账号邮箱报告与原始证据在忽略目录。
+
+## 2026-09-14 切换 1024proxy 前的生命周期与代理归属收尾（历史）
 
 - 再次读取锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d` 的 `core/roxybrowser_client.py` 与 `core/roxy_registration.py` raw 源码；上游 open 仍以 `setdefault` 接受旧 dirId，保存账号仍记录入口 proxy。两项均按本地独立 Profile/实际代理要求修正，不覆盖上游整文件。
 - 本地 `open_profile` 最终 dirId 绑定选定 Profile，避免旧 open-extra 把新环境的参数和代理绕开；保持维护显式指定 Profile。`run_roxy_registration` 的既有 `proxy_used` 改为实际 `client.profile_proxy` 优先并复用 `mask_proxy_url` 脱敏，真实网络代理不变。
