@@ -65,6 +65,7 @@ STATIC_RESOURCE_MIME_TYPES = {
     "stylesheet": {"text/css"},
 }
 SAFE_VARY_HEADERS = {"accept-encoding"}
+CACHE_ALLOWED_ORIGINS = {"*", "https://chatgpt.com", "https://www.chatgpt.com", "https://auth.openai.com"}
 # A cold cache can make every concurrent Profile request the same large public
 # bundle.  Single-flight only the validated public asset load; registration
 # workers and Profile/browser concurrency remain unchanged.  A short timeout
@@ -233,7 +234,8 @@ def is_cacheable_response(headers, *, resource_type: str = "") -> bool:
     allowed_mimes = STATIC_RESOURCE_MIME_TYPES.get(resource, set().union(*STATIC_RESOURCE_MIME_TYPES.values()))
     if mime not in allowed_mimes:
         return False
-    if (values.get("access-control-allow-origin", "*").strip() != "*"
+    origin = values.get("access-control-allow-origin", "").strip().lower()
+    if ((origin and origin not in CACHE_ALLOWED_ORIGINS)
             or values.get("access-control-allow-credentials", "false").strip().lower() != "false"):
         return False
     vary = {part.strip().lower() for part in values.get("vary", "").split(",") if part.strip()}
