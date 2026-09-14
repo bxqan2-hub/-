@@ -5513,21 +5513,31 @@ function _trafficBytes(value) {
 function _registrationTrafficLine(r) {
   const t = r.registration_traffic;
   if (!t) return '';
+  const bidirectional = Number(t.metrics_version) >= 4
+    && ['uploaded', 'websocket_sent', 'websocket_received'].every(key => t[key] !== undefined && t[key] !== null);
   const network = _trafficBytes(t.network_bytes);
+  const observed = _trafficBytes(Number(t.network_bytes || 0) + (bidirectional
+    ? Number(t.uploaded) + Number(t.websocket_sent) + Number(t.websocket_received) : 0));
+  const scope = bidirectional ? '浏览器双向观测' : '浏览器观测（仅下行）';
   const logical = _trafficBytes(t.logical_bytes);
-  const saved = _trafficBytes(t.cache_saved_bytes);
+  const replayed = _trafficBytes(t.cache_saved_bytes);
   const title = [
-    `实际新增网络下载: ${network}`,
-    `逻辑资源总量（含缓存回放）: ${logical}`,
-    `缓存回放节省: ${saved}`,
+    `${scope}: ${observed}；CDP 估算，非供应商账单，不含其他进程及传输封装/重传`,
+    `浏览器 HTTP 下行观测: ${network}`,
+    ...(bidirectional ? [
+      `请求上行观测: ${_trafficBytes(t.uploaded)}`,
+      `WebSocket 上行/下行观测: ${_trafficBytes(t.websocket_sent)} / ${_trafficBytes(t.websocket_received)}`,
+    ] : ['旧记录或分项缺失：仅有下行，双向消耗未知']),
+    `逻辑资源参考（含本地回放，非消耗）: ${logical}`,
+    `本地回放体量（解压后，不代表计费节省）: ${replayed}`,
     `缓存候选: ${Number(t.cache_candidates || 0)}`,
     `缓存命中: ${Number(t.cache_hits || 0)}`,
     `缓存未命中: ${Number(t.cache_misses || 0)}`,
     `缓存写入: ${Number(t.cache_writes || 0)}`,
     `拦截请求: ${Number(t.blocked || 0)}`,
-    t.within_budget ? '浏览器预算内' : '浏览器预算超限（只作诊断）',
+    bidirectional ? (t.within_budget ? '双向观测预算内（仅诊断）' : '双向观测预算超限（仅诊断）') : '双向预算未知',
   ].join('；');
-  return `<div class="acc-v2-sub" title="${esc(title)}">流量: ${esc(network)} · 逻辑: ${esc(logical)} · 缓存省: ${esc(saved)}</div>`
+  return `<div class="acc-v2-sub" title="${esc(title)}">${scope}: ${esc(observed)}（非账单） · 本地回放体量: ${esc(replayed)}</div>`
     + `<div class="acc-v2-sub" title="${esc(title)}">命中: ${esc(t.cache_hits)} · 未命中: ${esc(t.cache_misses)} · 拦截: ${esc(t.blocked)}</div>`;
 }
 function _accountCreatedCell(r) {

@@ -557,7 +557,7 @@ def _compact_registration_traffic(row: dict) -> dict | None:
     def amount(key: str) -> int:
         try:
             return max(0, int(traffic.get(key) or 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     downloaded = amount("downloaded")
@@ -565,7 +565,7 @@ def _compact_registration_traffic(row: dict) -> dict | None:
     logical = amount("logical_downloaded") or downloaded + saved
     # v1 stored Fetch replay bytes in downloaded; v2 excludes them at collection time.
     network_bytes = downloaded if traffic.get("downloaded_excludes_cache_replay") else max(0, downloaded - saved)
-    return {
+    compact = {
         "network_bytes": network_bytes,
         "logical_bytes": logical,
         "cache_saved_bytes": saved,
@@ -577,6 +577,18 @@ def _compact_registration_traffic(row: dict) -> dict | None:
         "within_budget": bool(traffic.get("within_budget")),
         "metrics_version": amount("metrics_version") or 1,
     }
+    # v4 corrects redirect/block/cache accounting and uses a bidirectional
+    # budget. Missing historical components are unknown, not zero-byte uploads.
+    if compact["metrics_version"] >= 4:
+        try:
+            payloads = {key: max(0, int(traffic[key])) for key in (
+                "uploaded", "websocket_sent", "websocket_received",
+            )}
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass
+        else:
+            compact.update(payloads)
+    return compact
 
 
 def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:

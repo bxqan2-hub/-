@@ -72,8 +72,100 @@ class WebUiHelperRegressionTests(unittest.TestCase):
         self.assertEqual(current["registration_traffic"]["cache_candidates"], 5)
         self.assertEqual(current["registration_traffic"]["cache_misses"], 3)
         self.assertEqual(current["registration_traffic"]["cache_writes"], 1)
+        self.assertNotIn("uploaded", legacy["registration_traffic"])
+        self.assertNotIn("uploaded", current["registration_traffic"])
         self.assertNotIn("extra_json", current)
         self.assertFalse(current["password_configured"])
+
+    def test_account_list_v4_exposes_only_numeric_bidirectional_components(self):
+        compact = _compact_account_for_list({
+            "id": 3,
+            "email": "meter@test.com",
+            "extra_json": {"registration_traffic": {
+                "metrics_version": 4, "downloaded": 1024,
+                "downloaded_excludes_cache_replay": True,
+                "uploaded": "2048", "websocket_sent": 4096, "websocket_received": 8192,
+                "observed_transport_bytes": 99999999,
+                "cache_saved_bytes": 65536, "within_budget": True,
+                "access_token": "fixture-private-token", "headers": {"authorization": "fixture-private-header"},
+            }},
+        })
+        traffic = compact["registration_traffic"]
+        self.assertEqual(traffic["network_bytes"], 1024)
+        self.assertEqual(traffic["uploaded"], 2048)
+        self.assertEqual(traffic["websocket_sent"], 4096)
+        self.assertEqual(traffic["websocket_received"], 8192)
+        self.assertEqual(traffic["cache_saved_bytes"], 65536)
+        self.assertNotIn("observed_transport_bytes", traffic)
+        self.assertNotIn("fixture-private", json.dumps(compact))
+
+    def test_partial_or_invalid_upload_components_stay_unknown_not_zero(self):
+        for override in ({}, {"uploaded": None}, {"uploaded": "invalid"}, {"uploaded": float("inf")}, {"uploaded": {}}):
+            with self.subTest(override=override):
+                compact = _compact_account_for_list({
+                    "id": 3,
+                    "extra_json": {"registration_traffic": {
+                        "metrics_version": 4, "downloaded": 100,
+                        "downloaded_excludes_cache_replay": True,
+                        "websocket_sent": 0, "websocket_received": 0,
+                        **override,
+                    }},
+                })
+                self.assertEqual(compact["registration_traffic"]["network_bytes"], 100)
+                for key in ("uploaded", "websocket_sent", "websocket_received"):
+                    self.assertNotIn(key, compact["registration_traffic"])
+
+    def test_registration_traffic_renderer_labels_scope_and_replay_without_billing_claims(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required to execute the existing traffic renderer")
+        html = self.client.get("/").get_data(as_text=True)
+        base = {
+            "downloaded": 1024, "downloaded_excludes_cache_replay": True,
+            "cache_saved_bytes": 65536, "within_budget": True,
+        }
+        rows = [_compact_account_for_list({
+            "id": index,
+            "extra_json": {"registration_traffic": traffic},
+        }) for index, traffic in enumerate([
+            {**base, "metrics_version": 4, "uploaded": 2048, "websocket_sent": 4096, "websocket_received": 8192},
+            {**base, "metrics_version": 2},
+            {**base, "metrics_version": 4, "uploaded": 2048, "websocket_sent": 4096},
+        ])]
+        script = r"""
+const assert = require('node:assert/strict');
+const {html, rows} = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+function source(name) {
+  const lines = html.split('\n');
+  const start = lines.findIndex(line => line.startsWith('function ' + name + '('));
+  assert(start >= 0, name);
+  if (lines[start].trimEnd().endsWith('}')) return lines[start];
+  const end = lines.findIndex((line, i) => i > start && line.trimEnd() === '}');
+  return lines.slice(start, end + 1).join('\n');
+}
+const render = new Function(['fmt', 'esc', '_trafficBytes', '_registrationTrafficLine'].map(source).join('\n')
+  + '\nreturn _registrationTrafficLine;')();
+console.log(JSON.stringify(rows.map(render)));
+"""
+        result = subprocess.run([node, "-e", script], input=json.dumps({"html": html, "rows": rows}),
+                                text=True, capture_output=True, timeout=15, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        current, legacy, partial = json.loads(result.stdout)
+        self.assertIn("浏览器双向观测: 15.0 KiB", current)
+        self.assertIn("请求上行观测: 2.0 KiB", current)
+        self.assertIn("WebSocket 上行/下行观测: 4.0 KiB / 8.0 KiB", current)
+        self.assertIn("双向观测预算内（仅诊断）", current)
+        for rendered in (legacy, partial):
+            self.assertIn("浏览器观测（仅下行）: 1.0 KiB", rendered)
+            self.assertIn("双向预算未知", rendered)
+            self.assertNotIn("双向观测预算内", rendered)
+        for rendered in (current, legacy, partial):
+            self.assertIn("非供应商账单", rendered)
+            self.assertIn("本地回放体量: 64.0 KiB", rendered)
+            self.assertIn("不代表计费节省", rendered)
+            self.assertNotIn("缓存省:", rendered)
+            self.assertNotIn("缓存回放节省:", rendered)
+            self.assertNotIn("实际新增网络下载:", rendered)
 
     @patch("webui.app.db.list_accounts")
     def test_account_qualification_filter_separates_gcash_and_gopay(self, list_accounts):
