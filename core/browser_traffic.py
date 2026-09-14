@@ -512,6 +512,40 @@ class RoxyTrafficOptimizer:
         self._loading_requests: dict[str, str] = {}
         self._install_errors: list[str] = []
         self._degraded_reason = ""
+        self._performance_entries: list[dict | str] = []
+        self._performance_drain_stop = threading.Event()
+        self._performance_drain_thread: threading.Thread | None = None
+
+    def _drain_performance_log(self) -> None:
+        if not self.capture:
+            return
+        try:
+            entries = list(self.driver.get_log("performance") or [])
+        except Exception as exc:
+            with self._lock:
+                self._install_errors.append(f"performance_drain: {type(exc).__name__}: {exc}")
+            return
+        if entries:
+            with self._lock:
+                self._performance_entries.extend(entries)
+
+    def _performance_log_pump(self) -> None:
+        # Selenium's performance log is a finite ring buffer.  Drain it while
+        # the Profile is running instead of waiting until finalize(), otherwise
+        # concurrent registration drops most loadingFinished events.
+        while not self._performance_drain_stop.wait(0.5):
+            self._drain_performance_log()
+
+    def _start_performance_log_pump(self) -> None:
+        if not self.capture or self._performance_drain_thread is not None:
+            return
+        self._performance_drain_stop.clear()
+        self._performance_drain_thread = threading.Thread(
+            target=self._performance_log_pump,
+            name="roxy-performance-drain",
+            daemon=True,
+        )
+        self._performance_drain_thread.start()
 
     def _enable_network_domain(self) -> None:
         """Enable CDP Network without truncating the traffic event stream.
@@ -531,10 +565,8 @@ class RoxyTrafficOptimizer:
             self.driver.execute_cdp_cmd("Network.setCacheDisabled", {"cacheDisabled": False})
             self.driver.execute_cdp_cmd("Network.setBypassServiceWorker", {"bypass": False})
             if self.capture:
-                try:
-                    self.driver.get_log("performance")
-                except Exception as exc:
-                    self._install_errors.append(f"performance_log: {type(exc).__name__}: {exc}")
+                self._drain_performance_log()
+                self._start_performance_log_pump()
             # Remove legacy broad URL globs. Precise media filtering uses the
             # existing Fetch request handler, which parses path/type/query.
             self.driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": []})
@@ -786,6 +818,12 @@ class RoxyTrafficOptimizer:
             self.cache.release_load(url)
 
     def finalize(self) -> dict:
+        self._performance_drain_stop.set()
+        drain_thread = self._performance_drain_thread
+        if drain_thread is not None:
+            drain_thread.join(timeout=2.0)
+            self._performance_drain_thread = None
+        self._drain_performance_log()
         with self._lock:
             was_fetch_enabled = self._fetch_enabled
             self._fetch_enabled = False
@@ -800,10 +838,8 @@ class RoxyTrafficOptimizer:
             self._fetch_enabled = False
         entries: list[dict | str] = []
         if self.capture:
-            try:
-                entries = list(self.driver.get_log("performance") or [])
-            except Exception as exc:
-                self._install_errors.append(f"performance_drain: {type(exc).__name__}: {exc}")
+            with self._lock:
+                entries = list(self._performance_entries)
         with self._lock:
             stats = dict(self._stats)
             cached_urls = list(self._cached_urls)
