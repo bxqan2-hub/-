@@ -317,6 +317,23 @@ class RoxyProxyEnforcementTests(unittest.TestCase):
         self.assertIs(body["randomFingerprint"], True)
         self.assertEqual(client._last_profile_create_summary["fingerprint_requested"], True)
 
+    def test_profile_create_disables_workbench_and_bypasses_loopback(self):
+        client = RoxyBrowserClient(profile_proxy="http://127.0.0.1:10808")
+        with ExitStack() as stack:
+            for config_patch in self._config_patches():
+                stack.enter_context(config_patch)
+            request = stack.enter_context(
+                patch.object(client, "request", return_value={"data": {"dirId": "793"}})
+            )
+            self.assertEqual(client.create_profile(), "793")
+
+        body = request.call_args.kwargs["json_body"]
+        self.assertEqual(body["openWorkbench"], 0)
+        self.assertEqual(
+            body["startupParam"],
+            "--proxy-bypass-list=<-loopback>,localhost,127.0.0.1",
+        )
+
     def test_create_retries_only_explicit_roxy_busy_response(self):
         client = RoxyBrowserClient(api_base="http://127.0.0.1:50100")
         busy = MagicMock(status_code=200, text='{"code":1,"msg":"正在创建中，请稍等！"}')
