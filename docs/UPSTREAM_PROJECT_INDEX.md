@@ -1,5 +1,12 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-14 指定账号安全设置重复开窗：普通 ChatGPT 登录终态
+
+- 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；本次重新读取上游 roxy_codex_oauth（SHA-256 `8a6b2ab48bac00b3fbcbff84edfd9ad5a27661d047b99607806420d6de16015d`）和 account_export（`985b99e669711d3de50dd6072ba83f660ac74d5ea156bf84f829c8fb258d0547`）；独立 account_security_service 在锁定上游为 404，属于本地扩展。
+- 指定账号两次真实 OTP accepted 后均回到 ChatGPT 首页，但本地共享 helper 仍按 Codex 授权终态等待 45 秒，随后安全 worker 重建 Profile。只按既有 auth_url 严格区分普通登录回跳与 OAuth，不把 ChatGPT 首页加入通用 OAuth 成功条件。
+- 普通回跳只交给调用方核对同窗 Session 邮箱与新 Token；密码/MFA 成功确认及日志脱敏边界保持。业务登录错误停止重开；明确浏览器连接/代理传输故障仍使用既有有限预算。
+- 指定账号单次实测成功：OTP accepted 后约 1 秒交接 Session；密码确认、新 Session/Cookie、MFA enroll/activate 成功后保存，唯一 Profile 自动关闭删除。合并回归 521 passed / 134 subtests；运行证据与边界见 `docs/2026-09-14_安全设置重复开窗与ChatGPT登录终态修复-report.md`。
+
 ## 2026-09-14 接管注册失败：邮箱短重试与 OTP / 密码终态收尾
 
 - 流量任务维持已验收状态，本轮只续查用户随后要求的注册失败。继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`，重新读取上游邮箱、注册与 MFA 对应实现；注册源码 SHA-256 仍为 `454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`。

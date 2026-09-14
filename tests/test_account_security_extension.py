@@ -185,7 +185,7 @@ def test_security_setup_api_routes_are_independent_and_do_not_return_secrets(mon
     assert rejected.status_code == 400
 
 
-@pytest.mark.parametrize("refresh_state", ["ok", "missing_token", "wrong_email", "read_failed", "existing_password", "existing_totp", "existing_totp_read_failed", "existing_totp_missing_token", "existing_totp_wrong_email", "existing_totp_cookie_failed"])
+@pytest.mark.parametrize("refresh_state", ["ok", "transport_recovered", "missing_token", "wrong_email", "read_failed", "existing_password", "existing_totp", "existing_totp_read_failed", "existing_totp_missing_token", "existing_totp_wrong_email", "existing_totp_cookie_failed"])
 def test_security_worker_reuses_validated_helpers_without_entering_registration(monkeypatch, tmp_path, refresh_state) -> None:
     from config import roxybrowser as roxy_cfg
     from core import account_export, registration_password, roxy_codex_oauth, roxy_registration, session as session_module
@@ -213,6 +213,7 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
         profile_proxy = ""
 
         def open_profile(self, **kwargs):
+            calls["open_count"] = calls.get("open_count", 0) + 1
             calls["open_profile"] = kwargs
             return SimpleNamespace(profile_id="profile-7", created_by_run=True)
 
@@ -249,11 +250,13 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
         }
 
     monkeypatch.setattr(roxy_registration, "_fetch_chatgpt_session", fetch_session)
-    monkeypatch.setattr(
-        roxy_codex_oauth,
-        "_fill_email_and_otp",
-        lambda driver, email, provider, url: calls.update({"login_email": email, "login_url": url}),
-    )
+    def login(driver, email, provider, url):
+        calls.update({"login_email": email, "login_url": url})
+        if refresh_state == "transport_recovered" and calls["open_count"] == 1:
+            raise RuntimeError("net::ERR_PROXY_CONNECTION_FAILED")
+
+    monkeypatch.setattr(roxy_codex_oauth, "_fill_email_and_otp", login)
+    monkeypatch.setattr(account_security_service.account_operation_control, "wait", lambda *args: True)
     def import_cookies(*args, **kwargs):
         calls.setdefault("cookies", []).append(kwargs)
         if len(calls["cookies"]) == 2 and refresh_state == "existing_totp_cookie_failed":
@@ -292,6 +295,7 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
     assert result["password_done"] is True
     assert result["totp_done"] is (not failed_refresh or refresh_state.startswith("existing_totp"))
     assert calls["open_profile"] == {"headless": False, "require_proxy_exit_ip": True}
+    assert calls["open_count"] == (2 if refresh_state == "transport_recovered" else 1)
     assert calls["login_email"] == "worker@example.com"
     assert calls["login_url"] == "https://chatgpt.com/auth/login"
     if refresh_state != "existing_password":
@@ -415,7 +419,6 @@ def test_security_worker_preserves_failure_fields_without_logging_credentials(
     monkeypatch.setattr(registration_password, "registration_password", lambda: password)
     monkeypatch.setattr(session_module, "BrowserSession", lambda **kwargs: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(roxy_cfg, "ROXY_CREATE_API_ATTEMPTS", 1)
-    monkeypatch.setattr(account_security_service.time, "sleep", lambda seconds: None)
 
     assert account_security_service._QUEUE_SLOTS.acquire(blocking=False) is True
     result = account_security_service._run_security_setup(account_id=account_id, password_mode="add", trigger="manual")
@@ -430,7 +433,7 @@ def test_security_worker_preserves_failure_fields_without_logging_credentials(
     assert f"http_status={expected_status or '-'}" in result["error"]
     early_failure = failure_source in {"db_read", "empty_email"}
     assert calls["password"] == (0 if early_failure or failure_source == "session" else 1)
-    assert calls["cleanup"] == (0 if early_failure else 2 if failure_source == "session" else 1)
+    assert calls["cleanup"] == (0 if early_failure else 1)
     assert calls["checkpoints"] == []
     assert calls["updates"][-1][0][1] == result
     assert all(kwargs.get("registration_password") is None and kwargs.get("totp_secret") is None
@@ -446,6 +449,136 @@ def test_security_worker_preserves_failure_fields_without_logging_credentials(
         diagnostics += account_security_service.log_path(email).read_text(encoding="utf-8")
     for sensitive in (token, "PRIVATE-TOKEN-PREFIX", secret, password, private_url, "https://fixture.example", "123456"):
         assert sensitive not in diagnostics
+
+
+@pytest.mark.parametrize("failure_source, expected_attempts, expected_stage, expected_code", [
+    ("semantic", 1, "email_transition", "browser_login_failed"),
+    ("unknown_stage", 1, "browser_login", "browser_login_failed"),
+    ("password_missing", 1, "login_password", "browser_login_failed"),
+    ("totp_missing", 1, "login_totp", "browser_login_failed"),
+    ("account_unusable", 1, "browser_login", "account_unusable"),
+    ("mail_transport", 1, "email_otp", "email_otp_failed"),
+    ("webdriver_timeout", 1, "browser_login", "browser_login_failed"),
+    ("proxy_transport", 3, "browser_login", "browser_proxy_transport_failed"),
+    ("driver_disconnected", 3, "browser_login", "browser_connection_lost"),
+    ("window_closed", 3, "browser_login", "browser_connection_lost"),
+    ("transport_then_semantic", 2, "email_transition", "browser_login_failed"),
+    ("wrong_email", 1, "browser_session", "browser_session_account_mismatch"),
+    ("missing_session", 1, "browser_session", "browser_session_missing"),
+    ("missing_token", 1, "browser_session", "browser_session_token_missing"),
+    ("missing_token_old_stored", 1, "browser_session", "browser_session_token_missing"),
+    ("cancel_login", 1, "stopped", ""),
+    ("cancel_retry", 1, "stopped", ""),
+])
+def test_security_worker_retries_only_confirmed_browser_transport_failures(
+    monkeypatch, tmp_path, caplog, failure_source, expected_attempts, expected_stage, expected_code,
+) -> None:
+    from threading import BoundedSemaphore
+
+    from selenium.common.exceptions import InvalidSessionIdException, NoSuchWindowException, TimeoutException
+    from config import roxybrowser as roxy_cfg
+    from core import account_export, account_operation_control, roxy_codex_oauth, roxy_registration
+    from core.generic_api_mail_client import GenericApiTransportError
+    from core.openai_auth import AccountUnusableError
+
+    calls = {"open": 0, "quit": [], "cleanup": [], "updates": [], "wait": 0}
+    email = "fixture@example.com"
+    private_detail = "PRIVATE-TOKEN https://fixture.example/private?otp=123456 fixture@example.com"
+    cancelled = False
+    slots = BoundedSemaphore(1)
+
+    class Client:
+        profile_proxy = ""
+
+        def open_profile(self, **kwargs):
+            calls["open"] += 1
+            return SimpleNamespace(profile_id=f"fixture-{calls['open']}", created_by_run=True)
+
+        def cleanup_profile(self, opened):
+            calls["cleanup"].append(opened.profile_id)
+
+    def login(*args):
+        nonlocal cancelled
+        if failure_source == "account_unusable":
+            raise AccountUnusableError("ERR_PROXY_CONNECTION_FAILED " + private_detail)
+        if failure_source == "mail_transport":
+            raise GenericApiTransportError("ProxyError " + private_detail, retryable=True)
+        if failure_source == "webdriver_timeout":
+            raise TimeoutException(private_detail)
+        if failure_source == "unknown_stage":
+            raise RuntimeError("stage=PRIVATE-TOKEN; " + private_detail)
+        if failure_source == "driver_disconnected":
+            raise InvalidSessionIdException(private_detail)
+        if failure_source == "window_closed":
+            raise NoSuchWindowException(private_detail)
+        if failure_source == "cancel_login":
+            cancelled = True
+            raise RuntimeError(private_detail)
+        if failure_source in {"proxy_transport", "cancel_retry"} or (
+            failure_source == "transport_then_semantic" and calls["open"] == 1
+        ):
+            raise RuntimeError("net::ERR_PROXY_CONNECTION_FAILED " + private_detail)
+        if failure_source in {"semantic", "transport_then_semantic", "password_missing", "totp_missing"}:
+            raise RuntimeError(f"stage={expected_stage}; " + private_detail)
+
+    def wait(_seconds, _generation):
+        nonlocal cancelled
+        calls["wait"] += 1
+        if failure_source == "cancel_retry":
+            cancelled = True
+        return not cancelled
+
+    def build_driver(opened):
+        return SimpleNamespace(
+            set_page_load_timeout=lambda value: None,
+            set_script_timeout=lambda value: None,
+            quit=lambda: calls["quit"].append(opened.profile_id),
+        )
+
+    monkeypatch.setattr(account_security_service, "_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(account_security_service, "_QUEUE_SLOTS", slots)
+    monkeypatch.setattr(account_operation_control, "is_cancelled", lambda generation: cancelled)
+    monkeypatch.setattr(account_operation_control, "wait", wait)
+    monkeypatch.setattr(db, "get_account", lambda account_id: {
+        "id": account_id, "email": email,
+        "access_token": "PRIVATE-OLD-TOKEN" if failure_source == "missing_token_old_stored" else "",
+        "totp_secret": "", "extra_json": "{}",
+    })
+    monkeypatch.setattr(db, "mark_account_security_setup_running", lambda *args, **kwargs: True)
+    monkeypatch.setattr(db, "update_account_security_setup", lambda *args, **kwargs: calls["updates"].append((args, kwargs)))
+    monkeypatch.setattr(db, "save_security_checkpoint", lambda *args, **kwargs: pytest.fail("failed login must not save credentials"))
+    monkeypatch.setattr("core.roxybrowser_client.RoxyBrowserClient", Client)
+    monkeypatch.setattr(roxy_registration, "_build_driver", build_driver)
+    monkeypatch.setattr(roxy_registration, "_center_browser_window", lambda driver: None)
+    monkeypatch.setattr(roxy_registration, "_fetch_chatgpt_session", lambda *args, **kwargs: (
+        None if failure_source == "missing_session" else {
+            "user": {"email": "other@example.com" if failure_source == "wrong_email" else email},
+            "accessToken": "" if failure_source.startswith("missing_token") else "PRIVATE-TOKEN",
+        }
+    ))
+    monkeypatch.setattr(roxy_codex_oauth, "_fill_email_and_otp", login)
+    monkeypatch.setattr("core.session.BrowserSession", lambda *args, **kwargs: pytest.fail("failed login must not create credential session"))
+    monkeypatch.setattr(account_export, "_setup_password_with_driver", lambda *args, **kwargs: pytest.fail("failed login must not write password"))
+    monkeypatch.setattr(account_export, "_setup_totp_with_driver", lambda *args, **kwargs: pytest.fail("failed login must not enroll MFA"))
+    monkeypatch.setattr(roxy_cfg, "ROXY_CREATE_API_ATTEMPTS", 2)
+
+    assert slots.acquire(blocking=False)
+    result = account_security_service._run_security_setup(account_id=7, password_mode="add", trigger="manual")
+    assert result["status"] == ("stopped" if failure_source.startswith("cancel") else "failed")
+    assert calls["open"] == expected_attempts
+    assert calls["quit"] == calls["cleanup"] == [f"fixture-{n}" for n in range(1, expected_attempts + 1)]
+    assert result["stage"] == expected_stage
+    assert expected_code in result["error"]
+    assert not result["password_done"] and not result["totp_done"]
+    assert all(not kwargs.get("registration_password") and not kwargs.get("totp_secret")
+               and not kwargs.get("access_token") for _args, kwargs in calls["updates"])
+    assert 7 not in account_security_service._ACTIVE_CONTEXTS
+    assert slots.acquire(blocking=False)
+    assert not slots.acquire(blocking=False)
+    slots.release()
+    diagnostics = json.dumps(result) + caplog.text + account_security_service.log_path(email).read_text(encoding="utf-8")
+    for value in ("PRIVATE-TOKEN", "PRIVATE-OLD-TOKEN", "https://fixture.example", "123456", email, "other@example.com"):
+        assert value not in diagnostics
 
 
 def test_accounts_template_contains_security_extension_button_and_polling() -> None:

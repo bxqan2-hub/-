@@ -180,3 +180,94 @@ def test_login_never_types_credentials_on_an_unexpected_origin(monkeypatch, pass
         roxy_codex_oauth._complete_login_after_email(driver, account["email"], timeout=3)
     field.send_keys.assert_not_called()
     type_otp.assert_not_called()
+
+
+@pytest.mark.parametrize("port", ["", ":443"])
+def test_chatgpt_login_root_hands_off_to_session_check(monkeypatch, password_login_fixture, port):
+    driver, account, field, type_otp, _ = password_login_fixture
+    driver.current_url = f"https://chatgpt.com{port}/"
+    ticks = iter(range(20))
+    monkeypatch.setattr(roxy_codex_oauth.time, "monotonic", lambda: next(ticks))
+    assert roxy_codex_oauth._complete_login_after_email(
+        driver, account["email"], timeout=3, auth_url=f"https://chatgpt.com{port}/auth/login",
+    ) == "advanced"
+    field.send_keys.assert_not_called()
+    type_otp.assert_not_called()
+
+
+@pytest.mark.parametrize("auth_url,current_url", [
+    ("", "https://chatgpt.com/"),
+    ("https://auth.openai.com/oauth/authorize", "https://chatgpt.com/"),
+    ("https://chatgpt.com.example.test/auth/login", "https://chatgpt.com/"),
+    ("https://user@chatgpt.com/auth/login", "https://chatgpt.com/"),
+    ("http://chatgpt.com/auth/login", "https://chatgpt.com/"),
+    ("https://chatgpt.com:8443/auth/login", "https://chatgpt.com/"),
+    ("https://chatgpt.com/auth/login/", "https://chatgpt.com/"),
+    ("https://chatgpt.com/auth/login?error=fixture", "https://chatgpt.com/"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com.example.test/"),
+    ("https://chatgpt.com/auth/login", "https://user@chatgpt.com/"),
+    ("https://chatgpt.com/auth/login", "http://chatgpt.com/"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com:8443/"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com:bad/"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com/auth/error"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com/c/fixture"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com/?error=fixture"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com/?model=auto"),
+    ("https://chatgpt.com/auth/login", "https://chatgpt.com/#error=fixture"),
+])
+def test_chatgpt_root_handoff_rejects_other_targets(monkeypatch, password_login_fixture, auth_url, current_url):
+    driver, account, field, type_otp, _ = password_login_fixture
+    driver.current_url = current_url
+    ticks = iter(range(20))
+    monkeypatch.setattr(roxy_codex_oauth.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(RuntimeError, match="stage=email_transition"):
+        roxy_codex_oauth._complete_login_after_email(driver, account["email"], timeout=3, auth_url=auth_url)
+    field.send_keys.assert_not_called()
+    type_otp.assert_not_called()
+
+
+@pytest.mark.parametrize("dead_code", ["", "account_deactivated"])
+def test_chatgpt_otp_acceptance_uses_real_login_transition(monkeypatch, password_login_fixture, dead_code):
+    driver, account, _, type_otp, _ = password_login_fixture
+    driver.get = MagicMock(side_effect=lambda url: setattr(driver, "current_url", "https://auth.openai.com/log-in"))
+    driver.execute_script = MagicMock(return_value=[{"body": json.dumps({"error": {"code": dead_code}})}] if dead_code else [])
+    provider = MagicMock(return_value="123456")
+    for name in ("_maybe_accept", "_type_email_address", "_install_email_otp_validate_hook", "human_delay"):
+        monkeypatch.setattr(roxy_codex_oauth, name, MagicMock())
+    monkeypatch.setattr(roxy_codex_oauth, "_submit_email_step", lambda d: setattr(d, "current_url", "https://auth.openai.com/email-verification"))
+    monkeypatch.setattr(roxy_codex_oauth, "_is_phone_code_page", lambda d: False)
+    monkeypatch.setattr(roxy_codex_oauth, "_click_if_present", lambda d, *args, **kwargs: setattr(d, "current_url", "https://chatgpt.com/") or True)
+    resend = MagicMock()
+    monkeypatch.setattr(roxy_codex_oauth, "_click_resend_email_otp", resend)
+    ticks = iter(range(200))
+    monkeypatch.setattr(roxy_codex_oauth.time, "monotonic", lambda: next(ticks))
+    if dead_code:
+        with pytest.raises(roxy_codex_oauth.AccountUnusableError):
+            roxy_codex_oauth._fill_email_and_otp(driver, account["email"], provider, "https://chatgpt.com/auth/login")
+    else:
+        roxy_codex_oauth._fill_email_and_otp(driver, account["email"], provider, "https://chatgpt.com/auth/login")
+    provider.assert_called_once()
+    type_otp.assert_called_once_with(driver, "123456")
+    driver.get.assert_called_once_with("https://chatgpt.com/auth/login")
+    resend.assert_not_called()
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("auth_url", ["https://chatgpt.com/auth/login", "https://auth.openai.com/oauth/authorize"])
+def test_existing_chatgpt_login_without_email_input_is_target_scoped(monkeypatch, password_login_fixture, restart, auth_url):
+    driver, account, _, _, _ = password_login_fixture
+    driver.get = MagicMock(side_effect=lambda url: setattr(driver, "current_url", "https://chatgpt.com/"))
+    provider = MagicMock(side_effect=RuntimeError("fixture email timeout"))
+    type_email = MagicMock(side_effect=[None, RuntimeError("fixture no email field")] if restart else RuntimeError("fixture no email field"))
+    monkeypatch.setattr(roxy_codex_oauth, "_type_email_address", type_email)
+    for name in ("_maybe_accept", "human_delay"):
+        monkeypatch.setattr(roxy_codex_oauth, name, MagicMock())
+    monkeypatch.setattr(roxy_codex_oauth, "_submit_email_step", lambda d: setattr(d, "current_url", "https://auth.openai.com/email-verification"))
+    monkeypatch.setattr(roxy_codex_oauth, "_click_resend_email_otp", MagicMock(side_effect=RuntimeError("fixture no resend")))
+    if auth_url.startswith("https://chatgpt.com/"):
+        roxy_codex_oauth._fill_email_and_otp(driver, account["email"], provider, auth_url)
+    else:
+        with pytest.raises(RuntimeError, match="stage=email_entry"):
+            roxy_codex_oauth._fill_email_and_otp(driver, account["email"], provider, auth_url)
+    assert provider.call_count == int(restart)
+    assert driver.get.call_count == 1 + int(restart)

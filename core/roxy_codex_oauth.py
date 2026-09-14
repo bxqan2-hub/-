@@ -181,7 +181,24 @@ def _click_if_present(driver, selectors: list[str], timeout: int = 3) -> bool:
         return False
 
 
-def _complete_login_after_email(driver, email: str, timeout: int = 45) -> str:
+def _is_chatgpt_login_return(url: str, auth_url: str) -> bool:
+    """普通 ChatGPT 登录的根地址回跳；只交接 Session 校验，不确认写入成功。"""
+    try:
+        for value, path in ((auth_url, "/auth/login"), (url, "/")):
+            parsed = urlparse(value)
+            if (
+                parsed.scheme != "https" or parsed.hostname != "chatgpt.com"
+                or parsed.port not in (None, 443)
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path != path or parsed.params or parsed.query or parsed.fragment
+            ):
+                return False
+    except ValueError:
+        return False
+    return True
+
+
+def _complete_login_after_email(driver, email: str, timeout: int = 45, *, auth_url: str = "") -> str:
     """使用已保存密码/TOTP，或确认邮箱 OTP 页；不把密码页当成已发邮件。"""
     from core import db
     from core.account_security_service import _stored_password
@@ -206,6 +223,9 @@ def _complete_login_after_email(driver, email: str, timeout: int = 45) -> str:
         parsed = urlparse(str(driver.current_url or ""))
         path = parsed.path.lower()
         if _is_callback_url(str(driver.current_url or "")):
+            return "advanced"
+        if _is_chatgpt_login_return(str(driver.current_url or ""), auth_url):
+            logger.info("[Codex][Browser] stage=login_session_pending 已返回 ChatGPT，交由调用方校验账号 Session")
             return "advanced"
         if parsed.scheme != "https" or parsed.hostname != "auth.openai.com" or parsed.port not in (None, 443):
             time.sleep(0.5)
@@ -302,14 +322,14 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
     try:
         _type_email_address(driver, email, timeout=12)
     except Exception as exc:
-        if _has_strict_add_phone_form(driver) or _is_callback_url(str(driver.current_url or "")):
+        if _has_strict_add_phone_form(driver) or _is_callback_url(str(driver.current_url or "")) or _is_chatgpt_login_return(str(driver.current_url or ""), auth_url):
             return
         raise RuntimeError("stage=email_entry; 授权页未出现邮箱输入框，已停止登录") from exc
     logger.info("[Codex][Browser] 已填写邮箱：%s", email)
     human_delay("form")
     _submit_email_step(driver)
     logger.info("[Codex][Browser] 已提交邮箱，确认密码 / 2FA / 邮箱验证码阶段")
-    if _complete_login_after_email(driver, email) == "advanced":
+    if _complete_login_after_email(driver, email, auth_url=auth_url) == "advanced":
         return
 
     # 提交邮箱后不再执行任何全局“继续/授权/分支”兜底点击；后续只等待验证码页。
@@ -331,7 +351,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         try:
             _type_email_address(driver, email, timeout=12)
         except Exception as exc:
-            if _has_strict_add_phone_form(driver) or _is_callback_url(str(driver.current_url or "")):
+            if _has_strict_add_phone_form(driver) or _is_callback_url(str(driver.current_url or "")) or _is_chatgpt_login_return(str(driver.current_url or ""), auth_url):
                 return True
             if _is_email_verification_page(driver):
                 return False
@@ -339,7 +359,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         human_delay("form")
         _submit_email_step(driver)
         logger.info("[Codex][Browser] 已重新提交邮箱，确认实际登录阶段")
-        return _complete_login_after_email(driver, email) == "advanced"
+        return _complete_login_after_email(driver, email, auth_url=auth_url) == "advanced"
 
     def _resend_email_otp(reason: str) -> bool:
         """优先留在当前验证码页直接重发；按钮缺失/页面异常时才重开授权页。"""
@@ -411,7 +431,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         outcome = _wait_after_email_otp_submit(driver, timeout=45)
         logger.info("[Codex][Browser] 邮箱 OTP 提交后状态：%s", outcome)
         if outcome == "accepted":
-            if _complete_login_after_email(driver, email) == "advanced":
+            if _complete_login_after_email(driver, email, auth_url=auth_url) == "advanced":
                 return
         if str(outcome).startswith("deactivated:"):
             error_code = str(outcome).split(":", 1)[1] or "account_deactivated"

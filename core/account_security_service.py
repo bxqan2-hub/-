@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -141,8 +140,12 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             _build_driver,
             _center_browser_window,
             _fetch_chatgpt_session,
+            _is_proxy_transport_failure,
         )
         from core.roxy_codex_oauth import _fill_email_and_otp
+        from core.generic_api_mail_client import GenericApiMailError
+        from core.openai_auth import AccountUnusableError
+        from selenium.common.exceptions import InvalidSessionIdException, NoSuchWindowException
         from core.account_export import (
             _setup_password_with_driver,
             _setup_totp_with_driver,
@@ -191,9 +194,31 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
             except Exception as exc:
                 if account_operation_control.is_cancelled(operation_generation):
                     raise account_operation_control.AccountOperationStopped("账号页操作已停止") from exc
-                failure = twofa_failure_payload(exc, default_stage="browser_login")
+                if isinstance(exc, account_operation_control.AccountOperationStopped):
+                    raise
+                # Only confirmed browser transport failures justify a new
+                # Profile. Mailbox retries and login business states retain
+                # their own budgets instead of multiplying browser attempts.
+                retryable = False
+                login_error = exc
                 if not isinstance(exc, TwoFASetupError):
-                    failure["code"] = "security_setup_failed"
+                    stage, code = "browser_login", "browser_login_failed"
+                    stage_marker = str(exc).partition(";")[0]
+                    if isinstance(exc, AccountUnusableError):
+                        code = "account_unusable"
+                    elif isinstance(exc, GenericApiMailError):
+                        stage, code = "email_otp", "email_otp_failed"
+                    elif stage_marker in {
+                        "stage=email_entry", "stage=email_transition", "stage=login_identity",
+                        "stage=login_password", "stage=login_totp",
+                    }:
+                        stage = stage_marker.removeprefix("stage=")
+                    elif isinstance(exc, (InvalidSessionIdException, NoSuchWindowException)):
+                        code, retryable = "browser_connection_lost", True
+                    elif _is_proxy_transport_failure(exc):
+                        code, retryable = "browser_proxy_transport_failed", True
+                    login_error = TwoFASetupError(stage, code, "浏览器登录未完成")
+                failure = twofa_failure_payload(login_error, default_stage="browser_login")
                 _append_log(
                     email,
                     f"[安全扩展] Roxy 尝试 {browser_attempt}/{browser_attempts} 失败："
@@ -212,21 +237,25 @@ def _run_security_setup(*, account_id: int, password_mode: str, trigger: str) ->
                     except Exception as cleanup_exc:
                         logger.error("[安全扩展] Roxy 重试前清理失败 account_id=%s type=%s", account_id, type(cleanup_exc).__name__)
                     opened = None
-                if browser_attempt >= browser_attempts:
-                    raise
+                _clear_active_context(account_id)
+                if not retryable or browser_attempt >= browser_attempts:
+                    if login_error is exc:
+                        raise
+                    raise login_error from exc
                 # 丢弃旧粘性代理；下一轮 open_profile 会重新预检并重新抽取代理。
                 client.profile_proxy = None
                 client.profile_proxy_source = None
-                time.sleep(1.0)
+                account_operation_control.wait(1.0, operation_generation)
+                account_operation_control.raise_if_cancelled(operation_generation)
         if not isinstance(session_info, dict):
-            raise RuntimeError("浏览器登录后没有返回 ChatGPT session")
+            raise TwoFASetupError("browser_session", "browser_session_missing", "浏览器登录后没有返回 ChatGPT session")
         authenticated_email = str((session_info.get("user") or {}).get("email") or "").strip()
         if authenticated_email.casefold() != email.casefold():
-            raise RuntimeError("浏览器登录账号与目标账号不一致，已停止安全设置")
-        access_token = str(session_info.get("accessToken") or access_token).strip()
+            raise TwoFASetupError("browser_session", "browser_session_account_mismatch", "浏览器登录账号与目标账号不一致，已停止安全设置")
+        access_token = str(session_info.get("accessToken") or "").strip()
         account_operation_control.raise_if_cancelled(operation_generation)
         if not access_token:
-            raise RuntimeError("浏览器登录成功但没有取得 Access Token")
+            raise TwoFASetupError("browser_session", "browser_session_token_missing", "浏览器登录成功但没有取得 Access Token")
         _append_log(email, "[安全扩展] 浏览器登录账号已严格匹配")
         db.update_account_security_setup(
             account_id,
