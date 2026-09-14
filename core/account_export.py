@@ -1923,10 +1923,30 @@ def _validate_2fa_token(session: BrowserSession, access_token: str) -> int:
     last_status: int | None = None
     for attempt in range(1, 4):
         try:
-            resp = session.get("https://chatgpt.com/backend-api/models", headers=headers)
+            # Managed-Challenge responses can be multi-megabyte HTML pages.
+            # Use curl's streaming response for the read-only health check so
+            # a 403 status is enough to classify the result without pulling
+            # the challenge body through the metered proxy tunnel.  Test
+            # doubles that only expose BrowserSession.get retain the old path.
+            raw_session = getattr(session, "session", None)
+            if raw_session is not None and hasattr(raw_session, "get"):
+                resp = raw_session.get(
+                    "https://chatgpt.com/backend-api/models",
+                    headers=headers,
+                    stream=True,
+                    timeout=15,
+                )
+            else:
+                resp = session.get("https://chatgpt.com/backend-api/models", headers=headers)
             last_status = int(resp.status_code)
             if last_status == 200:
+                close = getattr(resp, "close", None)
+                if callable(close):
+                    close()
                 return last_status
+            close = getattr(resp, "close", None)
+            if callable(close):
+                close()
             # 401/403 是确定性鉴权结果；限流和服务端错误才值得短重试。
             if last_status not in {408, 425, 429, 500, 502, 503, 504}:
                 break
