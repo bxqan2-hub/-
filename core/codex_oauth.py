@@ -986,6 +986,15 @@ def _do_phone_verification(session: BrowserSession) -> None:
                     failed_country_ids.add(activation_country)
                 _sleep_before_phone_retry(attempt, max_retries)
                 continue
+            except Exception:
+                # 页面/传输层异常也必须释放已取号码，避免后台激活泄漏；
+                # 保持原异常类型向上抛出，交由上层记录真实失败原因。
+                if activation_id:
+                    try:
+                        sms_provider.cancel(activation_id, http)
+                    except Exception:
+                        pass
+                raise
 
         raise RuntimeError(
             f"[Codex] 手机号验证重试 {max_retries} 次仍失败（provider={provider}）"
@@ -1154,8 +1163,12 @@ def _parse_id_token(id_token: str) -> dict:
         logger.warning(f"[Codex] id_token 解析失败: {exc}")
         return {}
 
-    auth_claim = claims.get("https://api.openai.com/auth", {}) or {}
-    profile_claim = claims.get("https://api.openai.com/profile", {}) or {}
+    if not isinstance(claims, dict):
+        return {}
+    auth_claim = claims.get("https://api.openai.com/auth")
+    auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
+    profile_claim = claims.get("https://api.openai.com/profile")
+    profile_claim = profile_claim if isinstance(profile_claim, dict) else {}
     # OpenAI 新版 id_token 的 email 在顶层 claim；旧版/CLIProxyAPI 实现里在 profile_claim。
     # 顶层优先，否则回退 profile_claim，避免落盘的 codex-邮箱.json 里 email 字段为空。
     email_value = claims.get("email") or profile_claim.get("email", "")
@@ -1222,7 +1235,8 @@ def build_sub2api_oauth_account(storage: dict, *, email: str) -> dict:
         "chatgpt_account_id": storage.get("account_id") or auth.get("chatgpt_account_id"),
         "chatgpt_user_id": auth.get("chatgpt_user_id") or auth.get("user_id"),
         "organization_id": auth.get("organization_id"),
-        "plan_type": auth.get("chatgpt_plan_type"),
+        "plan_type": storage.get("plan_type") or auth.get("chatgpt_plan_type"),
+        "plan_claim_type": storage.get("plan_claim_type"),
     }.items():
         if isinstance(value, str) and value.strip():
             credentials[key] = value.strip()
@@ -1256,21 +1270,60 @@ def _credential_file_name(email: str, plan_type: str) -> str:
     """对照 CLIProxyAPI filename.go：无 plan→codex-{email}.json，否则带 plan 后缀。"""
     email = (email or "").strip()
     plan = (plan_type or "").strip().lower()
+    if not email or any(ch in email for ch in '<>:"/\\|?*') or any(ord(ch) < 32 for ch in email):
+        raise ValueError("凭证邮箱不是有效文件名")
+    if plan and (len(plan) > 64 or not all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in plan)):
+        raise ValueError("凭证套餐标签格式无效")
     if plan == "":
         return f"codex-{email}.json"
     return f"codex-{email}-{plan}.json"
 
 
-def save_codex_credential(storage: dict, email: str, plan_type: str) -> Path:
-    """落盘到 {PROJECT_ROOT}/{CODEX_OUTPUT_DIRNAME}/codex-{email}.json。"""
+def save_codex_credential(storage: dict, email: str, plan_type: str, *, proxy: str | None = None) -> Path:
+    """校验身份并先保存 OAuth 凭证；套餐查询失败不丢失已完成的授权。"""
+    storage = dict(storage)
+    if plan_type:
+        # 兼容旧调用方的 hint 参数，但不把未核实 hint 直接当作权威套餐。
+        _credential_file_name(email, str(plan_type))
+    identities = [_parse_id_token(str(storage.get(key) or "")) for key in ("id_token", "access_token")]
+    emails = [str(value).strip() for value in [storage.get("email"), *(item.get("email") for item in identities)] if value]
+    if not emails or any(value.casefold() != str(email).strip().casefold() for value in emails):
+        raise ValueError("OAuth 凭证邮箱与本轮账号不匹配")
+    account_ids = [str(value).strip() for value in [storage.get("account_id"), *(item.get("account_id") for item in identities)] if value]
+    if len(set(account_ids)) > 1:
+        raise ValueError("OAuth Token 账号 ID 不一致")
+    storage["email"] = str(email).strip()
+    storage["account_id"] = account_ids[0] if account_ids else ""
+    storage["type"] = "codex"
+    # 复用现有导出边界：完整 AT、Token 邮箱/workspace 和过期信息校验。
+    build_sub2api_oauth_account(storage, email=email)
+    hint = storage.get("plan_type") or next((item.get("plan_type") for item in identities if item.get("plan_type")), "")
+    storage["plan_type"] = str(hint or "").strip().lower()
+    storage["plan_claim_type"] = storage["plan_type"] or None
+    storage["plan_authority"] = "token_claim"
+    storage["plan_check_ok"] = False
+    fname = _credential_file_name(email, storage["plan_type"])
     out_dir = _PROJECT_ROOT / _cfg.CODEX_OUTPUT_DIRNAME
     out_dir.mkdir(parents=True, exist_ok=True)
-    fname = _credential_file_name(email, plan_type)
     path = out_dir / fname
-    path.write_text(
-        json.dumps(storage, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    from core.db import _write_json
+    _write_json(path, storage)
+    try:
+        if proxy is None:
+            try:
+                proxy = _cfg.resolve_local_proxy()
+            except Exception:
+                proxy = ""
+        enriched = _enrich_codex_auth_json_plan(storage, proxy=proxy or None)
+        _write_json(path, enriched)
+        updated_plan = str(enriched.get("plan_type") or "").strip().lower()
+        new_path = out_dir / _credential_file_name(email, updated_plan)
+        if new_path != path:
+            _write_json(new_path, enriched)
+            path.unlink(missing_ok=True)
+            path = new_path
+    except Exception as exc:
+        logger.warning("[Codex] OAuth 凭证已保存，套餐元数据未更新：%s", type(exc).__name__)
     return path
 
 
@@ -1281,6 +1334,8 @@ def _extract_cpa_auth_json(payload: dict) -> dict | None:
     """
     if not isinstance(payload, dict):
         return None
+    if isinstance(payload.get("accounts"), list):
+        return None
     def walk(value, depth: int = 0):
         if depth > 5:
             return None
@@ -1290,7 +1345,7 @@ def _extract_cpa_auth_json(payload: dict) -> dict | None:
                 "refresh_token": ("refresh_token", "refreshToken"),
                 "id_token": ("id_token", "idToken"),
             }
-            if value.get("type") == "codex" or any(
+            if any(
                 any(value.get(alias) for alias in aliases)
                 for aliases in token_aliases.values()
             ):
@@ -1303,15 +1358,6 @@ def _extract_cpa_auth_json(payload: dict) -> dict | None:
                 found = walk(value.get(key), depth + 1)
                 if found is not None:
                     return found
-            for item in value.values():
-                found = walk(item, depth + 1)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for item in value:
-                found = walk(item, depth + 1)
-                if found is not None:
-                    return found
         return None
 
     auth = walk(payload)
@@ -1320,7 +1366,7 @@ def _extract_cpa_auth_json(payload: dict) -> dict | None:
     return None
 
 
-def _enrich_codex_auth_json_plan(auth_json: dict) -> dict:
+def _enrich_codex_auth_json_plan(auth_json: dict, *, proxy: str | None = None) -> dict:
     """用 callback 取得的 OAuth 凭证查询权威套餐，并只写入精简元数据。"""
     enriched = dict(auth_json)
     token = str(enriched.get("access_token") or "").strip()
@@ -1338,16 +1384,32 @@ def _enrich_codex_auth_json_plan(auth_json: dict) -> dict:
                 break
     if claim_plan and not str(enriched.get("plan_type") or "").strip():
         enriched["plan_type"] = claim_plan
-    if not token:
+    if claim_plan and not enriched.get("plan_claim_type"):
+        enriched["plan_claim_type"] = claim_plan
+    account_id = str(enriched.get("account_id") or "").strip()
+    if not token or not account_id:
         return enriched
     try:
         from core.chatgpt_plan import check_account_plan
-        result = check_account_plan(token, fast_mode=False)
+        result = check_account_plan(
+            token,
+            proxy=proxy,
+            fast_mode=False,
+            timeout=5,
+            max_attempts=1,
+        )
     except Exception as exc:
         logger.info("[Codex] callback 套餐查询未完成：%s", type(exc).__name__)
         return enriched
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or not result.get("ok"):
         return enriched
+    authority = str(result.get("plan_authority") or "").strip().lower()
+    result_account_id = str(result.get("account_id") or "").strip()
+    if authority not in {"authoritative", "verified"} or result_account_id != account_id:
+        logger.info("[Codex] callback 套餐结果未通过 workspace 身份/权威校验")
+        return enriched
+    enriched["plan_check_ok"] = True
+    enriched["plan_authority"] = authority
     if result.get("current_plan_type"):
         enriched["plan_type"] = result["current_plan_type"]
     if result.get("subscription_plan") is not None:
@@ -1400,6 +1462,7 @@ def _save_cpa_local_record(
     auth_url: str,
     state: str,
     submit_payload: dict,
+    proxy: str | None = None,
 ) -> Path | None:
     """
     本地记录 CPA 授权结果：
@@ -1411,10 +1474,9 @@ def _save_cpa_local_record(
     if not auth_json:
         auth_json = _callback_credential_from_cpa(email, f"codex-{safe_email}-cpa-callback.json")
     if auth_json:
-        auth_json = _enrich_codex_auth_json_plan(auth_json)
         effective_email = auth_json.get("email") or email
         plan = auth_json.get("plan_type") or auth_json.get("chatgpt_plan_type") or ""
-        return save_codex_credential(auth_json, effective_email, plan)
+        return save_codex_credential(auth_json, effective_email, plan, proxy=proxy)
 
     if not bool(getattr(_cfg, "CPA_SAVE_CALLBACK_RECEIPT", True)):
         return None
@@ -1444,14 +1506,14 @@ def _save_sub2_local_record(
     auth_url: str,
     state: str,
     submit_payload: dict,
+    proxy: str | None = None,
 ) -> Path | None:
     """本地记录 sub2 授权结果；若 sub2 返回完整 auth json，则保存为可用 codex 凭证。"""
     auth_json = _extract_cpa_auth_json(submit_payload)
     if auth_json:
-        auth_json = _enrich_codex_auth_json_plan(auth_json)
         effective_email = auth_json.get("email") or email
         plan = auth_json.get("plan_type") or auth_json.get("chatgpt_plan_type") or ""
-        return save_codex_credential(auth_json, effective_email, plan)
+        return save_codex_credential(auth_json, effective_email, plan, proxy=proxy)
 
     if not bool(getattr(_cfg, "CPA_SAVE_CALLBACK_RECEIPT", True)):
         return None
@@ -1649,6 +1711,7 @@ def run_codex_oauth(
                 auth_url=auth_url or "",
                 state=state,
                 submit_payload=submit_payload,
+                proxy=proxy,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
             plan_type = _saved_codex_plan_type(path)
@@ -1677,6 +1740,7 @@ def run_codex_oauth(
                 auth_url=auth_url or "",
                 state=state,
                 submit_payload=submit_payload,
+                proxy=proxy,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
             plan_type = _saved_codex_plan_type(path)
@@ -1701,7 +1765,7 @@ def run_codex_oauth(
         id_claims = _parse_id_token(token_resp.get("id_token", ""))
         effective_email = id_claims.get("email") or email
         storage = build_codex_storage(token_resp, id_claims)
-        path = save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""))
+        path = save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""), proxy=proxy)
 
         logger.info(
             f"[Codex] 成功：{effective_email}，plan={id_claims.get('plan_type') or 'unknown'}, "

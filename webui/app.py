@@ -2950,10 +2950,15 @@ def create_app(auth_code: str | None = None) -> Flask:
                 else:
                     portable = {key: storage.get(key, "") for key in (
                         "id_token", "access_token", "refresh_token", "account_id", "last_refresh",
-                        "email", "type", "expired",
+                        "email", "type", "expired", "plan_type", "plan_claim_type",
+                        "subscription_plan", "subscription_status", "subscription_expires_at",
+                        "plan_checked_at", "plan_check_ok", "plan_authority",
                     )}
                     portable["type"] = "codex"
+                    plan_label = str(storage.get("plan_type") or "").strip().lower()
                     arcname = str(filename).replace("\\", "/").rsplit("/", 1)[-1]
+                    if plan_label and re.fullmatch(r"[a-z0-9_-]{1,64}", plan_label):
+                        arcname = f"codex-{email}-{plan_label}.json"
                     if not arcname.startswith("codex-") or not arcname.endswith(".json"):
                         arcname = f"codex-{acc_id}.json"
                     if arcname in used_names:

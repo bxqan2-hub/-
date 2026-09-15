@@ -1576,6 +1576,7 @@ def _run_roxy_codex_oauth_once(
                 auth_url=auth_url,
                 state=state,
                 submit_payload=submit_payload,
+                proxy=proxy,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
             plan_type = proto._saved_codex_plan_type(path)
@@ -1602,6 +1603,7 @@ def _run_roxy_codex_oauth_once(
                 auth_url=auth_url,
                 state=state,
                 submit_payload=submit_payload,
+                proxy=proxy,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
             plan_type = proto._saved_codex_plan_type(path)
@@ -1623,7 +1625,7 @@ def _run_roxy_codex_oauth_once(
         id_claims = proto._parse_id_token(token_resp.get("id_token", ""))
         effective_email = id_claims.get("email") or email
         storage = proto.build_codex_storage(token_resp, id_claims)
-        path = proto.save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""))
+        path = proto.save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""), proxy=proxy)
         return proto._codex_result(
             status="success",
             ok=True,

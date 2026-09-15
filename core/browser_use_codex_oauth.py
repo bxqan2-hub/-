@@ -1216,106 +1216,113 @@ def _do_phone_verification_if_present(page, *, email: str = "", restart_authoriz
     )
     last_error = ""
     failed_country_ids: set[str] = set()
-    for attempt in range(1, max_retries + 1):
-        activation_id = None
-        activation_country = ""
-        try:
-            if email:
-                from core.codex_retry_service import check_stop_requested
-                check_stop_requested(email)
-            _t_phone_ready = _StepTimer(f"手机页准备 attempt={attempt}")
-            if not _ensure_add_phone_form(page, reason=f"attempt-{attempt}"):
-                raise RuntimeError("无法回到手机号输入页，暂不取新号")
-            _t_phone_ready.done()
-            logger.info("[Codex][BrowserUse] 需要手机验证，开始取号（%s/%s）", attempt, max_retries)
-            activation_id, phone = sms_provider.acquire_number(
-                http,
-                country=selected_country,
-                excluded_countries=(failed_country_ids if selected_country.lower() == "auto" else set()),
-                provider_id=selected_supplier,
-            )
-            activation_country = sms_provider.activation_country(activation_id)
-            logger.info("[Codex][BrowserUse] 已取号：%s activation=%s", phone, activation_id)
-            _t_phone_send = _StepTimer(f"填写并提交手机号 attempt={attempt}")
-            phone_e164 = _fill_phone(page, phone)
-            _bu_delay("form")
-            send_state = _wait_after_phone_send(page, timeout=12 if _fast_mode() else 18)
-            _t_phone_send.done(f"state={send_state}")
-            logger.info("[Codex][BrowserUse] 手机号提交后状态：%s phone=%s", send_state, phone_e164)
-            if send_state == "callback":
-                return
-            if send_state != "code_page":
-                raise RuntimeError(f"提交手机号后未确认发送短信/进入验证码页：state={send_state}, page={_current_state_for_log(page)}")
-            sms_provider.set_status(activation_id, 1, http=http)
-            previous_code = None
-            for code_attempt in range(1, 4):
-                _t_sms = _StepTimer(f"等待手机短信 attempt={attempt} code={code_attempt}/3")
-                sms_code = sms_provider.wait_for_sms_code(
-                    activation_id,
+    try:
+        for attempt in range(1, max_retries + 1):
+            activation_id = None
+            activation_country = ""
+            try:
+                if email:
+                    from core.codex_retry_service import check_stop_requested
+                    check_stop_requested(email)
+                _t_phone_ready = _StepTimer(f"手机页准备 attempt={attempt}")
+                if not _ensure_add_phone_form(page, reason=f"attempt-{attempt}"):
+                    raise RuntimeError("无法回到手机号输入页，暂不取新号")
+                _t_phone_ready.done()
+                logger.info("[Codex][BrowserUse] 需要手机验证，开始取号（%s/%s）", attempt, max_retries)
+                activation_id, phone = sms_provider.acquire_number(
                     http,
-                    previous_code=previous_code,
+                    country=selected_country,
+                    excluded_countries=(failed_country_ids if selected_country.lower() == "auto" else set()),
+                    provider_id=selected_supplier,
                 )
-                _t_sms.done()
-                logger.info("[Codex][BrowserUse] 手机 OTP 收到：%s", sms_code)
-                _clear_otp_inputs(page)
-                _type_otp(page, sms_code)
-                _bu_delay("otp_input")
-                submitted = _click_first_any_frame(
-                    page,
-                    ["button[type='submit']", "button:has-text('Continue')", "button:has-text('Verify')", "button:has-text('続行')", "button:has-text('送信')", "button:has-text('继续')", "button:has-text('验证')", "form button"],
-                    timeout_ms=8000,
-                )
-                if not submitted:
-                    raise RuntimeError("verify_submit_missing: 手机验证码页未找到提交按钮")
-                outcome = _wait_after_phone_otp(page, timeout=30)
-                logger.info("[Codex][BrowserUse] 手机 OTP 提交后状态：%s", outcome)
-                if outcome in ("accepted", "callback"):
+                activation_country = sms_provider.activation_country(activation_id)
+                logger.info("[Codex][BrowserUse] 已取号：%s activation=%s", phone, activation_id)
+                _t_phone_send = _StepTimer(f"填写并提交手机号 attempt={attempt}")
+                phone_e164 = _fill_phone(page, phone)
+                _bu_delay("form")
+                send_state = _wait_after_phone_send(page, timeout=12 if _fast_mode() else 18)
+                _t_phone_send.done(f"state={send_state}")
+                logger.info("[Codex][BrowserUse] 手机号提交后状态：%s phone=%s", send_state, phone_e164)
+                if send_state == "callback":
                     sms_provider.complete(activation_id, http)
                     return
-                if outcome != "invalid":
-                    raise RuntimeError(f"手机验证码结果未确认：{outcome}")
-                if code_attempt >= 3:
-                    raise RuntimeError("手机验证码未通过：同一号码连续 3 条验证码无效/过期")
-                previous_code = sms_code
-                logger.warning(
-                    "[Codex][BrowserUse] 当前短信验证码无效/过期，保留号码请求下一条（%s/3）",
-                    code_attempt,
-                )
-                _request_fresh_phone_code(page, activation_id, http)
-        except (sms_provider.SmsProviderConfigurationError, sms_provider.SmsNoNumbersError):
-            raise
-        except Exception as exc:
-            from core.codex_retry_service import CodexRetryStopped
-            if isinstance(exc, CodexRetryStopped):
-                if activation_id:
-                    sms_provider.cancel(activation_id, http)
-                logger.info("[Codex][BrowserUse] 收到停止信号，终止换号并关闭浏览器会话")
+                if send_state != "code_page":
+                    raise RuntimeError(f"提交手机号后未确认发送短信/进入验证码页：state={send_state}, page={_current_state_for_log(page)}")
+                sms_provider.set_status(activation_id, 1, http=http)
+                previous_code = None
+                for code_attempt in range(1, 4):
+                    _t_sms = _StepTimer(f"等待手机短信 attempt={attempt} code={code_attempt}/3")
+                    sms_code = sms_provider.wait_for_sms_code(
+                        activation_id,
+                        http,
+                        previous_code=previous_code,
+                    )
+                    _t_sms.done()
+                    logger.info("[Codex][BrowserUse] 手机 OTP 收到：%s", sms_code)
+                    _clear_otp_inputs(page)
+                    _type_otp(page, sms_code)
+                    _bu_delay("otp_input")
+                    submitted = _click_first_any_frame(
+                        page,
+                        ["button[type='submit']", "button:has-text('Continue')", "button:has-text('Verify')", "button:has-text('続行')", "button:has-text('送信')", "button:has-text('继续')", "button:has-text('验证')", "form button"],
+                        timeout_ms=8000,
+                    )
+                    if not submitted:
+                        raise RuntimeError("verify_submit_missing: 手机验证码页未找到提交按钮")
+                    outcome = _wait_after_phone_otp(page, timeout=30)
+                    logger.info("[Codex][BrowserUse] 手机 OTP 提交后状态：%s", outcome)
+                    if outcome in ("accepted", "callback"):
+                        sms_provider.complete(activation_id, http)
+                        return
+                    if outcome != "invalid":
+                        raise RuntimeError(f"手机验证码结果未确认：{outcome}")
+                    if code_attempt >= 3:
+                        raise RuntimeError("手机验证码未通过：同一号码连续 3 条验证码无效/过期")
+                    previous_code = sms_code
+                    logger.warning(
+                        "[Codex][BrowserUse] 当前短信验证码无效/过期，保留号码请求下一条（%s/3）",
+                        code_attempt,
+                    )
+                    _request_fresh_phone_code(page, activation_id, http)
+            except (sms_provider.SmsProviderConfigurationError, sms_provider.SmsNoNumbersError):
                 raise
-            last_error = f"{type(exc).__name__}: {str(exc)[:220]}"
-            logger.warning("[Codex][BrowserUse] 手机验证失败（%s/%s）：%s", attempt, max_retries, last_error)
-            if activation_id:
-                try:
-                    sms_provider.cancel(activation_id, http)
-                except Exception:
-                    pass
-            if activation_country:
-                failed_country_ids.add(activation_country)
-                logger.info(
-                    "[Codex][BrowserUse] 国家 id=%s 本次失败，后续尝试将自动换其它地区",
-                    activation_country,
-                )
-            if email:
-                from core.codex_retry_service import check_stop_requested
-                check_stop_requested(email)
-            if attempt >= max_retries:
-                break
-            if restart_authorization is not None:
-                logger.info("[Codex][BrowserUse] 手机号重试将重新生成一次性授权链接并重新登录")
-                restart_authorization()
-            else:
-                raise RuntimeError("手机号重试缺少一次性授权重建回调，已停止复用旧授权状态") from exc
-            time.sleep(min(1 + attempt, 4))
-    raise RuntimeError(f"手机验证失败，已重试 {max_retries} 次：{last_error}")
+            except Exception as exc:
+                from core.codex_retry_service import CodexRetryStopped
+                if isinstance(exc, CodexRetryStopped):
+                    if activation_id:
+                        sms_provider.cancel(activation_id, http)
+                    logger.info("[Codex][BrowserUse] 收到停止信号，终止换号并关闭浏览器会话")
+                    raise
+                last_error = f"{type(exc).__name__}: {str(exc)[:220]}"
+                logger.warning("[Codex][BrowserUse] 手机验证失败（%s/%s）：%s", attempt, max_retries, last_error)
+                if activation_id:
+                    try:
+                        sms_provider.cancel(activation_id, http)
+                    except Exception:
+                        pass
+                if activation_country:
+                    failed_country_ids.add(activation_country)
+                    logger.info(
+                        "[Codex][BrowserUse] 国家 id=%s 本次失败，后续尝试将自动换其它地区",
+                        activation_country,
+                    )
+                if email:
+                    from core.codex_retry_service import check_stop_requested
+                    check_stop_requested(email)
+                if attempt >= max_retries:
+                    break
+                if restart_authorization is not None:
+                    logger.info("[Codex][BrowserUse] 手机号重试将重新生成一次性授权链接并重新登录")
+                    restart_authorization()
+                else:
+                    raise RuntimeError("手机号重试缺少一次性授权重建回调，已停止复用旧授权状态") from exc
+                time.sleep(min(1 + attempt, 4))
+        raise RuntimeError(f"手机验证失败，已重试 {max_retries} 次：{last_error}")
+    finally:
+        try:
+            http.close()
+        except Exception:
+            pass
 
 
 def _finish_consent_workspace(context, page) -> str:
@@ -1397,6 +1404,23 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
         def restart_authorization_for_phone_retry() -> None:
             """手机号失败时生成新的授权事务并重新完成邮箱登录。"""
             nonlocal auth_url, state, code_verifier, cpa_auth, sub2_auth
+            # Browser Use 的 context 可能保留旧的一次性 state/cookie；重试前清理，
+            # 防止 _ensure_add_phone_form 复用旧会话或直接回到旧 add-phone 页面。
+            try:
+                context.clear_cookies()
+            except Exception as exc:
+                logger.debug("[Codex][BrowserUse] 清理重试 Cookie 失败：%s", type(exc).__name__)
+            try:
+                # localStorage/sessionStorage 按 origin 保留；在 auth origin 上显式清空，
+                # 再切到空白页，避免旧 state 被下一次授权事务读取。
+                page.goto("https://auth.openai.com/", wait_until="domcontentloaded", timeout=5000)
+                page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
+            except Exception as exc:
+                logger.debug("[Codex][BrowserUse] 清理重试 storage 失败：%s", type(exc).__name__)
+            try:
+                page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+            except Exception as exc:
+                logger.debug("[Codex][BrowserUse] 清理重试页面失败：%s", type(exc).__name__)
             if auth_source == "cpa":
                 cpa_auth = proto._request_cpa_authorize_url()
                 auth_url = cpa_auth["auth_url"]
@@ -1454,6 +1478,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     auth_url=auth_url,
                     state=state,
                     submit_payload=submit_payload,
+                    proxy=proxy,
                 )
                 msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
                 plan_type = proto._saved_codex_plan_type(file_path)
@@ -1481,6 +1506,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     auth_url=auth_url,
                     state=state,
                     submit_payload=submit_payload,
+                    proxy=proxy,
                 )
                 msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
                 plan_type = proto._saved_codex_plan_type(file_path)
@@ -1496,11 +1522,17 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     message=str(msg),
                 )
 
-            token_payload = proto._exchange_codex_token(code, code_verifier)
-            storage = proto._build_codex_storage(token_payload)
-            path = proto._save_codex_credential(email, storage)
+            token_session = proto.BrowserSession(proxy=proxy)
+            try:
+                token_payload = proto.exchange_codex_token(token_session, code, code_verifier)
+            finally:
+                token_session.close()
+            id_claims = proto._parse_id_token(token_payload.get("id_token", ""))
+            effective_email = id_claims.get("email") or email
+            storage = proto.build_codex_storage(token_payload, id_claims)
+            path = proto.save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""), proxy=proxy)
             _t_all.done("success")
-            return proto._codex_result(status="success", ok=True, email=email, file_path=str(path), callback_url=callback_url)
+            return proto._codex_result(status="success", ok=True, email=effective_email, file_path=str(path), callback_url=callback_url, message=f"plan={proto._saved_codex_plan_type(path) or 'unknown'}")
     except AccountUnusableError as exc:
         logger.warning("[Codex][BrowserUse] 账号已废：%s，%s", email, exc.error_code)
         return proto._codex_result(
