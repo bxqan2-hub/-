@@ -4354,10 +4354,10 @@ def list_codex_accounts() -> list[dict]:
                 else:
                     email = without_prefix
             # 推断 plan
-            plan = ""
+            plan = str(content.get("plan_type") or content.get("chatgpt_plan_type") or "").strip().lower()
             if "-" in without_prefix:
                 tail = without_prefix.rsplit("-", 1)[-1].lower()
-                if tail in ("free", "plus", "team", "pro", "enterprise"):
+                if not plan and tail in ("free", "plus", "team", "pro", "enterprise"):
                     plan = tail
             out.append({
                 "filename": fname,

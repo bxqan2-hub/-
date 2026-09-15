@@ -1456,6 +1456,9 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     submit_payload=submit_payload,
                 )
                 msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
+                plan_type = proto._saved_codex_plan_type(file_path)
+                if plan_type:
+                    msg = f"{msg}; plan={plan_type}"
                 _t_all.done("success")
                 return proto._codex_result(
                     status="success",
@@ -1480,6 +1483,9 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     submit_payload=submit_payload,
                 )
                 msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
+                plan_type = proto._saved_codex_plan_type(file_path)
+                if plan_type:
+                    msg = f"{msg}; plan={plan_type}"
                 _t_all.done("success")
                 return proto._codex_result(
                     status="success",

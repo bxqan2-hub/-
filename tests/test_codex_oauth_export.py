@@ -128,6 +128,73 @@ def test_export_checks_each_token_email_and_account_id(export_fixture):
         codex_oauth.build_sub2api_oauth_account(storage, email=storage["email"])
 
 
+def test_callback_auth_payload_nested_credentials_are_extracted_and_plan_is_enriched(monkeypatch):
+    token = "access-fixture"
+    monkeypatch.setattr(
+        "core.chatgpt_plan.check_account_plan",
+        lambda actual, **kwargs: {
+            "ok": True,
+            "current_plan_type": "plus",
+            "subscription_plan": "chatgptplus",
+            "has_active_subscription": True,
+            "has_active_plus_subscription": True,
+            "is_free_plan": False,
+            "checked_at": "2030-01-01T00:00:00",
+            "plan_detection_source": "backend-api/subscriptions",
+            "plan_authority": "authoritative",
+            "plan_confidence": "high",
+            "expires_at": "2030-02-01T00:00:00Z",
+        } if actual == token else {"ok": False},
+    )
+    payload = {"data": {"account": {"credentials": {"access_token": token, "email": "one@example.test"}}}}
+    auth = codex_oauth._extract_cpa_auth_json(payload)
+    assert auth["access_token"] == token
+    enriched = codex_oauth._enrich_codex_auth_json_plan(auth)
+    assert enriched["plan_type"] == "plus"
+    assert enriched["subscription_plan"] == "chatgptplus"
+    assert enriched["subscription_expires_at"] == "2030-02-01T00:00:00Z"
+
+
+def test_cpa_callback_receipt_downloads_credential_and_saves_plan(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex_oauth, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(codex_oauth._cfg, "CODEX_OUTPUT_DIRNAME", "codex_accounts")
+    monkeypatch.setattr(codex_oauth._cfg, "CPA_SAVE_CALLBACK_RECEIPT", True)
+    monkeypatch.setattr(
+        codex_oauth,
+        "download_cpa_codex_auth_text",
+        lambda **_kwargs: (
+            json.dumps({
+                "type": "codex",
+                "email": "one@example.test",
+                "access_token": "access-fixture",
+                "refresh_token": "refresh-fixture",
+            }),
+            "codex-one@example.test-plus.json",
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        "core.chatgpt_plan.check_account_plan",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "current_plan_type": "plus",
+            "checked_at": "2030-01-01T00:00:00",
+            "plan_authority": "authoritative",
+        },
+    )
+    path = codex_oauth._save_cpa_local_record(
+        email="one@example.test",
+        callback_url="http://localhost:1455/auth/callback?code=fixture&state=fixture",
+        auth_url="https://auth.example.test/fixture",
+        state="fixture",
+        submit_payload={"message": "ok"},
+    )
+    assert path.name == "codex-one@example.test-plus.json"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["plan_type"] == "plus"
+    assert saved["plan_checked_at"] == "2030-01-01T00:00:00"
+
+
 def test_access_only_requires_expiry_and_never_uses_id_token_expiry(export_fixture):
     _, storage, _, _ = export_fixture
     storage.pop("refresh_token")

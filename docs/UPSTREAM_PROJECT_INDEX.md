@@ -1,5 +1,11 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-15 Codex callback 后获取套餐
+
+- 继续锁定 GPT-utral-platform `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；本次对照 Cockpit Tools `jlcodes99/cockpit-tools` 的 `codex_quota.rs` 订阅查询链路。OAuth callback URL 只有一次性 code/state，套餐必须在 callback 换得 OAuth 凭证后查询。
+- CPA callback 成功后优先从 CPA auth-files 读取完整凭证；sub2/CPA 回执中的嵌套及 camelCase Token 字段统一提取。凭证落盘前复用本地 `check_account_plan` 的 accounts/check → subscriptions → usage/me 路径写入 `plan_type`、`subscription_plan`、有效期和精简证据元数据，JWT plan 仅作提示。
+- Codex 列表优先读取凭证 JSON 的 `plan_type`，三种 OAuth 入口的成功消息显示 plan；下载不到远端凭证时保留原 callback 回执，不影响授权成功结果。完整路径、测试和安全复核见 `docs/2026-09-15_Codex回调套餐获取修复-report.md`。
+
 ## 2026-09-15 接码重试固定手选供应商并重建一次性授权
 
 - 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；此次先读本地 `core/codex_oauth.py`、`core/roxy_codex_oauth.py`、`core/browser_use_codex_oauth.py` 和 `core/sms_provider.py`。上游锁定版本的授权/手机号协议仍作为顺序参考，不覆盖本地浏览器实现。

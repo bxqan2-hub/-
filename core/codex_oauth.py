@@ -1178,6 +1178,7 @@ def build_codex_storage(token_resp: dict, id_claims: dict) -> dict:
         "account_id": id_claims.get("account_id", ""),
         "last_refresh": last_refresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "email": id_claims.get("email", ""),
+        "plan_type": id_claims.get("plan_type", ""),
         "type": "codex",
         "expired": expired_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -1280,33 +1281,116 @@ def _extract_cpa_auth_json(payload: dict) -> dict | None:
     """
     if not isinstance(payload, dict):
         return None
-    candidates = [
-        payload.get("auth_json"),
-        payload.get("authJson"),
-        payload.get("auth"),
-        payload.get("auth_file"),
-        payload.get("authFile"),
-        payload.get("file"),
-        payload.get("data"),
-    ]
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-    candidates.extend([
-        data.get("auth_json"),
-        data.get("authJson"),
-        data.get("auth"),
-        data.get("auth_file"),
-        data.get("authFile"),
-        data.get("file"),
-    ])
-    for item in candidates:
-        if isinstance(item, dict) and (
-            item.get("type") == "codex"
-            or item.get("access_token")
-            or item.get("refresh_token")
-            or item.get("id_token")
-        ):
-            return item
+    def walk(value, depth: int = 0):
+        if depth > 5:
+            return None
+        if isinstance(value, dict):
+            token_aliases = {
+                "access_token": ("access_token", "accessToken"),
+                "refresh_token": ("refresh_token", "refreshToken"),
+                "id_token": ("id_token", "idToken"),
+            }
+            if value.get("type") == "codex" or any(
+                any(value.get(alias) for alias in aliases)
+                for aliases in token_aliases.values()
+            ):
+                normalized = dict(value)
+                for target, aliases in token_aliases.items():
+                    if not normalized.get(target):
+                        normalized[target] = next((value.get(alias) for alias in aliases if value.get(alias)), "")
+                return normalized
+            for key in ("auth_json", "authJson", "auth", "auth_file", "authFile", "file", "data", "account", "credentials", "result"):
+                found = walk(value.get(key), depth + 1)
+                if found is not None:
+                    return found
+            for item in value.values():
+                found = walk(item, depth + 1)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = walk(item, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    auth = walk(payload)
+    if isinstance(auth, dict):
+        return auth
     return None
+
+
+def _enrich_codex_auth_json_plan(auth_json: dict) -> dict:
+    """用 callback 取得的 OAuth 凭证查询权威套餐，并只写入精简元数据。"""
+    enriched = dict(auth_json)
+    token = str(enriched.get("access_token") or "").strip()
+    claim_plan = str(enriched.get("plan_type") or enriched.get("chatgpt_plan_type") or "").strip()
+    if not claim_plan:
+        for token_name in ("id_token", "access_token"):
+            raw = str(enriched.get(token_name) or "")
+            parts = raw.split(".")
+            if len(parts) < 2:
+                continue
+            claims = _decode_jwt_segment(parts[1])
+            auth_claim = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else {}
+            if isinstance(auth_claim, dict) and auth_claim.get("chatgpt_plan_type"):
+                claim_plan = str(auth_claim["chatgpt_plan_type"]).strip()
+                break
+    if claim_plan and not str(enriched.get("plan_type") or "").strip():
+        enriched["plan_type"] = claim_plan
+    if not token:
+        return enriched
+    try:
+        from core.chatgpt_plan import check_account_plan
+        result = check_account_plan(token, fast_mode=False)
+    except Exception as exc:
+        logger.info("[Codex] callback 套餐查询未完成：%s", type(exc).__name__)
+        return enriched
+    if not isinstance(result, dict):
+        return enriched
+    if result.get("current_plan_type"):
+        enriched["plan_type"] = result["current_plan_type"]
+    if result.get("subscription_plan") is not None:
+        enriched["subscription_plan"] = result["subscription_plan"]
+    for key in (
+        "has_active_subscription", "has_active_plus_subscription", "is_free_plan",
+        "expires_at", "subscription_status", "plan_detection_source",
+        "plan_authority", "plan_confidence",
+    ):
+        if result.get(key) is not None:
+            enriched[key if key != "expires_at" else "subscription_expires_at"] = result[key]
+    if result.get("checked_at"):
+        enriched["plan_checked_at"] = result["checked_at"]
+    return enriched
+
+
+def _callback_credential_from_cpa(email: str, local_filename: str) -> dict | None:
+    """CPA 回调成功后读取已落库凭证；失败时保留本地回执，不吞主流程。"""
+    last_exc = None
+    for attempt in range(1, 4):
+        try:
+            text, _name, _meta = download_cpa_codex_auth_text(email=email, local_filename=local_filename)
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 3:
+                time.sleep(float(attempt))
+    logger.info("[Codex][CPA] callback 已完成但凭证尚未可下载：%s", type(last_exc).__name__ if last_exc else "empty_response")
+    return None
+
+
+def _saved_codex_plan_type(path: Path | None) -> str:
+    """读取本地凭证中的套餐标签，用于回调成功结果展示；不读取或记录 Token。"""
+    if not path:
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("plan_type") or payload.get("chatgpt_plan_type") or "").strip()
 
 
 def _save_cpa_local_record(
@@ -1322,8 +1406,12 @@ def _save_cpa_local_record(
       1) 如果 CPA 返回完整 auth json，保存为可用 codex-邮箱[-plan].json；
       2) 否则按配置保存 callback 提交回执，便于追踪 CPA 侧授权文件。
     """
+    safe_email = (email or "unknown").strip().replace("/", "_").replace("\\", "_")
     auth_json = _extract_cpa_auth_json(submit_payload)
+    if not auth_json:
+        auth_json = _callback_credential_from_cpa(email, f"codex-{safe_email}-cpa-callback.json")
     if auth_json:
+        auth_json = _enrich_codex_auth_json_plan(auth_json)
         effective_email = auth_json.get("email") or email
         plan = auth_json.get("plan_type") or auth_json.get("chatgpt_plan_type") or ""
         return save_codex_credential(auth_json, effective_email, plan)
@@ -1333,7 +1421,6 @@ def _save_cpa_local_record(
 
     out_dir = _PROJECT_ROOT / _cfg.CODEX_OUTPUT_DIRNAME
     out_dir.mkdir(parents=True, exist_ok=True)
-    safe_email = (email or "unknown").strip().replace("/", "_").replace("\\", "_")
     path = out_dir / f"codex-{safe_email}-cpa-callback.json"
     record = {
         "type": "codex_cpa_callback",
@@ -1361,6 +1448,7 @@ def _save_sub2_local_record(
     """本地记录 sub2 授权结果；若 sub2 返回完整 auth json，则保存为可用 codex 凭证。"""
     auth_json = _extract_cpa_auth_json(submit_payload)
     if auth_json:
+        auth_json = _enrich_codex_auth_json_plan(auth_json)
         effective_email = auth_json.get("email") or email
         plan = auth_json.get("plan_type") or auth_json.get("chatgpt_plan_type") or ""
         return save_codex_credential(auth_json, effective_email, plan)
@@ -1563,6 +1651,9 @@ def run_codex_oauth(
                 submit_payload=submit_payload,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
+            plan_type = _saved_codex_plan_type(path)
+            if plan_type:
+                msg = f"{msg}; plan={plan_type}"
             logger.info(f"[Codex][CPA] 成功：{email}，{msg}，本地记录={path or 'disabled'}")
             return _codex_result(
                 status="success",
@@ -1588,6 +1679,9 @@ def run_codex_oauth(
                 submit_payload=submit_payload,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
+            plan_type = _saved_codex_plan_type(path)
+            if plan_type:
+                msg = f"{msg}; plan={plan_type}"
             logger.info(f"[Codex][sub2] 成功：{email}，{msg}，本地记录={path or 'disabled'}")
             return _codex_result(
                 status="success",
