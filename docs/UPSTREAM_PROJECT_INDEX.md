@@ -1,5 +1,11 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-16 注册后密码/2FA 的原窗口 Session 恢复
+
+- 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新读取上游 roxy_registration 与 account_export，SHA-256 分别为 `454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`、`985b99e669711d3de50dd6072ba83f660ac74d5ea156bf84f829c8fb258d0547`。
+- 指定历史任务在浏览器 `Failed to fetch` 后仅恢复后台 AT，原窗口 Cookie 仍为空，实际停在 cookie_import，尚未执行补密码/MFA 写操作。本地原恢复条件只覆盖明确退出登录；开启既有 ENABLE_2FA 时，现在也对 Session 读取超时复用一次同窗恢复，并核对恢复后的邮箱和 Token。
+- 后台 AT 保留既有恢复标记，进入密码/2FA 前明确记录 browser_session_not_restored，不拿独立协议 Token 代替同窗登录态。正常注册、密码页时序、MFA enroll/activate、分轮调度与 UI 保持原实现；证据、安全复核和回归见 `docs/2026-09-16_注册密码2FA会话恢复修复-report.md`。
+
 ## 本次注册页分轮定时扩展（2026-09-16）
 
 - 继续锁定 GPT-utral-platform `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新读取上游注册服务 raw，SHA-256 为 `7eb3fb642e67ab0bbf1424113968c01a689a0cbff8e325e8bf15e15c84d1c5bc`。

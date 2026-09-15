@@ -3368,10 +3368,10 @@ def _snapshot_current_email_otp(email: str) -> str | None:
 
 
 def _recover_chatgpt_session_in_browser(driver, email: str, *, should_stop=None) -> dict:
-    """Re-authenticate once in the current visible Roxy window after confirmed logout."""
+    """Re-authenticate once in the current Roxy window after a session read failure."""
     if callable(should_stop):
         should_stop()
-    logger.warning("%s 检测到登录态失效，切回当前 Roxy 窗口执行一次邮箱 OTP 恢复", _log_prefix(driver))
+    logger.warning("%s 当前窗口 Session 读取未完成，切回同一 Roxy 窗口执行一次邮箱 OTP 恢复", _log_prefix(driver))
     excluded_codes: set[str] = set()
     try:
         historical_otp = _snapshot_current_email_otp(email)
@@ -3434,10 +3434,10 @@ def _fetch_or_recover_chatgpt_session(
     profile_name: str | None = None,
     profile_birthday: str | None = None,
 ) -> dict:
-    """优先从当前浏览器取 AT；已创建账号则用邮箱 OTP 登录恢复 AT。"""
+    """优先恢复同窗 Session；后台 OTP 登录只用于保留已创建账号的 AT。"""
     def stop_check() -> None:
         if callable(should_stop) and should_stop():
-            raise RuntimeError("AT 获取已停止")
+            raise RuntimeError("AT 获取已停止") from None
 
     # OTP 成功后，auth.openai.com 偶尔会短暂停留在“Email verified / already
     # been verified”确认页，而不是立刻跳回 ChatGPT。这个页面代表邮箱验证
@@ -3467,22 +3467,38 @@ def _fetch_or_recover_chatgpt_session(
     except Exception as browser_error:
         if not registration_created:
             raise
-        if isinstance(browser_error, ChatGPTSessionExpiredError):
+        stop_check()
+        requires_browser = bool(_twofa_cfg.ENABLE_2FA)
+        if isinstance(browser_error, ChatGPTSessionExpiredError) or requires_browser:
             try:
-                return _recover_chatgpt_session_in_browser(driver, email, should_stop=should_stop)
-            except Exception as visible_error:
-                logger.warning(
-                    "%s 可见窗口 OTP 恢复失败，改用一次后台协议登录：%s",
-                    _log_prefix(driver),
-                    str(visible_error)[:240],
+                session_info = _recover_chatgpt_session_in_browser(
+                    driver, email,
+                    should_stop=stop_check if callable(should_stop) else None,
                 )
+            except Exception as visible_error:
+                stop_check()
+                logger.warning(
+                    "%s 原窗口 Session 恢复失败；仅尝试一次后台登录保留 AT：stage=browser_session error_type=%s",
+                    _log_prefix(driver),
+                    type(visible_error).__name__,
+                )
+            else:
+                stop_check()
+                if requires_browser:
+                    user = session_info.get("user") if isinstance(session_info, dict) else None
+                    authenticated_email = str(user.get("email") or "").strip() if isinstance(user, dict) else ""
+                    if not authenticated_email or authenticated_email.lower() != email.strip().lower():
+                        raise RuntimeError("stage=browser_session code=browser_session_account_mismatch") from None
+                    token = session_info.get("accessToken")
+                    if not isinstance(token, str) or not token.strip():
+                        raise RuntimeError("stage=browser_session code=browser_session_token_missing") from None
+                return session_info
         logger.warning(
-            "%s 浏览器 session 已失效；停止重复获取 AT，直接执行一次后台邮箱 OTP 登录恢复：%s",
+            "%s 浏览器 Session 读取未完成；执行一次后台邮箱 OTP 登录保留 AT（不恢复原窗口 Cookie）：error_type=%s",
             _log_prefix(driver),
-            str(browser_error)[:300],
+            type(browser_error).__name__,
         )
-        if callable(should_stop) and should_stop():
-            raise
+        stop_check()
         from core.account_liveness import check_account_liveness
 
         recovered = check_account_liveness(
@@ -4039,7 +4055,12 @@ def run_roxy_registration(
             twofa_status = "failed"
             logger.info("[Roxy注册][2FA] ENABLE_2FA=True，复用当前浏览器会话设置 2FA")
             try:
-                from core.account_export import maybe_setup_2fa_result
+                from core.account_export import TwoFASetupError, maybe_setup_2fa_result
+                if session_info.get("_at_recovery") == "email_otp_relogin":
+                    raise TwoFASetupError(
+                        "browser_session", "browser_session_not_restored",
+                        "仅恢复后台 Access Token，原浏览器登录态未恢复；密码/2FA 待补设",
+                    )
                 twofa_proxy = resolve_twofa_proxy(
                     getattr(client, "profile_proxy", None),
                     proxy,
