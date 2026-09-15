@@ -4371,14 +4371,17 @@ def create_app(auth_code: str | None = None) -> Flask:
             if pool.get("available", 0) < count:
                 warning = f"可用邮箱仅 {pool.get('available', 0)} 个，少于任务数 {count}，不足的会失败"
         if schedule_enabled:
-            plan = svc.submit_scheduled_registration(
-                count=count,
-                workers=workers,
-                email_source=requested_source or _email_cfg.EMAIL_SOURCE,
-                delay_min=delay_min,
-                delay_max=delay_max,
-                proxy_mode=requested_proxy_mode or None,
-            )
+            try:
+                plan = svc.submit_scheduled_registration(
+                    count=count,
+                    workers=workers,
+                    email_source=requested_source or _email_cfg.EMAIL_SOURCE,
+                    delay_min=delay_min,
+                    delay_max=delay_max,
+                    proxy_mode=requested_proxy_mode or None,
+                )
+            except ValueError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 409
             return jsonify({
                 "ok": True,
                 "scheduled": True,
