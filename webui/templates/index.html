@@ -2537,6 +2537,7 @@
         <button type="button" class="jobs-tb-btn jobs-tb-btn--retry" id="btnRetrySelectedJobsV2" disabled title="重试选中的失败、已停止或已取消任务">重试选中</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedJobsV2" disabled title="直接删除选中的任务记录和日志，不检查任务状态">删除选中</button>
         <button type="button" class="jobs-tb-btn" id="btnCancelPendingV2" title="把所有排队任务标记为已取消">取消全部排队</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopScheduleV2" title="停止后续分轮，当前已提交任务继续执行">停止分轮</button>
         <button type="button" class="jobs-tb-btn" id="btnRefreshJobsV2" title="手动刷新任务列表">刷新</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnGcCheckAllV2" title="查询所有已拿到 AT 且窗口仍保留的 GC 账号">一键查询 Plus</button>
         <label class="jobs-tb-field">注册数量
@@ -2562,6 +2563,17 @@
             </button>
           </span>
         </label>
+        <label class="jobs-tb-field jobs-tb-field--schedule" title="按并发数分轮提交；每轮全部结束后等待随机时间再开始下一轮">
+          <span><input id="regScheduleV2" type="checkbox"> 分轮定时</span>
+        </label>
+        <label class="jobs-tb-field" title="等待时间范围（秒），例如 10 到 15">
+          等待秒数
+          <span class="el-input-number el-input-number--compact">
+            <input id="regDelayMinV2" type="number" min="0" step="0.1" value="10" inputmode="decimal" aria-label="最短等待秒数">
+            <span class="jobs-tb-range-sep">-</span>
+            <input id="regDelayMaxV2" type="number" min="0" step="0.1" value="15" inputmode="decimal" aria-label="最长等待秒数">
+          </span>
+        </label>
         <label class="jobs-tb-field">注册邮箱
           <select id="regEmailSourceV2" class="jobs-tb-select">
             <option value="generic_api">通用 API 邮箱池</option>
@@ -2573,6 +2585,7 @@
         <button type="button" class="jobs-tb-btn jobs-tb-btn--local" id="btnStartLocalProxyV2" title="仅使用本地静态或系统代理，不调用代理 API">本地代理注册</button>
       </div>
       <div id="regWarnV2"></div>
+      <div id="regScheduleStatusV2" class="jobs-schedule-status" aria-live="polite"></div>
       <div class="jobs-table-v2-wrap">
         <table class="jobs-table-v2">
           <colgroup>
@@ -3861,6 +3874,9 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn, sourceE
   const count = parseInt((countEl?.value || '1'), 10);
   const workers = parseInt((workersEl?.value || '10'), 10);
   const email_source = (sourceEl?.value || '').trim();
+  const schedule_enabled = Boolean($('#regScheduleV2')?.checked);
+  const delay_min = Number($('#regDelayMinV2')?.value || 0);
+  const delay_max = Number($('#regDelayMaxV2')?.value || delay_min);
   const activeCount = Number(JOB_STATUS_COUNTS.active || 0);
   if (activeCount > 0) {
     const ok = confirm(
@@ -3879,9 +3895,10 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn, sourceE
   const b2 = $('#btnStartV2'); if (b2) b2.disabled = true;
   const localBtn = $('#btnStartLocalProxyV2'); if (localBtn) localBtn.disabled = true;
   try {
-    const r = await api('/api/jobs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({count, workers, email_source, proxy_mode: proxyMode}) });
+    const r = await api('/api/jobs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({count, workers, email_source, proxy_mode: proxyMode, schedule_enabled, delay_min, delay_max}) });
     const modeText = `${r.gc_mode ? ' · GC 模式：每个任务独立保留 Roxy 窗口' : ''}${proxyMode === 'local' ? ' · 本地代理' : ''}`;
-    const warnHtml = r.warning ? `<div class="banner warn">${esc(r.warning)}（本次并发 ${r.workers || workers}）${modeText}</div>` : `<div class="banner info">已提交 ${r.submitted} 个任务，本次并发 ${r.workers || workers}${modeText}</div>`;
+    const scheduleText = r.scheduled ? `已创建分轮计划：目标 ${r.target} 个，${r.rounds} 轮；每轮 ${r.workers} 个，等待 ${r.delay_min}-${r.delay_max} 秒随机间隔` : `已提交 ${r.submitted} 个任务，本次并发 ${r.workers || workers}`;
+    const warnHtml = r.warning ? `<div class="banner warn">${esc(r.warning)}（${scheduleText}）${modeText}</div>` : `<div class="banner info">${scheduleText}${modeText}</div>`;
     const warnEl = $('#regWarnV2'); if (warnEl) warnEl.innerHTML = warnHtml;
     const c2 = $('#regCountV2'); if (c2) c2.value = count;
     const w2 = $('#regWorkersV2'); if (w2) w2.value = workers;
@@ -4008,6 +4025,8 @@ function bindJobsBodyEvents(bodyEl) {
   if (retryV2) retryV2.addEventListener('click', retrySelectedJobs);
   const cancelV2 = $('#btnCancelPendingV2');
   if (cancelV2) cancelV2.addEventListener('click', () => cancelAllPendingJobs(cancelV2));
+  const stopScheduleV2 = $('#btnStopScheduleV2');
+  if (stopScheduleV2) stopScheduleV2.addEventListener('click', stopScheduledRegistration);
   const refreshV2 = $('#btnRefreshJobsV2');
   if (refreshV2) refreshV2.addEventListener('click', refreshJobs);
   const gcCheckAllV2 = $('#btnGcCheckAllV2');
@@ -4108,6 +4127,23 @@ async function refreshJobs() {
     const nextJobs = res.items || [];
     JOBS_TOTAL = Number(res.total || nextJobs.length || 0);
     JOB_STATUS_COUNTS = res.status_counts || {};
+    let schedule = {};
+    try { schedule = await api('/api/jobs/schedule'); } catch (scheduleError) {}
+    const scheduleEl = $('#regScheduleStatusV2');
+    const stopScheduleBtn = $('#btnStopScheduleV2');
+    const scheduleActive = ['running', 'waiting', 'stopping'].includes(String(schedule.status || ''));
+    if (scheduleEl) {
+      if (scheduleActive) {
+        const waitText = schedule.status === 'waiting' && schedule.wait_until
+          ? `，下一轮约 ${Math.max(0, Math.ceil(Number(schedule.wait_until) - Date.now() / 1000))} 秒后`
+          : '';
+        scheduleEl.textContent = `分轮计划 ${schedule.schedule_id}：第 ${schedule.round}/${schedule.rounds} 轮，已提交 ${schedule.submitted}/${schedule.target}${waitText}`;
+      } else if (schedule.status) {
+        const label = schedule.status === 'completed' ? '已完成' : schedule.status === 'stopped' ? '已停止' : '异常结束';
+        scheduleEl.textContent = `分轮计划${label}：${schedule.submitted || 0}/${schedule.target || 0}`;
+      } else scheduleEl.textContent = '';
+    }
+    if (stopScheduleBtn) stopScheduleBtn.disabled = !scheduleActive || schedule.status === 'stopping';
     const gcAllBtn = $('#btnGcCheckAllV2');
     if (gcAllBtn && !gcAllBtn.dataset.loading) {
       const checking = Number(JOB_STATUS_COUNTS.gc_checking || 0);
@@ -4123,6 +4159,19 @@ async function refreshJobs() {
     }
     loadSummary();
   } catch(e) {}
+}
+
+async function stopScheduledRegistration() {
+  try {
+    const schedule = await api('/api/jobs/schedule');
+    if (!schedule.schedule_id || !['running', 'waiting'].includes(schedule.status)) return;
+    const r = await api('/api/jobs/schedule/stop', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({schedule_id: schedule.schedule_id}),
+    });
+    showToast(`已停止后续分轮，当前已提交 ${r.submitted || 0} 个任务`);
+    refreshJobs();
+  } catch (e) { showToast('停止分轮失败: ' + e.message); }
 }
 
 function updateModalScrollLock() {

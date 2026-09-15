@@ -48,6 +48,49 @@ class GPTMailWebUiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         submit_registration.assert_called_once_with(count=1, workers=1)
 
+    @patch("webui.app.svc.submit_scheduled_registration", return_value={
+        "schedule_id": "schedule-1", "target": 25, "workers": 10,
+        "rounds": 3, "delay_min": 10.0, "delay_max": 15.0,
+    })
+    def test_jobs_can_start_scheduled_registration_rounds(self, submit_scheduled):
+        with patch.object(email_config, "USE_EMAIL_SERVICE", True), patch.object(
+            email_config, "EMAIL_SOURCE", "gptmail"
+        ), patch.object(email_config, "GPTMAIL_API_KEY", "key-123"):
+            response = self.client.post(
+                "/api/jobs",
+                json={
+                    "count": 25,
+                    "workers": 10,
+                    "schedule_enabled": True,
+                    "delay_min": 10,
+                    "delay_max": 15,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["scheduled"])
+        self.assertEqual(payload["rounds"], 3)
+        submit_scheduled.assert_called_once_with(
+            count=25,
+            workers=10,
+            email_source="gptmail",
+            delay_min=10.0,
+            delay_max=15.0,
+            proxy_mode=None,
+        )
+
+    @patch("webui.app.svc.submit_registration")
+    def test_jobs_rejects_invalid_scheduled_wait_range(self, submit_registration):
+        response = self.client.post(
+            "/api/jobs",
+            json={"count": 2, "workers": 1, "schedule_enabled": True, "delay_min": 15, "delay_max": 10},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("等待时间范围无效", response.get_json()["error"])
+        submit_registration.assert_not_called()
+
     @patch("webui.app.db.outlook_pool_summary")
     @patch("webui.app.svc.submit_registration", return_value=[{"id": 1}])
     def test_jobs_use_registration_page_worker_count_for_roxy(self, submit_registration, outlook_pool_summary):

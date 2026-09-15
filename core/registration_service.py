@@ -11,7 +11,11 @@
 """
 import json
 import logging
+import math
+import random
 import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +39,11 @@ _STOP_EVENTS: dict[int, threading.Event] = {}
 _ACTIVE_JOBS: set[int] = set()
 _STOP_LOCK = threading.Lock()
 _THREAD_CTX = threading.local()
+
+# 分轮注册计划只负责按轮次提交已有注册任务，不改变单任务执行路径。
+_SCHEDULE_STATE: dict[str, Any] = {}
+_SCHEDULE_STOP = threading.Event()
+_SCHEDULE_LOCK = threading.Lock()
 
 
 class StopRequested(RuntimeError):
@@ -657,6 +666,147 @@ def submit_registration(
         f"[Service] 已提交 {len(jobs)} 个注册任务，源={email_source}，代理模式={proxy_mode or 'config'}，workers={effective_workers}"
     )
     return jobs
+
+
+def _wait_for_registration_round(job_ids: list[int]) -> bool:
+    """等待一轮任务全部进入终态；任务本身仍由原线程池执行。"""
+    terminal = {"success", "failed", "cancelled", "stopped", "gc_waiting", "gc_checking"}
+    while job_ids:
+        if _SCHEDULE_STOP.is_set():
+            return False
+        remaining = []
+        with _STOP_LOCK:
+            active = _ACTIVE_JOBS.intersection(job_ids)
+        for job_id in job_ids:
+            job = db.get_job(int(job_id))
+            if job_id in active or (job and str(job.get("status") or "").lower() not in terminal):
+                remaining.append(job_id)
+        if not remaining:
+            return True
+        job_ids = remaining
+        _SCHEDULE_STOP.wait(0.25)
+    return True
+
+
+def _run_scheduled_registration(schedule_id: str, *, count: int, email_source: str,
+                                workers: int, delay_min: float, delay_max: float,
+                                proxy_mode: str | None) -> None:
+    """后台执行分轮注册；每轮完成后再等待随机区间并提交下一轮。"""
+    remaining = count
+    round_no = 0
+    submitted = 0
+    try:
+        while remaining > 0:
+            with _SCHEDULE_LOCK:
+                if _SCHEDULE_STOP.is_set():
+                    break
+                round_no += 1
+                round_count = min(workers, remaining)
+                jobs = submit_registration(
+                    count=round_count,
+                    email_source=email_source,
+                    workers=workers,
+                    proxy_mode=proxy_mode,
+                )
+                ids = [int(job["id"]) for job in jobs]
+                submitted += len(ids)
+                _SCHEDULE_STATE.update({
+                    "status": "running", "round": round_no,
+                    "submitted": submitted, "wait_until": None,
+                })
+            if len(ids) != round_count:
+                raise RuntimeError("round_submission_incomplete")
+            logger.info(
+                "[Service] 分轮注册 %s：第 %s 轮提交 %s 个，剩余 %s",
+                schedule_id, round_no, len(ids), max(0, remaining - round_count),
+            )
+            if not _wait_for_registration_round(ids):
+                break
+            remaining -= round_count
+            if remaining > 0:
+                delay = random.uniform(delay_min, delay_max)
+                with _SCHEDULE_LOCK:
+                    if _SCHEDULE_STOP.is_set():
+                        break
+                    _SCHEDULE_STATE.update({"status": "waiting", "wait_until": time.time() + delay})
+                logger.info("[Service] 分轮注册 %s：本轮完成，等待 %.2f 秒", schedule_id, delay)
+                if _SCHEDULE_STOP.wait(delay):
+                    break
+        with _SCHEDULE_LOCK:
+            _SCHEDULE_STATE.update({
+                "status": "stopped" if _SCHEDULE_STOP.is_set() else "completed",
+                "submitted": submitted, "wait_until": None,
+            })
+    except Exception as exc:
+        logger.error("[Service] 分轮注册 %s 异常：%s", schedule_id, type(exc).__name__)
+        with _SCHEDULE_LOCK:
+            _SCHEDULE_STATE.update({"status": "failed", "error": type(exc).__name__, "wait_until": None})
+
+
+def get_scheduled_registration() -> dict[str, Any]:
+    """只返回当前计划的调度进度，不读取或暴露账号凭据。"""
+    with _SCHEDULE_LOCK:
+        return dict(_SCHEDULE_STATE)
+
+
+def stop_scheduled_registration(schedule_id: str) -> dict[str, Any]:
+    """停止后续轮次，已经提交的注册任务继续按原规则执行。"""
+    with _SCHEDULE_LOCK:
+        if schedule_id != _SCHEDULE_STATE.get("schedule_id"):
+            raise ValueError("分轮计划已更新，请刷新后重试")
+        if _SCHEDULE_STATE.get("status") in {"running", "waiting", "stopping"}:
+            _SCHEDULE_STOP.set()
+            _SCHEDULE_STATE["status"] = "stopping"
+        return dict(_SCHEDULE_STATE)
+
+
+def submit_scheduled_registration(
+    count: int,
+    email_source: str | None = None,
+    workers: int | None = None,
+    delay_min: float = 0,
+    delay_max: float = 0,
+    proxy_mode: str | None = None,
+) -> dict[str, Any]:
+    """创建分轮注册计划；普通 submit_registration 路径保持不变。"""
+    if email_source is None:
+        from config import email as _email_cfg
+        email_source = _email_cfg.EMAIL_SOURCE
+    count = int(count)
+    workers = _normalize_workers(workers)
+    delay_min = float(delay_min)
+    delay_max = float(delay_max)
+    if count < 1 or not all(math.isfinite(v) for v in (delay_min, delay_max)) or delay_min < 0 or delay_max < delay_min:
+        raise ValueError("分轮注册参数无效")
+    schedule_id = uuid.uuid4().hex[:12]
+    plan = {
+        "schedule_id": schedule_id, "status": "running", "target": count,
+        "workers": workers, "rounds": (count + workers - 1) // workers,
+        "round": 0, "submitted": 0, "wait_until": None,
+        "delay_min": delay_min, "delay_max": delay_max,
+    }
+    with _SCHEDULE_LOCK:
+        if _SCHEDULE_STATE.get("status") in {"running", "waiting", "stopping"}:
+            raise ValueError("已有分轮计划在运行，请先停止该计划")
+        _SCHEDULE_STOP.clear()
+        _SCHEDULE_STATE.clear()
+        _SCHEDULE_STATE.update(plan)
+        thread = threading.Thread(
+            target=_run_scheduled_registration,
+            kwargs={
+                "schedule_id": schedule_id, "count": count,
+                "email_source": str(email_source or ""), "workers": workers,
+                "delay_min": delay_min, "delay_max": delay_max,
+                "proxy_mode": proxy_mode,
+            },
+            name=f"reg-schedule-{schedule_id}", daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception:
+            _SCHEDULE_STATE["status"] = "failed"
+            raise
+    return plan
 
 
 def _account_for_job(job: dict) -> dict | None:

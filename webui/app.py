@@ -12,6 +12,7 @@ Flask 本地控制台。
 """
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -4186,6 +4187,18 @@ def create_app(auth_code: str | None = None) -> Flask:
         requested_proxy_mode = str(data.get("proxy_mode") or "").strip().lower()
         if requested_proxy_mode not in {"", "local"}:
             return jsonify({"ok": False, "error": "proxy_mode 只支持 local"}), 400
+        schedule_enabled = bool(data.get("schedule_enabled", False))
+        delay_min = delay_max = 0.0
+        if schedule_enabled:
+            try:
+                delay_min = float(data.get("delay_min", 0) or 0)
+                delay_max = float(data.get("delay_max", delay_min) or 0)
+            except (TypeError, ValueError, OverflowError):
+                return jsonify({"ok": False, "error": "等待时间必须是非负数字"}), 400
+            if not all(math.isfinite(value) for value in (delay_min, delay_max)) or delay_min < 0 or delay_max < delay_min:
+                return jsonify({"ok": False, "error": "等待时间范围无效：结束值必须大于等于开始值"}), 400
+        if schedule_enabled and selected_email_items:
+            return jsonify({"ok": False, "error": "分轮注册请使用邮箱池自动领取，不能与指定邮箱同时使用"}), 400
         if selected_email_items:
             allowed_sources = {"outlook", "generic_api", "domain_api", "inbox_mate", "cloudflare_domain"}
             normalized_items = []
@@ -4246,6 +4259,8 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "ok": False,
                     "error": "手动模式建议每次只跑 1 个任务（同一 REGISTER_EMAIL）。请把数量设为 1。",
                 }), 400
+            if schedule_enabled:
+                return jsonify({"ok": False, "error": "手动验证码模式不支持分轮注册，请开启自动取邮箱+收码"}), 400
             submit_kwargs = {"count": count, "workers": workers}
             if requested_proxy_mode:
                 submit_kwargs["proxy_mode"] = requested_proxy_mode
@@ -4355,6 +4370,25 @@ def create_app(auth_code: str | None = None) -> Flask:
             warning = ""
             if pool.get("available", 0) < count:
                 warning = f"可用邮箱仅 {pool.get('available', 0)} 个，少于任务数 {count}，不足的会失败"
+        if schedule_enabled:
+            plan = svc.submit_scheduled_registration(
+                count=count,
+                workers=workers,
+                email_source=requested_source or _email_cfg.EMAIL_SOURCE,
+                delay_min=delay_min,
+                delay_max=delay_max,
+                proxy_mode=requested_proxy_mode or None,
+            )
+            return jsonify({
+                "ok": True,
+                "scheduled": True,
+                "submitted": 0,
+                "jobs": [],
+                "warning": warning,
+                "workers": plan["workers"],
+                "gc_mode": gc_mode,
+                **plan,
+            })
         submit_kwargs = {"count": count, "workers": workers}
         if requested_source:
             submit_kwargs["email_source"] = requested_source
@@ -4393,6 +4427,21 @@ def create_app(auth_code: str | None = None) -> Flask:
         """取消所有还在排队（status=pending）的任务。已在 running 的不动。"""
         cancelled = svc.cancel_pending_jobs()
         return jsonify({"ok": True, "cancelled": cancelled})
+
+    @app.get("/api/jobs/schedule")
+    def api_jobs_schedule():
+        """返回注册页当前分轮计划进度。"""
+        return jsonify(svc.get_scheduled_registration())
+
+    @app.post("/api/jobs/schedule/stop")
+    def api_jobs_schedule_stop():
+        """停止后续分轮，不中断已提交的当前轮任务。"""
+        data = request.get_json(silent=True) or {}
+        try:
+            result = svc.stop_scheduled_registration(str(data.get("schedule_id") or ""))
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        return jsonify({"ok": True, **result})
 
     @app.post("/api/jobs/<int:job_id>/stop")
     def api_job_stop(job_id: int):

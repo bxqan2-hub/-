@@ -1,5 +1,11 @@
 # 上游项目索引：GPT-utral-platform
 
+## 本次注册页分轮定时扩展（2026-09-16）
+
+- 继续锁定 GPT-utral-platform `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新读取上游注册服务 raw，SHA-256 为 `7eb3fb642e67ab0bbf1424113968c01a689a0cbff8e325e8bf15e15c84d1c5bc`。
+- 上游 `submit_registration` 仅负责一次性批量提交。本地保留其原路径，新增 `core/registration_service.py` 分轮调度入口：并发数作为每轮数量，当前轮终态后按随机等待区间提交下一轮。
+- WebUI 注册页新增目标数量、并发数量、分轮开关、等待范围及停止后续轮次控件；普通注册、邮箱领取、浏览器、密码和 2FA 路径未改。验证与全量回归边界见 `docs/2026-09-16_注册分轮定时扩展-report.md`。
+
 ## 2026-09-15 Codex callback 后获取套餐
 
 - 继续锁定 GPT-utral-platform `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；本次对照 Cockpit Tools `jlcodes99/cockpit-tools` 的 `codex_quota.rs` 订阅查询链路。OAuth callback URL 只有一次性 code/state，套餐必须在 callback 换得 OAuth 凭证后查询。
