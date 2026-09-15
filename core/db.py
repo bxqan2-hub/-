@@ -69,6 +69,13 @@ _LEGACY_JOBS_JSON = _LEGACY_DATA_DIR / "registration_jobs.json"
 _LOCK = threading.RLock()
 logger = logging.getLogger(__name__)
 
+# 账号文件包含完整 token/套餐元数据，WebUI 轮询时重复从磁盘解析它会放大
+# JSON 体积带来的 IO 和反序列化开销。缓存只复用磁盘快照；调用方拿到的是
+# 浅拷贝行，既避免重复解析，也不改变现有 read-modify-write 语义。
+_ACCOUNTS_READ_CACHE: tuple[tuple[int, int], list[dict]] | None = None
+_VIEWER_LAST_RENDER_AT = 0.0
+_VIEWER_RENDER_MIN_INTERVAL = 1.0
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -205,8 +212,17 @@ def _viewer_snapshot(outlook_rows: list[dict], account_rows: list[dict]) -> dict
     }
 
 
-def _render_static_viewer(outlook_rows: list[dict] | None = None, account_rows: list[dict] | None = None) -> Path:
+def _render_static_viewer(
+    outlook_rows: list[dict] | None = None,
+    account_rows: list[dict] | None = None,
+    *,
+    force: bool = False,
+) -> Path:
     """生成可直接双击打开的静态账号查看页。"""
+    global _VIEWER_LAST_RENDER_AT
+    now = time.monotonic()
+    if not force and _VIEWER_HTML.exists() and now - _VIEWER_LAST_RENDER_AT < _VIEWER_RENDER_MIN_INTERVAL:
+        return _VIEWER_HTML
     outlook_rows = _load_outlook() if outlook_rows is None else outlook_rows
     account_rows = _load_accounts() if account_rows is None else account_rows
     snapshot = _viewer_snapshot(outlook_rows, account_rows)
@@ -482,6 +498,7 @@ render();
     tmp.write_text(html_text, encoding="utf-8")
     try:
         tmp.replace(_VIEWER_HTML)
+        _VIEWER_LAST_RENDER_AT = time.monotonic()
         return _VIEWER_HTML
     except PermissionError:
         # Windows 下如果目标 HTML 正被浏览器或编辑器短暂占用，原子替换可能失败。
@@ -492,6 +509,7 @@ render();
                 tmp.unlink()
             except OSError:
                 pass
+            _VIEWER_LAST_RENDER_AT = time.monotonic()
             return _VIEWER_HTML
         except PermissionError:
             fallback = _DATA_DIR / f"accounts_viewer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
@@ -500,6 +518,7 @@ render();
                 tmp.unlink()
             except OSError:
                 pass
+            _VIEWER_LAST_RENDER_AT = time.monotonic()
             return fallback
 
 
@@ -529,16 +548,46 @@ def _save_generic_api_emails(rows: list[dict]) -> None:
 
 
 def _load_accounts() -> list[dict]:
-    rows = _read_json(_ACCOUNTS_JSON, None)
+    global _ACCOUNTS_READ_CACHE
+    source = _ACCOUNTS_JSON
+    try:
+        stat = source.stat()
+        primary_signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        primary_signature = (0, 0)
+    signature = primary_signature
+    cached = _ACCOUNTS_READ_CACHE
+    if cached is not None and cached[0] == signature:
+        return [dict(row) for row in cached[1]]
+    rows = _read_json(source, None)
     if not isinstance(rows, list):
-        rows = _read_json(_LEGACY_ACCOUNTS_JSON, [])
-    return rows if isinstance(rows, list) else []
+        source = _LEGACY_ACCOUNTS_JSON
+        try:
+            stat = source.stat()
+            signature = (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            signature = (0, 0)
+        cached = _ACCOUNTS_READ_CACHE
+        if cached is not None and cached[0] == signature:
+            return [dict(row) for row in cached[1]]
+        rows = _read_json(source, [])
+    if not isinstance(rows, list):
+        rows = []
+    snapshot = [dict(row) for row in rows if isinstance(row, dict)]
+    _ACCOUNTS_READ_CACHE = (signature, snapshot)
+    return [dict(row) for row in snapshot]
 
 
 def _save_accounts(rows: list[dict]) -> None:
+    global _ACCOUNTS_READ_CACHE
     for row in rows:
         row["copy_line"] = _account_line(row)
     _write_json(_ACCOUNTS_JSON, rows)
+    try:
+        stat = _ACCOUNTS_JSON.stat()
+        _ACCOUNTS_READ_CACHE = ((int(stat.st_mtime_ns), int(stat.st_size)), [dict(row) for row in rows])
+    except OSError:
+        _ACCOUNTS_READ_CACHE = None
     _sync_accounts_txt(rows)
     _sync_tokens_txt(rows)
     _render_static_viewer(account_rows=rows)
@@ -2379,60 +2428,27 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         # updated_at 目前只有秒级精度；一次快速查询可能在同一秒内完成
         # queued -> running -> success/failed，导致 revision 不变，前端跳过合并状态，
         # 页面就会一直停在“查询中”。把轻量状态本身纳入签名，保证状态变化可被轮询发现。
-        revision_payload = json.dumps(
-            [
-                {
-                    "id": row.get("id"),
-                    "updated_at": row.get("updated_at"),
-                    "plan_check_status": row.get("plan_check_status"),
-                    "plan_check_ok": row.get("plan_check_ok"),
-                    "plan_check_error": row.get("plan_check_error"),
-                    "plan_check_queued_at": row.get("plan_check_queued_at"),
-                    "plan_check_started_at": row.get("plan_check_started_at"),
-                    "plan_check_completed_at": row.get("plan_check_completed_at"),
-                    "plan_checked_at": row.get("plan_checked_at"),
-                    "plan_last_success_at": row.get("plan_last_success_at"),
-                    "plan_check_proxy_country": row.get("plan_check_proxy_country"),
-                    "at_validity_status": row.get("at_validity_status"),
-                    "at_validity_checked_at": row.get("at_validity_checked_at"),
-                    "at_validity_error_code": row.get("at_validity_error_code"),
-                    "at_validity_network_route": row.get("at_validity_network_route"),
-                    "at_validity_proxy_used": row.get("at_validity_proxy_used"),
-                    "current_plan_type": row.get("current_plan_type"),
-                    "plan_type": row.get("plan_type"),
-                    "subscription_plan": row.get("subscription_plan"),
-                    "has_active_plus_subscription": row.get("has_active_plus_subscription"),
-                    "plan_import_hint": row.get("plan_import_hint"),
-                    "plan_import_hint_at": row.get("plan_import_hint_at"),
-                    "plus_trial_eligible": row.get("plus_trial_eligible"),
-                    "checkout_kind_status": row.get("checkout_kind_status"),
-                    "checkout_kind": row.get("checkout_kind"),
-                    "gcash_status": row.get("gcash_status"),
-                    "gcash_ok": row.get("gcash_ok"),
-                    "gcash_eligible": row.get("gcash_eligible"),
-                    "gopay_status": row.get("gopay_status"),
-                    "gopay_ok": row.get("gopay_ok"),
-                    "gopay_eligible": row.get("gopay_eligible"),
-                    "oaics_extract_status": row.get("oaics_extract_status"),
-                    "oaics_extract_ok": row.get("oaics_extract_ok"),
-                    "oaics_extract_error": row.get("oaics_extract_error"),
-                    "oaics_extract_stage": row.get("oaics_extract_stage"),
-                    "oaics_extract_log": row.get("oaics_extract_log"),
-                    "oaics_link": row.get("oaics_link"),
-                    "jp_trial_status": row.get("jp_trial_status") or "unchecked",
-                    "jp_trial_eligible": row.get("jp_trial_eligible"),
-                    "jp_trial_error": row.get("jp_trial_error"),
-                    "jp_trial_checked_at": row.get("jp_trial_checked_at"),
-                    "codex_status": row.get("codex_status"),
-                    "codex_agent_status": row.get("codex_agent_status"),
-                }
-                for row in all_rows
-            ],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        revision_fields = (
+            "id", "updated_at", "plan_check_status", "plan_check_ok", "plan_check_error",
+            "plan_check_queued_at", "plan_check_started_at", "plan_check_completed_at",
+            "plan_checked_at", "plan_last_success_at", "plan_check_proxy_country",
+            "at_validity_status", "at_validity_checked_at", "at_validity_error_code",
+            "at_validity_network_route", "at_validity_proxy_used", "current_plan_type",
+            "plan_type", "subscription_plan", "has_active_plus_subscription", "plan_import_hint",
+            "plan_import_hint_at", "plus_trial_eligible", "checkout_kind_status", "checkout_kind",
+            "gcash_status", "gcash_ok", "gcash_eligible", "gopay_status", "gopay_ok",
+            "gopay_eligible", "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
+            "oaics_extract_stage", "oaics_extract_log", "oaics_link", "jp_trial_status",
+            "jp_trial_eligible", "jp_trial_error", "jp_trial_checked_at", "codex_status",
+            "codex_agent_status",
         )
-        revision_sig = hashlib.sha1(revision_payload.encode("utf-8")).hexdigest()[:12]
+        revision_hash = hashlib.sha1()
+        for row in all_rows:
+            for key in revision_fields:
+                revision_hash.update(json.dumps(row.get(key), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+                revision_hash.update(b"\x1f")
+            revision_hash.update(b"\x1e")
+        revision_sig = revision_hash.hexdigest()[:12]
         return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}:{revision_sig}"}
 
 
@@ -4875,7 +4891,7 @@ def refresh_static_viewer() -> Path:
         _sync_outlook_txt(outlook_rows)
         _sync_accounts_txt(account_rows)
         _sync_tokens_txt(account_rows)
-        return _render_static_viewer(outlook_rows=outlook_rows, account_rows=account_rows)
+        return _render_static_viewer(outlook_rows=outlook_rows, account_rows=account_rows, force=True)
 
 
 # ============================================================
