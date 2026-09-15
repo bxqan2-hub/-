@@ -77,6 +77,27 @@ class SmsProviderConfigurationTests(unittest.TestCase):
         self.assertEqual(args["params"]["api_key"], "bower-secret")
         self.assertEqual(http.get.call_args.args[0], "https://smsbower.page/stubs/handler_api.php")
 
+    def test_smsbower_retry_keeps_selected_country_and_provider_id(self):
+        """换号重试时，沿用界面选定的国家和 SMSBower 供应商档位。"""
+        http = unittest.mock.MagicMock()
+        first = unittest.mock.Mock(status_code=200, text="ACCESS_NUMBER:activation-1:15551230001")
+        second = unittest.mock.Mock(status_code=200, text="ACCESS_NUMBER:activation-2:15551230002")
+        http.get.side_effect = [first, second]
+        with (
+            patch.object(sms_provider._cfg, "SMS_PROVIDER", "smsbower"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_BASE", "https://smsbower.page/stubs/handler_api.php"),
+            patch.object(sms_provider._cfg, "SMSBOWER_API_KEY", "bower-secret"),
+            patch.object(sms_provider._cfg, "SMS_SERVICE", "dr"),
+            patch.object(sms_provider._cfg, "SMS_COUNTRY", "187"),
+        ):
+            sms_provider.acquire_number(http=http, country="187", provider_id="3370")
+            sms_provider.acquire_number(http=http, country="187", provider_id="3370")
+
+        calls = [call.kwargs["params"] for call in http.get.call_args_list]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([params["country"] for params in calls], ["187", "187"])
+        self.assertEqual([params["providerIds"] for params in calls], ["3370", "3370"])
+
     def test_smsbower_price_tiers_keep_all_service_levels(self):
         http = unittest.mock.MagicMock()
 

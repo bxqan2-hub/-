@@ -241,6 +241,7 @@ def acquire_number(
     country: str | None = None,
     max_price: str | float | None = None,
     excluded_countries: set[str] | list[str] | tuple[str, ...] | None = None,
+    provider_id: str | None = None,
 ) -> tuple[str, str]:
     """通过 getNumber 获取一个 HeroSMS 号码。"""
     validate_configuration()
@@ -292,7 +293,10 @@ def acquire_number(
             }
             if price_limit:
                 params["maxPrice"] = price_limit
-            supplier_id = str(getattr(_cfg, "SMSBOWER_PROVIDER_ID", "") or "").strip() if _provider_name() == "smsbower" else ""
+            supplier_id = (
+                str(provider_id if provider_id is not None else getattr(_cfg, "SMSBOWER_PROVIDER_ID", "") or "").strip()
+                if _provider_name() == "smsbower" else ""
+            )
             if supplier_id:
                 if not supplier_id.isdigit() or country_strategy == "auto":
                     raise SmsProviderConfigurationError("指定 SMSBower 供应商时请选择固定国家和数字供应商 ID")

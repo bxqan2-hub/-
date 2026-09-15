@@ -865,7 +865,7 @@ def _submit_email_otp(session: BrowserSession, code: str) -> None:
 
 def _sms_provider_name() -> str:
     """当前接码通道名，仅用于 Codex 流程日志。"""
-    return "herosms"
+    return sms_provider._provider_name()
 
 
 def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "[Codex]") -> None:
@@ -888,6 +888,8 @@ def _do_phone_verification(session: BrowserSession) -> None:
     http = sms_provider._http()
     max_retries = _cfg.SMS_MAX_RETRIES
     provider = _sms_provider_name()
+    selected_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "auto") or "auto").strip()
+    selected_supplier = str(getattr(sms_provider._cfg, "SMSBOWER_PROVIDER_ID", "") or "").strip()
     try:
         last_err = None
         failed_country_ids: set[str] = set()
@@ -897,7 +899,9 @@ def _do_phone_verification(session: BrowserSession) -> None:
             try:
                 activation_id, phone = sms_provider.acquire_number(
                     http,
-                    excluded_countries=failed_country_ids,
+                    country=selected_country,
+                    excluded_countries=(failed_country_ids if selected_country.lower() == "auto" else set()),
+                    provider_id=selected_supplier,
                 )
                 activation_country = sms_provider.activation_country(activation_id)
                 logger.info(

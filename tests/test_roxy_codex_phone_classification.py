@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from contextlib import ExitStack
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -133,6 +134,60 @@ class RoxyCodexPhoneClassificationTests(unittest.TestCase):
 
         force_submit.assert_called_once_with(driver)
         self.assertGreaterEqual(clock[0], 120)
+
+    def test_retry_keeps_manual_sms_selection_and_restarts_authorization(self):
+        """手机号收不到码时，重取同国家/供应商号码并要求外层重建授权事务。"""
+        driver = MagicMock()
+        http = MagicMock()
+        restart_authorization = MagicMock()
+        acquire = MagicMock(side_effect=[("activation-1", "15551230001"), ("activation-2", "15551230002")])
+
+        with ExitStack() as stack:
+            for target, kwargs in (
+                (roxy_codex_oauth.sms_provider._cfg, {"SMS_COUNTRY": "187", "SMSBOWER_PROVIDER_ID": "3370", "SMS_MAX_RETRIES": 2}),
+            ):
+                for name, value in kwargs.items():
+                    stack.enter_context(patch.object(target, name, value))
+            patches = (
+                patch.object(roxy_codex_oauth, "_has_strict_add_phone_form", return_value=True),
+                patch.object(roxy_codex_oauth, "_is_phone_code_page", return_value=False),
+                patch.object(roxy_codex_oauth.sms_provider, "validate_configuration", return_value="smsbower"),
+                patch.object(roxy_codex_oauth.sms_provider, "_http", return_value=http),
+                patch.object(roxy_codex_oauth.sms_provider, "acquire_number", acquire),
+                patch.object(roxy_codex_oauth.sms_provider, "activation_country", return_value="187"),
+                patch.object(roxy_codex_oauth.sms_provider, "cancel"),
+                patch.object(roxy_codex_oauth.sms_provider, "complete"),
+                patch.object(roxy_codex_oauth, "_ensure_add_phone_input"),
+                patch.object(roxy_codex_oauth, "_set_phone_value", return_value={"e164": "+15551230001"}),
+                patch.object(roxy_codex_oauth, "_blur_active_input_and_wait"),
+                patch.object(roxy_codex_oauth, "_verify_add_phone_value_before_submit", return_value={"ok": True}),
+                patch.object(roxy_codex_oauth, "_select_sms_channel_or_raise"),
+                patch.object(roxy_codex_oauth, "_click_add_phone_continue_button", return_value={"ok": True}),
+                patch.object(roxy_codex_oauth, "_wait_after_phone_send", side_effect=[RuntimeError("fixture timeout"), "code_page"]),
+                patch.object(roxy_codex_oauth.sms_provider, "wait_for_sms_code", return_value="123456"),
+                patch.object(roxy_codex_oauth, "_clear_otp_inputs"),
+                patch.object(roxy_codex_oauth, "_type_otp"),
+                patch.object(roxy_codex_oauth, "_click_if_present", return_value=True),
+                patch.object(roxy_codex_oauth, "_wait_after_phone_otp_submit", return_value="left_phone_flow"),
+                patch.object(roxy_codex_oauth, "_find_any"),
+                patch.object(roxy_codex_oauth, "_sleep_before_phone_retry"),
+                patch.object(roxy_codex_oauth.time, "sleep"),
+            )
+            for item in patches:
+                stack.enter_context(item)
+            roxy_codex_oauth._do_phone_verification_if_present(
+                driver,
+                restart_authorization=restart_authorization,
+            )
+
+        self.assertEqual(acquire.call_count, 2)
+        for call in acquire.call_args_list:
+            self.assertEqual(call.kwargs["country"], "187")
+            self.assertEqual(call.kwargs["provider_id"], "3370")
+            self.assertEqual(call.kwargs["excluded_countries"], set())
+        restart_authorization.assert_called_once_with()
+        driver.refresh.assert_not_called()
+        driver.get.assert_not_called()
 
 
 if __name__ == "__main__":

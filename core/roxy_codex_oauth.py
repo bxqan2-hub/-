@@ -1013,27 +1013,6 @@ def _wait_page_settle_after_submit() -> None:
     time.sleep(seconds)
 
 
-def _refresh_add_phone_for_retry(driver, *, reason: str = "") -> None:
-    """发送失败/换号前刷新手机号页，避免旧错误状态和旧号码残留。"""
-    try:
-        logger.info("[Codex][Browser] 发送失败/准备换号，刷新手机号页面：%s", reason or "retry")
-        driver.refresh()
-        human_delay("navigate")
-        try:
-            _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=8)
-            return
-        except Exception:
-            pass
-        # 如果刷新后仍不在输入页，强制回 add-phone。
-        target = _auth_origin(driver).rstrip("/") + "/add-phone"
-        logger.info("[Codex][Browser] 刷新后未找到手机号输入框，重新打开：%s", target)
-        driver.get(target)
-        human_delay("navigate")
-        _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=8)
-    except Exception as exc:
-        logger.info("[Codex][Browser] 刷新手机号页失败，下一轮会再次尝试回到 add-phone：%s", str(exc)[:180])
-
-
 def _click_add_phone_continue_button(driver, *, timeout: int = 10) -> dict:
     """点击 add-phone 表单里的 Continue/続行 按钮。
 
@@ -1246,7 +1225,7 @@ def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "
     time.sleep(seconds)
 
 
-def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
+def _do_phone_verification_if_present(driver, *, email: str = "", restart_authorization=None) -> None:
     """如果页面要求手机号验证，则用当前 sms_provider 自动完成。"""
     http = None
     max_retries = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10) if hasattr(sms_provider, "_cfg") else 10
@@ -1268,6 +1247,12 @@ def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
         # 配置缺失不会因换号而恢复。先校验一次，避免同一个静态错误重复
         # SMS_MAX_RETRIES（本次日志中因此无意义刷新了 add-phone 10 次）。
         provider = sms_provider.validate_configuration()
+        selected_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "auto") or "auto").strip()
+        selected_supplier = str(getattr(sms_provider._cfg, "SMSBOWER_PROVIDER_ID", "") or "").strip()
+        logger.info(
+            "[Codex][Browser] 接码配置快照：provider=%s country=%s supplier=%s",
+            provider, selected_country, selected_supplier or "-",
+        )
         http = sms_provider._http()
 
         last_err = None
@@ -1283,7 +1268,9 @@ def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
                 _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
                 activation_id, phone = sms_provider.acquire_number(
                     http,
-                    excluded_countries=failed_country_ids,
+                    country=selected_country,
+                    excluded_countries=(failed_country_ids if selected_country.lower() == "auto" else set()),
+                    provider_id=selected_supplier,
                 )
                 activation_country = sms_provider.activation_country(activation_id)
                 logger.info("[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=***%s", attempt, max_retries, provider, phone[-4:])
@@ -1396,7 +1383,10 @@ def _do_phone_verification_if_present(driver, *, email: str = "") -> None:
                         logger.info("[Codex][Browser] 手机输入页已消失，继续后续流程")
                         return
                 if attempt < max_retries:
-                    _refresh_add_phone_for_retry(driver, reason=str(exc)[:120])
+                    if restart_authorization is None:
+                        raise RuntimeError("手机号重试缺少一次性授权重建回调，已停止复用旧授权状态") from exc
+                    logger.info("[Codex][Browser] 手机号重试将重新生成一次性授权链接并重新登录")
+                    restart_authorization()
                 _sleep_before_phone_retry(attempt, max_retries)
         raise RuntimeError(f"Roxy 手机验证重试 {max_retries} 次仍失败，最后错误：{last_err}")
     finally:
@@ -1532,6 +1522,30 @@ def _run_roxy_codex_oauth_once(
         else:
             browser_auth_url = auth_url
 
+        def restart_authorization_for_phone_retry() -> None:
+            """手机号失败时丢弃一次性授权事务，生成新链接并重新完成登录。"""
+            nonlocal auth_url, browser_auth_url, state, code_verifier, cpa_auth, sub2_auth
+            clear_roxy_browser_auth_state(driver)
+            if auth_source == "cpa":
+                cpa_auth = proto._request_cpa_authorize_url()
+                state = cpa_auth["state"]
+                auth_url = cpa_auth["auth_url"]
+            elif auth_source == "sub2":
+                sub2_auth = proto._request_sub2_authorize_url()
+                state = sub2_auth["state"]
+                auth_url = sub2_auth["auth_url"]
+            else:
+                code_verifier, code_challenge = proto._generate_pkce()
+                state = proto._generate_state()
+                auth_url = proto._build_authorize_url(state, code_challenge, prompt="login")
+            browser_auth_url = (
+                proto._build_desktop_auth_url(auth_url)
+                if bool(getattr(codex_cfg, "CODEX_DESKTOP_AUTH_WRAPPER", True))
+                else auth_url
+            )
+            logger.info("[Codex][Browser] 已生成新的手机号重试授权地址，重新开始邮箱登录")
+            _fill_email_and_otp(driver, email, otp_provider, browser_auth_url)
+
         if not driver:
             driver = _build_driver(opened)
             if not codex_headless:
@@ -1544,7 +1558,11 @@ def _run_roxy_codex_oauth_once(
         _fill_email_and_otp(driver, email, otp_provider, browser_auth_url)
         human_delay("api")
         logger.info("[Codex][Browser] 检查是否需要手机号验证")
-        _do_phone_verification_if_present(driver, email=email)
+        _do_phone_verification_if_present(
+            driver,
+            email=email,
+            restart_authorization=restart_authorization_for_phone_retry,
+        )
         logger.info("[Codex][Browser] 手机验证处理完成/无需处理，等待授权确认和 callback")
         callback_url = _finish_consent_workspace(driver)
         code = proto._extract_code(callback_url, state)

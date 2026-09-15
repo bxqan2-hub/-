@@ -1190,7 +1190,7 @@ def _request_fresh_phone_code(page, activation_id: str, http) -> None:
         raise RuntimeError("phone_otp_resend_missing: 页面未找到重新发送短信按钮")
     logger.info("[Codex][BrowserUse] 已保留当前号码并点击重新发送短信")
 
-def _do_phone_verification_if_present(page, *, email: str = "") -> None:
+def _do_phone_verification_if_present(page, *, email: str = "", restart_authorization=None) -> None:
     # 给页面一点时间从邮箱 OTP 后跳到手机号页；没有就跳过。
     end = time.time() + 20
     while time.time() < end:
@@ -1208,6 +1208,12 @@ def _do_phone_verification_if_present(page, *, email: str = "") -> None:
     sms_provider.validate_configuration()
     http = sms_provider._http()
     max_retries = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10) if hasattr(sms_provider, "_cfg") else 10
+    selected_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "auto") or "auto").strip()
+    selected_supplier = str(getattr(sms_provider._cfg, "SMSBOWER_PROVIDER_ID", "") or "").strip()
+    logger.info(
+        "[Codex][BrowserUse] 接码配置快照：provider=%s country=%s supplier=%s",
+        sms_provider._provider_name(), selected_country, selected_supplier or "-",
+    )
     last_error = ""
     failed_country_ids: set[str] = set()
     for attempt in range(1, max_retries + 1):
@@ -1224,7 +1230,9 @@ def _do_phone_verification_if_present(page, *, email: str = "") -> None:
             logger.info("[Codex][BrowserUse] 需要手机验证，开始取号（%s/%s）", attempt, max_retries)
             activation_id, phone = sms_provider.acquire_number(
                 http,
-                excluded_countries=failed_country_ids,
+                country=selected_country,
+                excluded_countries=(failed_country_ids if selected_country.lower() == "auto" else set()),
+                provider_id=selected_supplier,
             )
             activation_country = sms_provider.activation_country(activation_id)
             logger.info("[Codex][BrowserUse] 已取号：%s activation=%s", phone, activation_id)
@@ -1301,12 +1309,11 @@ def _do_phone_verification_if_present(page, *, email: str = "") -> None:
                 check_stop_requested(email)
             if attempt >= max_retries:
                 break
-            try:
-                _dismiss_phone_country_dropdown(page)
-                _clear_phone_inputs(page)
-                _ensure_add_phone_form(page, reason=f"after-fail-{attempt}")
-            except Exception:
-                pass
+            if restart_authorization is not None:
+                logger.info("[Codex][BrowserUse] 手机号重试将重新生成一次性授权链接并重新登录")
+                restart_authorization()
+            else:
+                raise RuntimeError("手机号重试缺少一次性授权重建回调，已停止复用旧授权状态") from exc
             time.sleep(min(1 + attempt, 4))
     raise RuntimeError(f"手机验证失败，已重试 {max_retries} 次：{last_error}")
 
@@ -1387,6 +1394,24 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
         else:
             raise RuntimeError(f"[Codex][BrowserUse] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
 
+        def restart_authorization_for_phone_retry() -> None:
+            """手机号失败时生成新的授权事务并重新完成邮箱登录。"""
+            nonlocal auth_url, state, code_verifier, cpa_auth, sub2_auth
+            if auth_source == "cpa":
+                cpa_auth = proto._request_cpa_authorize_url()
+                auth_url = cpa_auth["auth_url"]
+                state = cpa_auth["state"]
+            elif auth_source == "sub2":
+                sub2_auth = proto._request_sub2_authorize_url()
+                auth_url = sub2_auth["auth_url"]
+                state = sub2_auth["state"]
+            else:
+                code_verifier, code_challenge = proto._generate_pkce()
+                state = proto._generate_state()
+                auth_url = proto._build_authorize_url(state, code_challenge, prompt="login")
+            logger.info("[Codex][BrowserUse] 已生成新的手机号重试授权地址，重新开始邮箱登录")
+            _fill_email_and_otp(page, email, otp_provider, auth_url, dead_tracker=dead_tracker)
+
         logger.info(
             "[Codex][%s] 开始授权：%s proxyCountry=%s profileId=%s local_proxy_arg=%s",
             provider_label,
@@ -1409,7 +1434,11 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
             dead_tracker = _install_account_dead_response_tracker(page)
 
             _fill_email_and_otp(page, email, otp_provider, auth_url, dead_tracker=dead_tracker)
-            _do_phone_verification_if_present(page, email=email)
+            _do_phone_verification_if_present(
+                page,
+                email=email,
+                restart_authorization=restart_authorization_for_phone_retry,
+            )
             logger.info("[Codex][BrowserUse] 手机验证处理完成/无需处理，等待授权确认和 callback")
             _t_callback = _StepTimer("等待 consent/workspace/callback")
             callback_url = _finish_consent_workspace(context, page)

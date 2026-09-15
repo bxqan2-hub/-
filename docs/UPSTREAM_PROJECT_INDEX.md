@@ -1,5 +1,11 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-15 接码重试固定手选供应商并重建一次性授权
+
+- 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；此次先读本地 `core/codex_oauth.py`、`core/roxy_codex_oauth.py`、`core/browser_use_codex_oauth.py` 和 `core/sms_provider.py`。上游锁定版本的授权/手机号协议仍作为顺序参考，不覆盖本地浏览器实现。
+- 原问题：手机号码失败后，浏览器路径只刷新/回到 `/add-phone`，继续使用旧的一次性授权事务；且重取号码未把手选国家、SMSBower supplier ID 固定传到每一轮调用。现改为失败后通过回调重新生成 CPA/sub2/本地 PKCE 授权地址、重新邮箱登录，再进入手机号步骤；取号显式传递当前 provider、country、supplier，手选国家不再用失败国家集合切换地区。
+- Roxy Selenium 与 Browser Use 两条浏览器路径同步修改；协议 BrowserSession 路径仅补齐 provider/country/supplier 透传，因为它没有浏览器授权链接可重开。新增脱敏配置快照日志，不记录 API key、手机号全文或 Token。
+
 ## 2026-09-15 按维护者要求移除浏览器连接时的页面属性注入
 
 - 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新读取上游 roxy_registration，SHA-256 仍为 `454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`。上游 driver 构建路径没有本次移除的页面属性注入 helper；本地其余 driver 连接顺序、日志能力和启动重试均保留。
