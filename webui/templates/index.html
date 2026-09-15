@@ -331,14 +331,15 @@
     #regWarnV2 { margin: 0 16px 8px; }
     .jobs-toolbar-v2 {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-      padding: 16px;
+      padding: 14px 16px; background: linear-gradient(180deg, #fbfdff 0%, #f7f9fc 100%);
+      border-bottom: 1px solid #edf1f7;
     }
     .jobs-toolbar-v2 .jobs-tb-btn {
       min-height: 40px; border: 1px solid #dcdfe6; border-radius: 6px;
       background: #fff; color: #606266; padding: 8px 18px;
       font: inherit; font-size: 14px; font-weight: 400; cursor: pointer;
       display: inline-flex; align-items: center; white-space: nowrap;
-      transition: .1s; line-height: 1; box-sizing: border-box;
+      justify-content: center; text-align: center; transition: .1s; line-height: 1; box-sizing: border-box;
     }
     .jobs-toolbar-v2 .jobs-tb-btn:hover { color: #409eff; border-color: #c6e2ff; background: #ecf5ff; }
     .jobs-toolbar-v2 .jobs-tb-btn:disabled { opacity: 1; cursor: not-allowed; color: #c0c4cc; background: #fff; border-color: #e4e7ed; }
@@ -375,8 +376,18 @@
       color: #14532d; background: #d8f3e0; border-color: #2f855a;
     }
     .jobs-toolbar-v2 .jobs-tb-field {
-      display: inline-flex; align-items: center; gap: 8px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       color: #606266; font-size: 14px; white-space: nowrap;
+    }
+    .jobs-toolbar-v2 .jobs-tb-field > input:not([type="checkbox"]),
+    .jobs-toolbar-v2 .jobs-tb-field > select { align-self: center; }
+    .jobs-toolbar-v2 .jobs-tb-field--schedule {
+      min-height: 40px; padding: 0 12px; border: 1px solid #cfe0ff;
+      border-radius: 8px; background: #eff5ff; color: #356fd8; font-weight: 600;
+    }
+    .jobs-toolbar-v2 .jobs-tb-field--schedule span { display: inline-flex; align-items: center; gap: 7px; }
+    .jobs-toolbar-v2 .jobs-tb-field--schedule input[type="checkbox"] {
+      width: 17px; height: 17px; margin: 0; accent-color: #377dff; cursor: pointer;
     }
     .jobs-toolbar-v2 .jobs-tb-unlimited {
       padding: 2px 6px; border-radius: 999px; background: #edf8f1;
@@ -449,6 +460,38 @@
     .accounts-filter-v2 .el-input-number__decrease svg {
       width: 12px; height: 12px; stroke: currentColor; fill: none;
       stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .jobs-toolbar-v2 .el-input-number--compact {
+      width: 178px; overflow: hidden; align-items: center; justify-content: center;
+    }
+    .jobs-toolbar-v2 .el-input-number--compact input {
+      flex: 0 0 68px; width: 68px; padding: 0 4px; text-align: center;
+    }
+    .jobs-toolbar-v2 .jobs-tb-range-sep { color: #a0a7b4; font-weight: 700; user-select: none; }
+    .jobs-schedule-status { margin: 2px 16px 14px; }
+    .schedule-card {
+      display: flex; align-items: center; gap: 18px; min-height: 70px; padding: 12px 16px;
+      border: 1px solid #dce8ff; border-radius: 12px; background: linear-gradient(100deg, #f5f8ff, #fbfdff);
+      box-shadow: 0 4px 14px rgba(50, 96, 180, .07); box-sizing: border-box;
+    }
+    .schedule-card__heading { display: flex; align-items: center; gap: 8px; min-width: 190px; color: #294a83; }
+    .schedule-card__dot { width: 9px; height: 9px; border-radius: 50%; background: #377dff; box-shadow: 0 0 0 4px #dbe8ff; }
+    .schedule-card__title { font-weight: 700; }
+    .schedule-card__id { color: #8795ae; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .schedule-card__tag { padding: 3px 8px; border-radius: 999px; background: #e5f7ed; color: #16824b; font-size: 12px; font-weight: 700; }
+    .schedule-card__metrics { display: flex; align-items: center; gap: 16px; color: #68758a; font-size: 13px; white-space: nowrap; }
+    .schedule-card__metrics strong { color: #2e3e5e; font-size: 16px; }
+    .schedule-card__progress { flex: 1; min-width: 120px; height: 7px; overflow: hidden; border-radius: 99px; background: #e7edf7; }
+    .schedule-card__progress > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #377dff, #63a4ff); transition: width .3s ease; }
+    .schedule-countdown { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; padding: 6px 12px; border-radius: 9px; background: #fff4df; color: #a56800; white-space: nowrap; }
+    .schedule-countdown__value { min-width: 27px; color: #d78300; font-size: 22px; font-weight: 800; text-align: right; }
+    .schedule-card--completed { border-color: #ccebd9; background: linear-gradient(100deg, #f3fbf6, #fbfefc); }
+    .schedule-card--completed .schedule-card__dot { background: #21a366; box-shadow: 0 0 0 4px #dff5e8; }
+    .schedule-card--stopped { border-color: #f4d7b5; background: #fffaf4; }
+    @media (max-width: 1100px) {
+      .schedule-card { align-items: flex-start; flex-wrap: wrap; gap: 10px 16px; }
+      .schedule-card__progress { order: 4; flex-basis: 100%; }
+      .schedule-countdown { margin-left: 0; }
     }
     .jobs-table-v2-wrap { overflow: auto; padding: 0; }
     .jobs-table-v2 {
@@ -4120,6 +4163,39 @@ function updateJobsSelectionUi(pageRows = null) {
   }
 }
 
+function renderScheduleStatus(schedule) {
+  const el = $('#regScheduleStatusV2');
+  const stopBtn = $('#btnStopScheduleV2');
+  if (!el) return;
+  const status = String(schedule.status || '');
+  const active = ['running', 'waiting', 'stopping'].includes(status);
+  const target = Math.max(0, Number(schedule.target || 0));
+  const submitted = Math.max(0, Number(schedule.submitted || 0));
+  const rounds = Math.max(1, Number(schedule.rounds || 1));
+  const round = Math.max(0, Number(schedule.round || 0));
+  const progress = target ? Math.min(100, Math.round(submitted / target * 100)) : 0;
+  const label = status === 'completed' ? '已完成' : status === 'stopped' ? '已停止' : status === 'failed' ? '异常结束' : status === 'stopping' ? '正在停止' : '运行中';
+  if (!status) { el.innerHTML = ''; el.removeAttribute('data-wait-until'); if (stopBtn) stopBtn.disabled = true; return; }
+  const waiting = status === 'waiting' && Number(schedule.wait_until) > 0;
+  el.dataset.waitUntil = waiting ? String(schedule.wait_until) : '';
+  el.innerHTML = `<div class="schedule-card schedule-card--${esc(status)}">
+    <div class="schedule-card__heading"><span class="schedule-card__dot"></span><span class="schedule-card__title">分轮注册计划</span><span class="schedule-card__id">#${esc(schedule.schedule_id || '-')}</span><span class="schedule-card__tag">${label}</span></div>
+    <div class="schedule-card__metrics"><span>第 <strong>${round}</strong> / ${rounds} 轮</span><span>已提交 <strong>${submitted}</strong> / ${target}</span><span>每轮 <strong>${Number(schedule.workers || 0)}</strong> 个</span></div>
+    <div class="schedule-card__progress" aria-label="注册进度"><span style="width:${progress}%"></span></div>
+    ${waiting ? '<div class="schedule-countdown"><span>下一轮倒计时</span><strong id="scheduleCountdownValue" class="schedule-countdown__value">--</strong><span>秒</span></div>' : ''}
+  </div>`;
+  if (stopBtn) stopBtn.disabled = !active || status === 'stopping';
+  updateScheduleCountdown();
+}
+
+function updateScheduleCountdown() {
+  const el = $('#regScheduleStatusV2');
+  const value = $('#scheduleCountdownValue');
+  if (!el || !value) return;
+  const until = Number(el.dataset.waitUntil || 0);
+  value.textContent = until > 0 ? String(Math.max(0, Math.ceil(until - Date.now() / 1000))) : '--';
+}
+
 async function refreshJobs() {
   try {
     const p = PAGERS.jobs;
@@ -4129,21 +4205,7 @@ async function refreshJobs() {
     JOB_STATUS_COUNTS = res.status_counts || {};
     let schedule = {};
     try { schedule = await api('/api/jobs/schedule'); } catch (scheduleError) {}
-    const scheduleEl = $('#regScheduleStatusV2');
-    const stopScheduleBtn = $('#btnStopScheduleV2');
-    const scheduleActive = ['running', 'waiting', 'stopping'].includes(String(schedule.status || ''));
-    if (scheduleEl) {
-      if (scheduleActive) {
-        const waitText = schedule.status === 'waiting' && schedule.wait_until
-          ? `，下一轮约 ${Math.max(0, Math.ceil(Number(schedule.wait_until) - Date.now() / 1000))} 秒后`
-          : '';
-        scheduleEl.textContent = `分轮计划 ${schedule.schedule_id}：第 ${schedule.round}/${schedule.rounds} 轮，已提交 ${schedule.submitted}/${schedule.target}${waitText}`;
-      } else if (schedule.status) {
-        const label = schedule.status === 'completed' ? '已完成' : schedule.status === 'stopped' ? '已停止' : '异常结束';
-        scheduleEl.textContent = `分轮计划${label}：${schedule.submitted || 0}/${schedule.target || 0}`;
-      } else scheduleEl.textContent = '';
-    }
-    if (stopScheduleBtn) stopScheduleBtn.disabled = !scheduleActive || schedule.status === 'stopping';
+    renderScheduleStatus(schedule);
     const gcAllBtn = $('#btnGcCheckAllV2');
     if (gcAllBtn && !gcAllBtn.dataset.loading) {
       const checking = Number(JOB_STATUS_COUNTS.gc_checking || 0);
@@ -10405,6 +10467,7 @@ loadAtValiditySchedule();
 loadSummary();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);
 jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 3000);
+setInterval(updateScheduleCountdown, 1000);
 setInterval(loadSummary, 5000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 2000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) loadAtValiditySchedule(); }, 30000);
