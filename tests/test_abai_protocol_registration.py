@@ -50,9 +50,14 @@ class AbaiProtocolRegistrationTests(TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["account_id"], 42)
         worker_cls.return_value.run.assert_called_once_with(
-            email="user@example.com", password="Abcd1234!xyz"
+            email="user@example.com",
+            password="Abcd1234!xyz",
+            name="User Example",
+            birthdate="1990-01-01",
         )
         saved = save_account.call_args.kwargs
+        self.assertEqual(saved["registration_name"], "User Example")
+        self.assertEqual(saved["birth_date"], "1990-01-01")
         self.factory.assert_called_once_with(proxy="http://proxy.test:8080", email="user@example.com")
         self.assertIs(worker_cls.call_args.kwargs["session"], self.transport)
         self.assertNotIn("profile", worker_cls.call_args.kwargs)
@@ -66,6 +71,26 @@ class AbaiProtocolRegistrationTests(TestCase):
         self.assertEqual(saved["extra"]["protocol_source"]["commit"], "98e0ad6717566dcaec2a2d7feb7b3bea2458de1")
         persist_password.assert_called_once_with("user@example.com", "Abcd1234!xyz")
         trigger_flow.assert_called_once_with("at-test")
+
+    @patch("core.abai_protocol_registration.trigger_flow", return_value={"status": "skipped"})
+    @patch("core.abai_protocol_registration.save_account_data", return_value=42)
+    @patch("core.abai_protocol_registration.persist_confirmed_registration_password", return_value=True)
+    @patch("core.abais_protocol.protocol_register.ChatGPTProtocolRegister")
+    @patch("core.abai_protocol_registration.generate_random_birthday", return_value="1990-01-02")
+    def test_missing_birthday_generated_once_for_remote_and_saved_profile(self, birthday, worker, checkpoint, save, flow):
+        worker.return_value.run.return_value = {
+            "access_token": "fixture", "password_registered": True,
+            "totp_2fa": {"bound": True, "secret": "fixture"},
+        }
+        run_abai_protocol_registration(email="user@example.test", name="Task Name", birthday=None, proxy="http://fixture.test")
+        birthday.assert_called_once_with()
+        self.assertEqual(worker.return_value.run.call_args.kwargs["birthdate"], "1990-01-02")
+        self.assertEqual(save.call_args.kwargs["birth_date"], "1990-01-02")
+
+    def test_empty_name_stops_before_creating_profile(self):
+        with self.assertRaisesRegex(RuntimeError, "协议注册缺少姓名"):
+            run_abai_protocol_registration(email="user@example.test", name=" ", birthday=None, proxy="http://fixture.test")
+        self.factory.assert_not_called()
 
     @patch("core.abais_protocol.protocol_register.ChatGPTProtocolRegister")
     @patch("core.abai_protocol_registration.registration_password", return_value="Abcd1234!xyz")

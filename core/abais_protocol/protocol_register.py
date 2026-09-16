@@ -13,7 +13,7 @@ import random
 import re
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
@@ -65,25 +65,6 @@ _TRANSIENT_CURL_CODES = frozenset(
         int(CurlECode.PROXY),
     }
 )
-
-
-FIRST_NAMES = (
-    "James", "John", "Robert", "Michael", "David", "William", "Richard",
-    "Joseph", "Thomas", "Daniel", "Matthew", "Anthony", "Mary", "Linda",
-    "Jennifer", "Sarah", "Jessica", "Elizabeth",
-)
-LAST_NAMES = (
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-    "Davis", "Wilson", "Anderson", "Taylor", "Thomas", "Moore", "Martin",
-    "Lee", "White",
-)
-
-
-def _random_profile() -> tuple[str, str]:
-    name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
-    age = random.randint(24, 36)
-    birthdate = (datetime.now() - timedelta(days=age * 365)).strftime("%Y-%m-%d")
-    return name, birthdate
 
 
 def _decode_jwt_payload(token: str) -> dict:
@@ -1465,7 +1446,7 @@ class ChatGPTProtocolRegister:
             "expires_at": str(tokens.get("expired") or "").strip(),
         }
 
-    def _session_result(self, email: str, password: str) -> dict:
+    def _session_result(self, email: str, password: str, *, recover_oauth_tokens: bool = True) -> dict:
         self._check_cancelled()
         response = self.session.get(f"{CHATGPT_APP}/api/auth/session")
         self._check_cancelled()
@@ -1490,35 +1471,38 @@ class ChatGPTProtocolRegister:
         except Exception:
             cookies = {}
         oauth_tokens: dict = {}
-        try:
-            from core.abais_protocol.credential_checks import mint_chatgpt_refresh_token_from_session
+        if recover_oauth_tokens:
+            try:
+                from core.abais_protocol.credential_checks import mint_chatgpt_refresh_token_from_session
 
-            recovered = mint_chatgpt_refresh_token_from_session(
-                cookies,
-                proxy=self.proxy,
-                session=self.session,
-                email=email,
-                device_id=self.device_id,
-                sentinel_client=self.sentinel,
-                # A freshly-created ChatGPT session can authorize the Codex
-                # public client silently after a short propagation delay.  The
-                # explicit account chooser currently routes new accounts to an
-                # ``add_phone`` gate, so try the session-backed ``prompt=none``
-                # path before falling back to account selection.
-                prefer_account_selection=False,
-                cancel_check=self.cancel_check,
-            )
-            if recovered.get("state") == "valid":
-                oauth_tokens = dict(recovered.get("tokens") or {})
-                self.log("已获取 OAuth refresh token")
-            else:
-                oauth_message = str(recovered.get("message") or "").strip()
-                if "add_phone" in oauth_message or "手机号验证" in oauth_message:
-                    self.log("本次 OAuth 命中 add_phone，按正常无 RT 账号保存")
+                recovered = mint_chatgpt_refresh_token_from_session(
+                    cookies,
+                    proxy=self.proxy,
+                    session=self.session,
+                    email=email,
+                    device_id=self.device_id,
+                    sentinel_client=self.sentinel,
+                    # A freshly-created ChatGPT session can authorize the Codex
+                    # public client silently after a short propagation delay.  The
+                    # explicit account chooser currently routes new accounts to an
+                    # ``add_phone`` gate, so try the session-backed ``prompt=none``
+                    # path before falling back to account selection.
+                    prefer_account_selection=False,
+                    cancel_check=self.cancel_check,
+                )
+                if recovered.get("state") == "valid":
+                    oauth_tokens = dict(recovered.get("tokens") or {})
+                    self.log("已获取 OAuth refresh token")
                 else:
-                    self.log(f"未获取 OAuth refresh token: {oauth_message}")
-        except Exception as exc:
-            self.log(f"获取 OAuth refresh token 失败: {exc}")
+                    oauth_message = str(recovered.get("message") or "").strip()
+                    if "add_phone" in oauth_message or "手机号验证" in oauth_message:
+                        self.log("本次 OAuth 命中 add_phone，按正常无 RT 账号保存")
+                    else:
+                        self.log(f"未获取 OAuth refresh token: {oauth_message}")
+            except Exception as exc:
+                self.log(f"获取 OAuth refresh token 失败: {exc}")
+        else:
+            self.log("ENABLE_CODEX_AUTO=False，跳过 Codex OAuth")
         return {
             "email": email,
             "password": password,
@@ -1689,8 +1673,17 @@ class ChatGPTProtocolRegister:
                 self.session.close()
             except Exception:
                 pass
-    def _run_legacy_web_registration(self, *, email: str, password: str) -> dict:
-        """Create the account through ChatGPT NextAuth, then mint Codex tokens."""
+    def _run_legacy_web_registration(
+        self,
+        *,
+        email: str,
+        password: str,
+        name: str,
+        birthdate: str,
+    ) -> dict:
+        """Create the account through ChatGPT NextAuth and return its session."""
+        from config import codex as codex_cfg
+
         self.log(f"开始 ChatGPT Web 协议注册: {email}")
         try:
             self._initialize_signup(email, registration=True)
@@ -1698,6 +1691,8 @@ class ChatGPTProtocolRegister:
             created = self._create_account_from_authorization(
                 email=email,
                 password=password,
+                name=name,
+                birthdate=birthdate,
                 authorization=authorization,
             )
             callback_url = _authorization_continue_url(created)
@@ -1708,7 +1703,9 @@ class ChatGPTProtocolRegister:
                     allow_redirects=True,
                 )
             result = self._finalize_registration_result(
-                self._session_result(email, password)
+                self._session_result(
+                    email, password, recover_oauth_tokens=bool(codex_cfg.ENABLE_CODEX_AUTO),
+                )
             )
             self.log("ChatGPT Web 兼容注册完成")
             return result
@@ -1727,6 +1724,8 @@ class ChatGPTProtocolRegister:
         *,
         email: str,
         password: str,
+        name: str,
+        birthdate: str,
         authorization: dict,
     ) -> dict:
         from .credential_checks import _requires_phone_verification
@@ -1825,12 +1824,18 @@ class ChatGPTProtocolRegister:
 
         if continue_url:
             self._visit_auth_step(continue_url, referer="/email-verification")
-        name, birthdate = _random_profile()
         created = self._create_account(name, birthdate)
         self.log("ChatGPT 账号资料创建成功")
         return created
 
-    def _run_codex_registration(self, *, email: str, password: str) -> dict:
+    def _run_codex_registration(
+        self,
+        *,
+        email: str,
+        password: str,
+        name: str,
+        birthdate: str,
+    ) -> dict:
         oauth_start: OAuthStart | None = None
         authorization: dict | None = None
         for bootstrap_attempt in range(2):
@@ -1861,6 +1866,8 @@ class ChatGPTProtocolRegister:
         created = self._create_account_from_authorization(
             email=email,
             password=password,
+            name=name,
+            birthdate=birthdate,
             authorization=authorization,
         )
         self.log("ChatGPT 账号资料创建成功，继续同一 Codex OAuth 事务")
@@ -1874,23 +1881,23 @@ class ChatGPTProtocolRegister:
         )
 
 
-    def run(self, *, email: str, password: str) -> dict:
+    def run(self, *, email: str, password: str, name: str, birthdate: str) -> dict:
         if not str(email or "").strip():
             raise RuntimeError("协议注册缺少邮箱")
         if not callable(self.otp_callback):
             raise RuntimeError("协议注册缺少邮箱验证码回调")
         self._check_cancelled()
         self._direct_registration_mutated = False
-        self.log(f"开始 ChatGPT Web 协议注册并获取 Codex OAuth token: {email}")
+        self.log(f"开始 ChatGPT Web 协议注册: {email}")
         try:
-            # Account creation and Codex token issuance are deliberately split
-            # into two OAuth transactions.  Creating an account directly inside
-            # the Codex PKCE transaction currently enters the mandatory
-            # ``add_phone`` step after email OTP validation, while ChatGPT Web's
-            # registration transaction can finish account creation and establish
-            # the session needed by ``_session_result``.  That session is then
-            # exchanged through a fresh Codex OAuth transaction for AT/RT/IDT.
-            result = self._run_legacy_web_registration(email=email, password=password)
+            # Account creation stays in the ChatGPT Web transaction.  A separate
+            # Codex OAuth exchange only runs when its existing config is enabled.
+            result = self._run_legacy_web_registration(
+                email=email,
+                password=password,
+                name=name,
+                birthdate=birthdate,
+            )
             if str(result.get("refresh_token") or "").strip():
                 self.log("ChatGPT 协议注册完成并获取 Codex OAuth token")
             else:

@@ -5,15 +5,21 @@ The existing protocol worker borrows this transport and its native SDK runtime.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import re
+import time
+from pathlib import Path
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 from requests import Response
 from requests.structures import CaseInsensitiveDict
 
 from config import roxybrowser as roxy_cfg
-from core.browser_traffic import summarize_performance_logs
+from core.browser_traffic import (
+    StaticResourceCache, block_reason, is_cacheable_request,
+    is_cacheable_response, summarize_performance_logs,
+)
 from core.roxybrowser_client import RoxyBrowserClient
 from core.registration_service import bind_roxy_profile, check_stop_requested
 from .constants import CHATGPT_APP, OPENAI_AUTH
@@ -71,8 +77,23 @@ class LocalBrowserSession:
         self.browser = None
         self.context = None
         self._pages = {}
+        self._creating_page = False
         self._traffic_sessions = {}
         self._traffic_events = []
+        self._pending_fetch = {}
+        self._cached_request_ids = set()
+        self._blocked_request_ids = set()
+        self._cache_stats = dict(cache_hits=0, cache_misses=0, cached_bytes=0, cache_writes=0, cache_errors=0)
+        self._low_traffic = bool(roxy_cfg.ROXY_LOW_TRAFFIC)
+        self._registration_created = False
+        cache_dir = Path(roxy_cfg.ROXY_CACHE_DIR)
+        if not cache_dir.is_absolute():
+            cache_dir = Path(__file__).resolve().parents[2] / cache_dir
+        # Reuse the public-asset cache implementation, never Roxy profile state.
+        self._cache = StaticResourceCache(
+            cache_dir / "protocol", max_age=int(roxy_cfg.ROXY_CACHE_MAX_AGE),
+            max_item_bytes=int(roxy_cfg.ROXY_CACHE_MAX_ITEM_BYTES),
+        ) if roxy_cfg.ROXY_STATIC_CACHE else None
         self._bootstrap_response = None
         self.exit_geo = {}
         self.traffic = None
@@ -151,6 +172,8 @@ class LocalBrowserSession:
         return origin
 
     def _observe_page(self, page):
+        if self._creating_page:
+            return None
         cdp = self._observe_target(page)
         page.on("frameattached", self._observe_frame)
         page.on("framenavigated", self._observe_frame)
@@ -175,7 +198,88 @@ class LocalBrowserSession:
                        "webSocketCreated", "webSocketFrameSent", "webSocketFrameReceived"):
             cdp.on("Network." + method, lambda params, event=method: self._traffic_event(target, event, params))
         cdp.send("Network.enable")
+        cdp.send("Network.setCacheDisabled", {"cacheDisabled": False})
+        cdp.on("Fetch.requestPaused", lambda event: self._on_request_paused(cdp, event))
+        # One persistent interceptor owns static assets and manual protocol hops.
+        # Toggling Fetch per API request otherwise drops background cache loads.
+        cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
         return cdp
+
+    def _on_request_paused(self, cdp, event):
+        request_id = event["requestId"]
+        request = event.get("request") or {}
+        url, method = str(request.get("url") or ""), str(request.get("method") or "")
+        resource = event.get("resourceType", "")
+        response_stage = "responseStatusCode" in event or "responseErrorReason" in event
+        pending = self._pending_fetch.get(cdp)
+        operation = bool(pending and pending["url"] == url and pending["method"] == method)
+        try:
+            if not response_stage:
+                if not operation and self._low_traffic and block_reason(
+                    url, resource, session_only=self._registration_created,
+                ):
+                    cdp.send("Fetch.failRequest", {"requestId": request_id, "errorReason": "BlockedByClient"})
+                    if event.get("networkId"):
+                        self._blocked_request_ids.add(str(event["networkId"]))
+                    return
+                cacheable = bool(not operation and self._cache and is_cacheable_request(
+                    url, method, resource, request.get("headers")))
+                if cacheable:
+                    cached = self._cache.read(url)
+                    if cached and time.time() < cached["expires_at"]:
+                        headers = [h for h in cached["headers"] if h["name"].lower() != "cache-control"]
+                        headers.append({"name": "cache-control", "value": "no-store"})
+                        cdp.send("Fetch.fulfillRequest", {
+                            "requestId": request_id, "responseCode": 200,
+                            "responseHeaders": headers, "body": base64.b64encode(cached["body"]).decode("ascii"),
+                        })
+                        self._cache_stats["cache_hits"] += 1
+                        self._cache_stats["cached_bytes"] += len(cached["body"])
+                        if event.get("networkId"):
+                            self._cached_request_ids.add(str(event["networkId"]))
+                        return
+                    self._cache_stats["cache_misses"] += 1
+                cdp.send("Fetch.continueRequest", {
+                    "requestId": request_id, "interceptResponse": operation or cacheable,
+                })
+                return
+
+            status = int(event.get("responseStatusCode") or 0)
+            headers = event.get("responseHeaders", [])
+            if operation:
+                self.http_status = status or None
+                pending["observed"].update(status=status, headers={h["name"]: h["value"] for h in headers})
+                if 300 <= status < 400:
+                    # Preserve the existing bounded redirect and cookie handling.
+                    cdp.send("Fetch.fulfillRequest", {
+                        "requestId": request_id, "responseCode": 200, "body": "",
+                        "responseHeaders": [{"name": "content-type", "value": "text/html" if pending["document"] else "text/plain"}],
+                    })
+                    return
+            elif (self._cache and status == 200
+                  and is_cacheable_request(url, method, resource, request.get("headers"))
+                  and is_cacheable_response(headers, resource_type=resource)):
+                length = next((h["value"] for h in headers if h["name"].lower() == "content-length"), "0")
+                if int(length) <= self._cache.max_item_bytes:
+                    payload = cdp.send("Fetch.getResponseBody", {"requestId": request_id})
+                    body = (base64.b64decode(payload["body"]) if payload.get("base64Encoded")
+                            else payload["body"].encode("utf-8"))
+                    if self._cache.write(url, status=status, phrase=event.get("responseStatusText", "OK"),
+                                         headers=headers, body=body):
+                        self._cache_stats["cache_writes"] += 1
+            cdp.send("Fetch.continueResponse", {"requestId": request_id})
+        except Exception:
+            if operation:
+                pending["failure"].append(True)
+                command, extra = "Fetch.failRequest", {"errorReason": "Failed"}
+            else:
+                # Optional cache failures leave the original live response intact.
+                self._cache_stats["cache_errors"] += 1
+                command, extra = ("Fetch.continueResponse" if response_stage else "Fetch.continueRequest"), {}
+            try:
+                cdp.send(command, {"requestId": request_id, **extra})
+            except Exception:
+                pass
 
     def _traffic_event(self, target, event, params):
         # Keep only what the existing estimator consumes. No cookies, bearer
@@ -207,8 +311,14 @@ class LocalBrowserSession:
     def _page(self, url):
         origin = self._origin(url)
         if origin not in self._pages:
-            page = self.context.new_page()
-            cdp = self._observe_target(page)
+            # new_page yields to context events. Install this managed page only
+            # once, after it returns, rather than racing two CDP connections.
+            self._creating_page = True
+            try:
+                page = self.context.new_page()
+            finally:
+                self._creating_page = False
+            cdp = self._observe_page(page)
             self._pages[origin] = (page, cdp)
         return self._pages[origin]
 
@@ -280,6 +390,18 @@ class LocalBrowserSession:
             logger.info("[协议内核] stage=%s http=%s", self.stage, self.http_status)
             response.history = list(history)
             self._last_url = url
+            if origin == OPENAI_AUTH and path == "/api/accounts/create_account" and method == "POST":
+                try:
+                    created = response.json()
+                    self._registration_created = bool(
+                        200 <= response.status_code < 300 and isinstance(created, dict)
+                        and not created.get("error") and created.get("continue_url")
+                    )
+                except ValueError:
+                    self._registration_created = False
+                # The successful create-account response starts callback/session
+                # finalization. Keep those documents/APIs live, not chat bundles.
+                # This phase never grants MFA identity or token authorization.
             if session_read:
                 try:
                     payload = response.json() if response.status_code == 200 else {}
@@ -333,34 +455,9 @@ class LocalBrowserSession:
         observed = {}
         failure = []
 
-        def paused(event):
-            request_id = event["requestId"]
-            try:
-                status = int(event.get("responseStatusCode") or 0)
-                if event["request"]["url"] == url and event["request"]["method"] == method:
-                    self.http_status = status or None
-                    observed.update(status=status, headers={h["name"]: h["value"] for h in event.get("responseHeaders", [])})
-                    if 300 <= status < 400:
-                        # Fetch's opaque manual redirect hides Location. Read
-                        # the original response via CDP, then settle fetch
-                        # without following it; Chromium already applied cookies.
-                        cdp.send("Fetch.fulfillRequest", {
-                            "requestId": request_id, "responseCode": 200, "body": "",
-                            "responseHeaders": [{"name": "content-type", "value": "text/html" if document else "text/plain"}],
-                        })
-                        return
-                cdp.send("Fetch.continueResponse", {"requestId": request_id})
-            except Exception:
-                failure.append(True)
-                try:
-                    cdp.send("Fetch.failRequest", {"requestId": request_id, "errorReason": "Failed"})
-                except Exception:
-                    pass
-
-        cdp.on("Fetch.requestPaused", paused)
-        phase = "capture_enable"
+        self._pending_fetch[cdp] = dict(url=url, method=method, document=document, observed=observed, failure=failure)
+        phase = "request_prepare"
         try:
-            cdp.send("Fetch.enable", {"patterns": [{"urlPattern": url, "requestStage": "Response"}]})
             # Native Chromium owns UA / Client Hints / Fetch Metadata / cookies.
             forwarded = {k: v for k, v in headers.items() if not k.lower().startswith("sec-")
                          and k.lower() not in {"user-agent", "accept-language", "cookie", "host", "origin", "referer", "content-length"}}
@@ -418,11 +515,7 @@ class LocalBrowserSession:
             logger.warning("[协议内核] %s", detail)
             raise RuntimeError(detail) from None
         finally:
-            try:
-                cdp.send("Fetch.disable")
-            except Exception:
-                pass
-            cdp.remove_listener("Fetch.requestPaused", paused)
+            self._pending_fetch.pop(cdp, None)
 
     def build_headers(self, device_id, flow):
         """Execute the real SDK in this profile, not a synthesized Node VM."""
@@ -488,10 +581,18 @@ class LocalBrowserSession:
             self.traffic = summarize_performance_logs(
                 self._traffic_events,
                 budget_bytes=int(roxy_cfg.ROXY_TRAFFIC_BUDGET_BYTES),
+                cached_bytes=self._cache_stats["cached_bytes"],
+                cache_hits=self._cache_stats["cache_hits"],
+                cache_misses=self._cache_stats["cache_misses"],
+                cached_request_ids=self._cached_request_ids,
+                blocked_request_ids=self._blocked_request_ids,
             )
             self.traffic.update(metrics_version=4, downloaded_excludes_cache_replay=True,
                                 traffic_capture=True, capture_source="local_chromium_cdp",
                                 captured_targets=len(self._traffic_sessions))
+            self.traffic.update(low_traffic=self._low_traffic, static_cache=self._cache is not None,
+                                cache_writes=self._cache_stats["cache_writes"], cache_errors=self._cache_stats["cache_errors"],
+                                session_only=self._registration_created)
         except Exception as exc:
             self.traffic = None
             logger.warning("[协议内核] stage=protocol_traffic_summary type=%s", type(exc).__name__)

@@ -149,8 +149,7 @@ def test_fetch_uses_browser_native_headers_and_redacts_failures(transport):
     def evaluate(script,arg):
         assert script==mod._FETCH_JS
         assert arg['headers']=={'Authorization':'Bearer private'}
-        handler=cdp.on.call_args.args[1]
-        handler({'requestId':'fixture','request':{'url':arg['url'],'method':arg['method']},'responseStatusCode':200,'responseHeaders':[{'name':'Content-Type','value':'application/json'}]})
+        transport._on_request_paused(cdp, {'requestId':'fixture','request':{'url':arg['url'],'method':arg['method']},'responseStatusCode':200,'responseHeaders':[{'name':'Content-Type','value':'application/json'}]})
         return {'status':200,'text':'{}'}
     page.url='https://chatgpt.com/'
     page.evaluate.side_effect=evaluate
@@ -161,7 +160,8 @@ def test_fetch_uses_browser_native_headers_and_redacts_failures(transport):
     assert 'PRIVATE' not in str(error.value)
     assert 'operation=protocol_request phase=api_fetch method=POST' in str(error.value)
     assert 'reason=context_destroyed' in str(error.value)
-    cdp.remove_listener.assert_called()
+    assert not transport._pending_fetch
+    assert not any(call.args[0] == 'Fetch.disable' for call in cdp.send.call_args_list)
 
 
 def test_sdk_is_executed_in_same_profile_and_errors_are_redacted(transport):
@@ -262,12 +262,14 @@ def test_cleanup_attempts_all_resources_after_each_failure(monkeypatch, transpor
 
 
 @pytest.fixture
-def native_transport(monkeypatch):
+def native_transport(monkeypatch, tmp_path):
     """Real Chromium + loopback server; no accounts, external hosts or proxy pool."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from pathlib import Path
     import threading
     from playwright.sync_api import sync_playwright
+
+    requests = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -281,6 +283,31 @@ def native_transport(monkeypatch):
 
         def respond(self):
             body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+            requests.append((self.command, self.path, len(body.encode())))
+            if self.path in ("/api/accounts/create_account", "/api/auth/session", "/registered-shell"):
+                if self.path == "/api/accounts/create_account":
+                    payload = b'{"continue_url":"/registered-shell"}'
+                elif self.path == "/api/auth/session":
+                    payload = b'{"accessToken":"fixture-web-token","user":{"email":"fixture@example.test"}}'
+                else:
+                    payload = b'<html><head><title>Registered fixture</title></head><body><script src="/cdn/assets/fixture-12345678.js"></script></body></html>'
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html" if self.path == "/registered-shell" else "application/json")
+                if self.path == "/api/accounts/create_account":
+                    self.send_header("Set-Cookie", "account=fixture; Path=/; HttpOnly; SameSite=Lax")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if self.path == "/cdn/assets/fixture-12345678.js":
+                payload = b"window.fixtureAsset = true;/*" + b"x" * 262144 + b"*/"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript")
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             if self.path in ("/redirect", "/keep-body"):
                 self.send_response(302 if self.path == "/redirect" else 307)
                 self.send_header("Location", "/echo")
@@ -316,10 +343,13 @@ def native_transport(monkeypatch):
         base = f"http://127.0.0.1:{server.server_port}"
         monkeypatch.setattr(mod, "_ALLOWED_ORIGINS", frozenset([base]))
         monkeypatch.setattr(mod, "check_stop_requested", lambda: None)
+        monkeypatch.setattr(mod.roxy_cfg, "ROXY_CACHE_DIR", str(tmp_path / "cache"))
         browser = pw.chromium.launch(headless=True)
         session = mod.LocalBrowserSession(proxy="http://fixture.invalid:1", email="fixture@example.test")
+        session.fixture_requests = requests
         session.browser = browser
         session.context = browser.new_context()
+        session.context.on("page", session._observe_page)
         session._page(base)[0].goto(base + "/", wait_until="domcontentloaded")
         try:
             yield session, base
@@ -434,6 +464,200 @@ def test_native_sdk_readiness_respects_document_csp(native_transport, monkeypatc
     assert token["id"] == "fixture-device" and token["flow"] == "fixture-flow"
 
 
+def test_native_public_asset_cache_reuses_bytes_across_isolated_contexts(native_transport, monkeypatch):
+    from core import browser_traffic
+
+    session, base = native_transport
+    original = browser_traffic.is_cacheable_request
+    cacheable = lambda url, *a, **kw: original(url.replace(base, "https://chatgpt.com"), *a, **kw)
+    monkeypatch.setattr(browser_traffic, "is_cacheable_request", cacheable)
+    monkeypatch.setattr(mod, "is_cacheable_request", cacheable)
+    page, _ = session._page(base)
+    load = """url => new Promise((resolve, reject) => {
+      const s = document.createElement('script'); s.src = url;
+      s.onload = () => resolve(window.fixtureAsset); s.onerror = reject;
+      document.head.append(s);
+    })"""
+    url = base + "/cdn/assets/fixture-12345678.js"
+    assert page.evaluate(load, url) is True
+    session.context.add_cookies([{"name": "private", "value": "first-profile", "url": base}])
+    other = mod.LocalBrowserSession(proxy="http://fixture.invalid:1", email="second@example.test")
+    other.context = session.browser.new_context()
+    other.context.on("page", other._observe_page)
+    try:
+        fresh, _ = other._page(base)
+        fresh.goto(base, wait_until="domcontentloaded")
+        assert fresh.evaluate(load, url) is True
+        assert other.context.cookies() == []
+        assert len([r for r in session.fixture_requests if r[1] == "/cdn/assets/fixture-12345678.js"]) == 1
+        other.close()
+        assert other.traffic["cache_hits"] == 1
+        assert other.traffic["cached_downloaded"] > 262144
+    finally:
+        other.close()
+        other.context.close()
+
+
+def test_native_optional_rum_upload_blocked_but_auth_api_live(native_transport, monkeypatch):
+    from core import browser_traffic
+
+    session, base = native_transport
+    monkeypatch.setattr(mod, "block_reason", lambda url, resource, **kw: browser_traffic.block_reason(
+        url.replace(base, "https://auth.openai.com"), resource, **kw))
+    page, _ = session._page(base)
+    outcome = page.evaluate("""async base => {
+      try { await fetch(base + '/awe/api/v2/rum', {method:'POST', body:'x'.repeat(1024*1024)}); return 'sent'; }
+      catch { return 'blocked'; }
+    }""", base)
+    assert outcome == "blocked"
+    assert not any(r[1] == "/awe/api/v2/rum" for r in session.fixture_requests)
+    assert session.post(base + "/api/echo", json={"fixture": True}).status_code == 200
+
+
+def test_native_registration_finalization_keeps_document_cookie_session_and_mfa(native_transport, monkeypatch):
+    from core import browser_traffic
+
+    session, base = native_transport
+    monkeypatch.setattr(mod, "OPENAI_AUTH", base)
+    monkeypatch.setattr(mod, "CHATGPT_APP", base)
+    monkeypatch.setattr(mod, "block_reason", lambda url, resource, **kw: browser_traffic.block_reason(
+        url.replace(base, "https://chatgpt.com"), resource, **kw))
+    created = session.post(base + "/api/accounts/create_account", json={"name": "Fixture"})
+    assert created.status_code == 200 and session._registration_created
+    session.get(base + created.json()["continue_url"])
+    page, _ = session._page(base)
+    assert page.title() == "Registered fixture"
+    assert session.context.cookies()[0]["httpOnly"] is True
+    assert not any(r[1] == "/cdn/assets/fixture-12345678.js" for r in session.fixture_requests)
+    assert session.get(base + "/api/auth/session").status_code == 200
+    result = session.post(base + "/backend-api/accounts/mfa/enroll", json={"fixture": True},
+                          headers={"Authorization": "Bearer fixture-web-token"})
+    assert result.status_code == 200
+    assert result.json()["cookie"] == "account=fixture"
+
+
+@pytest.mark.parametrize("url,resource,headers", [
+    ("https://auth.openai.com/api/accounts/user/register", "Fetch", {}),
+    ("https://chatgpt.com/api/auth/session", "Fetch", {}),
+    ("https://chatgpt.com/backend-api/accounts/mfa/enroll", "Fetch", {}),
+    ("https://sentinel.openai.com/sentinel/12345678/sdk.js", "Script", {}),
+    ("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/fixture.js", "Script", {}),
+    ("https://chatgpt.com/cdn/assets/app-12345678.js", "Script", {"Authorization": "Bearer PRIVATE"}),
+    ("https://chatgpt.com/cdn/assets/app-12345678.js", "Script", {"Cache-Control": "no-store"}),
+])
+def test_protocol_cache_never_replays_auth_or_private_requests(transport, url, resource, headers):
+    cdp = Mock()
+    transport._cache = Mock()
+    transport._on_request_paused(cdp, {
+        "requestId": "fixture", "resourceType": resource,
+        "request": {"url": url, "method": "GET", "headers": headers},
+    })
+    transport._cache.read.assert_not_called()
+    cdp.send.assert_called_once_with("Fetch.continueRequest", {"requestId": "fixture", "interceptResponse": False})
+
+
+@pytest.mark.parametrize("private_header", [
+    {"name": "Set-Cookie", "value": "PRIVATE"},
+    {"name": "Vary", "value": "Cookie"},
+    {"name": "Access-Control-Allow-Credentials", "value": "true"},
+])
+def test_protocol_cache_never_stores_profile_state(transport, private_header):
+    cdp = Mock()
+    transport._cache = Mock()
+    transport._on_request_paused(cdp, {
+        "requestId": "fixture", "resourceType": "Script", "responseStatusCode": 200,
+        "request": {"url": "https://chatgpt.com/cdn/assets/app-12345678.js", "method": "GET"},
+        "responseHeaders": [{"name": "Content-Type", "value": "application/javascript"},
+                            {"name": "Cache-Control", "value": "public, max-age=3600"}, private_header],
+    })
+    transport._cache.write.assert_not_called()
+    cdp.send.assert_called_once_with("Fetch.continueResponse", {"requestId": "fixture"})
+
+
+def test_protocol_cache_failure_keeps_live_request(transport):
+    cdp = Mock()
+    transport._cache = Mock()
+    transport._cache.read.side_effect = OSError("PRIVATE")
+    transport._on_request_paused(cdp, {
+        "requestId": "fixture", "resourceType": "Script",
+        "request": {"url": "https://chatgpt.com/cdn/assets/app-12345678.js", "method": "GET"},
+    })
+    cdp.send.assert_called_once_with("Fetch.continueRequest", {"requestId": "fixture"})
+    assert transport._cache_stats["cache_errors"] == 1
+
+
+def test_protocol_traffic_keeps_compressed_download_separate_from_cache(transport):
+    url = "https://chatgpt.com/cdn/assets/app-12345678.js"
+    transport._traffic_events = [
+        {"method": "Network.requestWillBeSent", "params": {"requestId": rid, "request": {"url": url}}}
+        for rid in ("network", "cache")
+    ] + [
+        {"method": "Network.loadingFinished", "params": {"requestId": "network", "encodedDataLength": 1024}},
+        {"method": "Network.loadingFinished", "params": {"requestId": "cache", "encodedDataLength": 4096}},
+    ]
+    transport._cached_request_ids.add("cache")
+    transport._cache_stats.update(cache_hits=1, cached_bytes=4096)
+    transport.close()
+    assert transport.traffic["downloaded"] == 1024
+    assert transport.traffic["cached_downloaded"] == 4096
+    assert transport.traffic["observed_transport_bytes"] == 1024
+
+
+def test_reentrant_page_event_does_not_install_duplicate_cdp_observers(transport):
+    target = Mock()
+    transport.context = Mock()
+    def create():
+        transport._observe_page(target)
+        return target
+    transport.context.new_page.side_effect = create
+    page, cdp = transport._page("https://chatgpt.com/")
+    assert page is target
+    assert transport._page("https://chatgpt.com/")[1] is cdp
+    transport.context.new_cdp_session.assert_called_once_with(target)
+    assert not transport._creating_page
+
+
+def test_failed_managed_page_creation_restores_page_observation(transport):
+    transport.context = Mock()
+    transport.context.new_page.side_effect = RuntimeError("fixture")
+    with pytest.raises(RuntimeError, match="fixture"):
+        transport._page("https://chatgpt.com/")
+    assert not transport._creating_page
+    assert not transport._pages
+
+
+@pytest.mark.parametrize("status,payload,created", [
+    (200, {"continue_url": "https://chatgpt.com/api/auth/callback/openai"}, True),
+    (403, {"error": {"code": "fixture"}}, False),
+    (200, {"error": "fixture", "continue_url": "/completed"}, False),
+    (200, {}, False),
+])
+def test_only_successful_profile_creation_restricts_chat_shell(transport, status, payload, created):
+    transport._fetch = Mock(return_value=response(status, payload))
+    transport.post("https://auth.openai.com/api/accounts/create_account", json={"name": "Fixture"})
+    assert transport._registration_created is created
+    assert transport._identity_verified is False
+    cdp = Mock()
+    transport._cache = None
+    transport._on_request_paused(cdp, {
+        "requestId": "chat-shell", "resourceType": "Script",
+        "request": {"url": "https://chatgpt.com/cdn/assets/conversation-12345678.js", "method": "GET"},
+    })
+    assert cdp.send.call_args.args[0] == ("Fetch.failRequest" if created else "Fetch.continueRequest")
+    for url in [
+        "https://chatgpt.com/api/auth/callback/openai", "https://chatgpt.com/api/auth/session",
+        "https://chatgpt.com/backend-api/accounts/mfa/enroll",
+        "https://chatgpt.com/backend-api/accounts/mfa/user/activate_enrollment",
+        "https://sentinel.openai.com/sentinel/12345678/sdk.js",
+    ]:
+        cdp.reset_mock()
+        transport._on_request_paused(cdp, {
+            "requestId": "required", "resourceType": "Fetch",
+            "request": {"url": url, "method": "GET"},
+        })
+        assert cdp.send.call_args.args[0] == "Fetch.continueRequest"
+
+
 @pytest.mark.parametrize("status", [403, 429, 500, 502, 503, 504])
 def test_cdn_headers_alone_do_not_make_http_errors_challenges(status):
     from core.abais_protocol.protocol_register import _is_cloudflare_challenge_response
@@ -489,7 +713,13 @@ def registration_worker():
 def test_required_phone_step_stops_before_any_mutation(registration_worker, authorization):
     worker = registration_worker
     with pytest.raises(RuntimeError, match="^stage=protocol_phone_verification_required$"):
-        worker._create_account_from_authorization(email="u@example.test", password="fixture", authorization=authorization)
+        worker._create_account_from_authorization(
+            email="u@example.test",
+            password="fixture",
+            name="User Example",
+            birthdate="1990-01-01",
+            authorization=authorization,
+        )
     worker._register_password.assert_not_called()
     worker._visit_auth_step.assert_not_called()
     worker.otp_callback.assert_not_called()
@@ -501,7 +731,8 @@ def test_phone_step_after_email_verification_never_creates_account(registration_
     worker._validate_otp.return_value = {"page": {"type": "add_phone"}}
     with pytest.raises(RuntimeError, match="protocol_phone_verification_required"):
         worker._create_account_from_authorization(
-            email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+            email="u@example.test", password="fixture", name="User Example",
+            birthdate="1990-01-01", authorization={"page": {"type": "password"}},
         )
     worker._register_password.assert_called_once()
     worker._validate_otp.assert_called_once_with("123456")
@@ -516,7 +747,13 @@ def test_phone_step_after_email_verification_never_creates_account(registration_
 def test_existing_account_login_never_sets_registration_password(registration_worker, authorization):
     worker = registration_worker
     with pytest.raises(RuntimeError, match="^stage=protocol_existing_account_login_required$"):
-        worker._create_account_from_authorization(email="u@example.test", password="fixture", authorization=authorization)
+        worker._create_account_from_authorization(
+            email="u@example.test",
+            password="fixture",
+            name="User Example",
+            birthdate="1990-01-01",
+            authorization=authorization,
+        )
     worker._register_password.assert_not_called()
     worker._visit_auth_step.assert_not_called()
     worker.otp_callback.assert_not_called()
@@ -534,7 +771,8 @@ def test_unconfirmed_profile_step_never_creates_account(registration_worker, nex
     worker._validate_otp.return_value = next_step
     with pytest.raises(RuntimeError, match="^stage=protocol_registration_step_unconfirmed$"):
         worker._create_account_from_authorization(
-            email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+            email="u@example.test", password="fixture", name="User Example",
+            birthdate="1990-01-01", authorization={"page": {"type": "password"}},
         )
     worker._create_account.assert_not_called()
 
@@ -544,7 +782,8 @@ def test_repeated_password_state_does_not_repeat_password_write(registration_wor
     worker._register_password.return_value = {"page": {"type": "password"}}
     with pytest.raises(RuntimeError, match="^stage=protocol_password_step_not_advanced$"):
         worker._create_account_from_authorization(
-            email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+            email="u@example.test", password="fixture", name="User Example",
+            birthdate="1990-01-01", authorization={"page": {"type": "password"}},
         )
     worker._register_password.assert_called_once()
     worker.otp_callback.assert_not_called()
@@ -554,10 +793,80 @@ def test_repeated_password_state_does_not_repeat_password_write(registration_wor
 def test_confirmed_steps_create_once_without_duplicate_otp(registration_worker):
     worker = registration_worker
     result = worker._create_account_from_authorization(
-        email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+        email="u@example.test", password="fixture", name="User Example",
+        birthdate="1990-01-01", authorization={"page": {"type": "password"}},
     )
     assert result == {"continue_url": "/completed"}
     worker._register_password.assert_called_once()
     worker._validate_otp.assert_called_once_with("123456")
     worker._send_otp.assert_not_called()
-    worker._create_account.assert_called_once()
+    worker._create_account.assert_called_once_with("User Example", "1990-01-01")
+
+
+def test_session_result_skips_codex_oauth_when_not_requested(monkeypatch):
+    from core.abais_protocol import credential_checks
+    from core.abais_protocol.protocol_register import ChatGPTProtocolRegister
+
+    session = Mock()
+    session.get.return_value = response(200, {
+        "accessToken": "fixture-web-access-token",
+        "account": {"id": "acct-fixture"},
+        "sessionToken": "session-fixture",
+    })
+    session.cookies.get_dict.return_value = {"session": "fixture-cookie"}
+    mint = Mock()
+    monkeypatch.setattr(credential_checks, "mint_chatgpt_refresh_token_from_session", mint)
+
+    result = ChatGPTProtocolRegister(session=session)._session_result(
+        "u@example.test", "fixture-password", recover_oauth_tokens=False,
+    )
+
+    assert result["access_token"] == "fixture-web-access-token"
+    assert result["refresh_token"] == ""
+    mint.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_standalone_session_keeps_oauth_recovery_independent_of_registration_switch(monkeypatch, enabled):
+    from config import codex as codex_cfg
+    from core.abais_protocol import credential_checks
+    from core.abais_protocol.protocol_register import ChatGPTProtocolRegister
+
+    session = Mock()
+    session.get.return_value = response(200, {
+        "accessToken": "fixture-web-access-token",
+        "account": {"id": "acct-fixture"},
+    })
+    session.cookies.get_dict.return_value = {"session": "fixture-cookie"}
+    mint = Mock(return_value={
+        "state": "valid",
+        "tokens": {
+            "access_token": "fixture-oauth-access-token",
+            "refresh_token": "fixture-refresh-token",
+        },
+    })
+    monkeypatch.setattr(codex_cfg, "ENABLE_CODEX_AUTO", enabled)
+    monkeypatch.setattr(credential_checks, "mint_chatgpt_refresh_token_from_session", mint)
+
+    result = ChatGPTProtocolRegister(session=session)._session_result(
+        "u@example.test", "fixture-password"
+    )
+
+    assert result["access_token"] == "fixture-oauth-access-token"
+    assert result["refresh_token"] == "fixture-refresh-token"
+    mint.assert_called_once()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_registration_preserves_task_profile_and_existing_oauth_switch(registration_worker, monkeypatch, enabled):
+    from config import codex as codex_cfg
+    worker = registration_worker
+    monkeypatch.setattr(codex_cfg, "ENABLE_CODEX_AUTO", enabled)
+    worker._initialize_signup = Mock()
+    worker._submit_signup_email = Mock(return_value={"page": {"type": "password"}})
+    worker._session_result = Mock(return_value={"access_token": "fixture"})
+    worker._finalize_registration_result = Mock(side_effect=lambda result: result)
+    result = worker.run(email="u@example.test", password="fixture", name="Task Name", birthdate="1990-01-02")
+    assert result["access_token"] == "fixture"
+    worker._create_account.assert_called_once_with("Task Name", "1990-01-02")
+    worker._session_result.assert_called_once_with("u@example.test", "fixture", recover_oauth_tokens=enabled)

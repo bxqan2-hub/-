@@ -12,6 +12,7 @@ from core.account_export import save_account_data
 from core.email_provider import resolve_email_source, wait_for_otp
 from core.flow_trigger import trigger_flow
 from core.abais_protocol.local_browser_session import LocalBrowserSession
+from core.profile_utils import generate_random_birthday
 from core.registration_password import (
     persist_confirmed_registration_password,
     registration_password,
@@ -60,6 +61,10 @@ def run_abai_protocol_registration(
 
     selected_proxy = _pick_protocol_proxy(proxy)
     password = registration_password()
+    registration_name = str(name or "").strip()
+    if not registration_name:
+        raise RuntimeError("协议注册缺少姓名")
+    registration_birthdate = str(birthday or "").strip() or generate_random_birthday()
     from core.registration_service import check_stop_requested, is_stop_requested
 
     with LocalBrowserSession(proxy=selected_proxy, email=email) as transport:
@@ -77,7 +82,12 @@ def run_abai_protocol_registration(
         worker.user_agent = profile["user_agent"]
         worker.sentinel = transport
         try:
-            result = worker.run(email=email, password=password)
+            result = worker.run(
+                email=email,
+                password=password,
+                name=registration_name,
+                birthdate=registration_birthdate,
+            )
         except Exception as exc:
             check_stop_requested()
             stage = re.search(r"\bstage=(protocol_[a-z_]+)\b", str(exc))
@@ -146,8 +156,8 @@ def run_abai_protocol_registration(
         registration_exit_ip=transport.exit_geo.get("ip"),
         registration_exit_country=transport.exit_geo.get("country"),
         batch_dir=batch_dir,
-        registration_name=name,
-        birth_date=birthday,
+        registration_name=registration_name,
+        birth_date=registration_birthdate,
         extra=extra,
     )
     flow_result = trigger_flow(access_token)
