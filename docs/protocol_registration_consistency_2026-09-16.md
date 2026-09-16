@@ -153,10 +153,11 @@
 | 任务 563、564 | 邮箱取码超时，未完成注册 | 首页、授权、密码及发码响应已通过；轮询 60 秒和事后只读快照均无验证码。失败流程流量不作为完整注册结果 |
 | 任务 565 | 代理预检超时，未创建浏览器或提交注册 | 两个出口查询接口各一次超时；保留随机选定的同一邮箱，后续任务按原预检重新选取代理 |
 | 任务 566 | 同一随机邮箱重试仍取码超时 | 正常代理预检后到达邮箱验证，60 秒未拿到验证码；暂停新增样本，不以该未完成流程的流量宣称约 2 MiB 达标 |
+| 任务 567 | 按维护者追加要求再随机选择一个未使用邮箱，仍未完成收码 | 18:16:36–18:18:07；密码请求 200、发码 302、验证页面 200，随后约 60 秒 `GenericApiMailError`。事后只读取码接口为 200、33 B HTML，未提取到验证码；未创建完整账号 |
 
 失败排查按概率分别处理：562 的高概率为 CDP 去重与响应捕获冲突、中概率为页面事件时序、低概率为网络响应异常；随后只读实际内核首页复现修正后 200，且同一主页请求只记录一个 Request/Response 对。563/564 的高概率为收码服务未返回验证码、中概率为旧码/时间窗口过滤、低概率为浏览器网络异常；实际记录终止类型为 `GenericApiMailError`，没有将其判为密码错误、MFA 错误或账号停用。
 
-最终收尾资源限制已经过真实 Chromium 回环验证，但本轮三个到达 OTP 的新邮箱样本均未完成收码，尚未得到最终代码的完整线上注册流量。未把“取码接口无验证码”等同于已证明邮箱提供方故障，也未证明服务端是否实际投递。完整线上注册已证实的节省只有初轮约 47%；最终约 2 MiB 目标保持待验证。运行证据位于 `C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-2-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-3-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-4-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-5-summary.json`；未提交账号、日志或缓存。
+最终收尾资源限制已经过真实 Chromium 回环验证，但本轮四个到达 OTP 的新邮箱样本均未完成收码，尚未得到最终代码的完整线上注册流量。未把“取码接口无验证码”等同于已证明邮箱提供方故障，也未证明服务端是否实际投递。完整线上注册已证实的节省只有初轮约 47%；最终约 2 MiB 目标保持待验证。运行证据位于 `C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-2-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-3-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-4-summary.json`、`C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-5-summary.json`；任务 567 的脱敏结果另存 `C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-6-summary.json` 和 `C:\Users\Administrator\Desktop\turb-gpt-free-register\run\protocol-traffic-cold-final-6-mail-check.json`；未提交账号、日志或缓存。
 
 ### Finding / Path / 实现
 
