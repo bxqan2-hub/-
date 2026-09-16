@@ -462,3 +462,102 @@ def test_totp_account_deactivation_is_terminal_even_behind_cdn(monkeypatch):
     assert error.value.code == "account_deactivated"
     assert "PRIVATE" not in str(error.value)
     session.post.assert_called_once()
+
+
+@pytest.fixture
+def registration_worker():
+    from core.abais_protocol.protocol_register import ChatGPTProtocolRegister
+    worker = ChatGPTProtocolRegister(session=Mock(), otp_callback=Mock(return_value="123456"))
+    worker._visit_auth_step = Mock()
+    worker._register_password = Mock(return_value={
+        "page": {"type": "email_otp_verification"}, "continue_url": "/email-verification",
+    })
+    worker._validate_otp = Mock(return_value={
+        "page": {"type": "about_you"}, "continue_url": "/about-you",
+    })
+    worker._send_otp = Mock()
+    worker._create_account = Mock(return_value={"continue_url": "/completed"})
+    return worker
+
+
+@pytest.mark.parametrize("authorization", [
+    {"page": {"type": "add_phone"}},
+    {"page_type": "add_phone", "continue_url": "/about-you"},
+    {"page": {"type": "password"}, "continue_url": "/add-phone?state=PRIVATE"},
+    {"continue_url": "https://auth.openai.com/add-phone/?state=PRIVATE"},
+])
+def test_required_phone_step_stops_before_any_mutation(registration_worker, authorization):
+    worker = registration_worker
+    with pytest.raises(RuntimeError, match="^stage=protocol_phone_verification_required$"):
+        worker._create_account_from_authorization(email="u@example.test", password="fixture", authorization=authorization)
+    worker._register_password.assert_not_called()
+    worker._visit_auth_step.assert_not_called()
+    worker.otp_callback.assert_not_called()
+    worker._create_account.assert_not_called()
+
+
+def test_phone_step_after_email_verification_never_creates_account(registration_worker):
+    worker = registration_worker
+    worker._validate_otp.return_value = {"page": {"type": "add_phone"}}
+    with pytest.raises(RuntimeError, match="protocol_phone_verification_required"):
+        worker._create_account_from_authorization(
+            email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+        )
+    worker._register_password.assert_called_once()
+    worker._validate_otp.assert_called_once_with("123456")
+    worker._create_account.assert_not_called()
+
+
+@pytest.mark.parametrize("authorization", [
+    {"page": {"type": "login_password"}},
+    {"page": {"type": "password"}, "continue_url": "/log-in/password?state=PRIVATE"},
+    {"continue_url": "https://auth.openai.com/log-in/password/"},
+])
+def test_existing_account_login_never_sets_registration_password(registration_worker, authorization):
+    worker = registration_worker
+    with pytest.raises(RuntimeError, match="^stage=protocol_existing_account_login_required$"):
+        worker._create_account_from_authorization(email="u@example.test", password="fixture", authorization=authorization)
+    worker._register_password.assert_not_called()
+    worker._visit_auth_step.assert_not_called()
+    worker.otp_callback.assert_not_called()
+    worker._create_account.assert_not_called()
+
+
+@pytest.mark.parametrize("next_step", [
+    {},
+    {"continue_url": "/error?next=/about-you"},
+    {"continue_url": "/about-you-required-other-step"},
+    {"page": {"type": "unsupported_step"}, "continue_url": "/about-you"},
+])
+def test_unconfirmed_profile_step_never_creates_account(registration_worker, next_step):
+    worker = registration_worker
+    worker._validate_otp.return_value = next_step
+    with pytest.raises(RuntimeError, match="^stage=protocol_registration_step_unconfirmed$"):
+        worker._create_account_from_authorization(
+            email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+        )
+    worker._create_account.assert_not_called()
+
+
+def test_repeated_password_state_does_not_repeat_password_write(registration_worker):
+    worker = registration_worker
+    worker._register_password.return_value = {"page": {"type": "password"}}
+    with pytest.raises(RuntimeError, match="^stage=protocol_password_step_not_advanced$"):
+        worker._create_account_from_authorization(
+            email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+        )
+    worker._register_password.assert_called_once()
+    worker.otp_callback.assert_not_called()
+    worker._create_account.assert_not_called()
+
+
+def test_confirmed_steps_create_once_without_duplicate_otp(registration_worker):
+    worker = registration_worker
+    result = worker._create_account_from_authorization(
+        email="u@example.test", password="fixture", authorization={"page": {"type": "password"}},
+    )
+    assert result == {"continue_url": "/completed"}
+    worker._register_password.assert_called_once()
+    worker._validate_otp.assert_called_once_with("123456")
+    worker._send_otp.assert_not_called()
+    worker._create_account.assert_called_once()

@@ -46,7 +46,7 @@
 - 密码页 500、浏览器错误、只读 AT 撤销、MFA 登录停用是独立事件，不会据此把一次未提交的密码操作描述为改密失败。
 - 本次页面登录仅使用已有密码与 TOTP，没有重置密码、重新 enroll、更新 Token 或修改账号运行数据。
 
-## 交付自检（R8）
+## 首轮交付自检（R8，675d1cb）
 
 1. **修改的已有代码**：`core/abai_protocol_registration.py:run_abai_protocol_registration`；`core/abais_protocol/protocol_register.py:_is_cloudflare_challenge_response/_finalize_registration_result`；`core/abais_protocol/mfa.py:bind_totp_2fa`；`integrations/roxy_unlimited_windows/scripts/fingerprint.mjs:coreExe/buildFingerprint`。本任务开始时已存在且未跟踪的 `LocalBrowserSession` 继续修改后纳入提交；README 与本地组件说明同步。
 2. **新增的代码**：Git 基线新增 `core/abais_protocol/local_browser_session.py:_BrowserCookies/LocalBrowserSession` 与对应测试，承接任务开始时的本地内核接入；入口原 `_next_profile/_proxy_rotator` 已删除。内部 `coreFullVersion` 替代 `buildFingerprint` 使用目录主版本的调用；原 `coreVersion` 仍供目录选择及版本校验使用，不是重复 transport。错误处理复用现有 AccountUnusableError，没有新增执行器或新旧路径开关。
@@ -84,3 +84,55 @@
    - 本例无 OAuth RT，未以此样本验证 OAuth Token 的长期有效性。
    - requests 字符集依赖 warning 是既有环境问题，本次未修改依赖。
    - 原有 `config/roxybrowser.py`、`main.py`、三个 `webui/` 文件的未提交改动，以及 PayPal 目录/测试不纳入本次提交；保留用户已有工作，因此全局工作树仍有这些改动。任务相关文件应提交完毕，并核对本地 HEAD 与 origin 当前分支一致。
+
+## 后续核对：协议状态机与直接调用本地 Roxy
+
+本轮使用现有代码、首轮证据和本地模拟响应验证。没有运行新的真实注册、探测停用账号或修改指纹生成器，也没有修改界面显示。之前的 `account_deactivated` 证据仍成立；以下缺陷不等于已查明停用触发原因。
+
+两条路径在本地模式下均使用 `RoxyBrowserClient`。协议入口显式选择本地组件，Roxy 页面入口按既有组件配置选择；共享内核与 Profile 创建组件，不意味着共享同一注册状态机。
+
+| 核对项 | 直接调用本地 Roxy | 协议模式 | 本轮处理 |
+| --- | --- | --- | --- |
+| 推进依据 | 页面元素、跳转和会话终态 | API 返回的 page/continue_url，经自有状态机判断 | 修正状态不明确时仍继续写入的分支 |
+| 手机验证要求 | 资料处理仅在资料页或已有会话时推进 | 原代码在 add_phone 后继续调用 create_account | 复用已有手机验证判定；任何后续注册写入前停止 |
+| 既有账号登录页 | 密码注册必需时识别为已有账号并停止 | 通用密码步骤判定也接纳登录密码页 | 注册状态机单独阻止登录密码步骤，不影响独立登录方法 |
+| 密码步骤未前进 | 等待并观察页面终态后处理 | 同一状态可在循环中重复执行密码提交 | 已提交密码后再次出现密码步骤立即停止，不重复写入 |
+| 缺失或矛盾的资料状态 | 等待资料页/会话；超时返回失败 | 原来空状态、URL 查询中含 about-you 或其他路径包含该子串均可被当成资料步骤 | 删除空状态放行；URL 只核对解析后的确切路径；未知 page_type 不被路径覆盖 |
+| 密码/MFA 要求 | 受现有 ENABLE_2FA 配置控制 | 协议入口强制确认密码及 TOTP | 现存业务要求差异，本轮未调整开关或增加配置 |
+| 资料来源 | 将入口 name/birthday 填入页面并保存 | 内部重新生成资料，入口仍保存传入资料 | 确认存在字段来源不一致，单列待处理；未据此断言停用原因 |
+| MFA 与 AT 判定 | 激活结果和后续只读 Token 校验分开，结果可为 partial_success | 确认激活后返回注册结果，后续后台再检测 AT | 激活成功不能证明账号长期可用；本轮没有改为伪造“有效”或重试停用账号 |
+
+代码依据：`core/roxy_registration.py:run_roxy_registration/_fill_password_page_if_present/_complete_profile_page/_switch_to_signup_password_branch`；`core/account_export.py` 的 `TwoFASetupResult` 生成与只读校验路径；`core/abais_protocol/protocol_register.py:_create_account_from_authorization/_session_result/_finalize_registration_result`；`core/abai_protocol_registration.py:run_abai_protocol_registration`。
+
+**本轮修复的 Finding / Path / 验证**：四类状态问题集中修改既有 `_create_account_from_authorization`。测试直接提供本地模拟的授权状态，断言必需验证、既有账号登录和未知状态不会触发密码/账号写入，密码步骤停滞不会重复写入。包含手机号要求出现在初始、密码步骤 URL 和邮箱校验之后等情况，并保留明确正常状态只创建一次、不重复发 OTP 的正向用例。首次针对性验证为 `10 failed, 1 passed`，修复及补充既有账号用例后相关回归全部通过。
+
+密码与 2FA 再核对：本轮失败均在资料创建或后续 MFA 之前抛出，沿原有错误包装和清理路径返回；没有新增 checkpoint、Token 刷新或 enroll/activate 调用。已有错邮箱、错 Bearer、Session 失败撤权、激活布尔确认与凭据脱敏回归继续通过。
+
+### 本轮交付自检（R8）
+
+1. **修改的已有代码**：`core/abais_protocol/protocol_register.py:ChatGPTProtocolRegister._create_account_from_authorization`。删除绕过必需步骤的继续创建分支和缺失状态的推测放行；未知状态错误改为受控阶段码。
+2. **新增的代码**：生产代码没有新增函数或执行路径，复用 `credential_checks._requires_phone_verification`；测试新增 `registration_worker` fixture 与 6 组状态用例（展开 14 个测试）。它们覆盖原测试缺少的状态门禁，没有复制生产实现。
+3. **搬迁项**：无；没有复制目录、生成备份或移动生产文件。
+4. **新增配置项链路**：无；错误阶段沿既有 worker → 协议入口异常包装 → 注册任务错误记录传递。
+5. **死引用回扫**：以下命令输出为空，退出码 1；没有遗留原 add_phone 放行说明或 URL 子串变量。
+
+   ```powershell
+   rg -n 'normalized_url|由服务端确认是否强制手机号验证' core/abais_protocol/protocol_register.py
+   ```
+
+6. **diff 统计**：本轮仅状态机、对应测试及本报告，3 个文件，`+166 / −18`。
+7. **测试**：`git diff --check` 通过。相关测试命令及最后 5 行原始输出：
+
+   ```powershell
+   .venv\Scripts\python.exe -m pytest -q tests/test_protocol_local_browser.py tests/test_abai_protocol_registration.py tests/test_twofa_registration.py --tb=short
+   ```
+
+   ```text
+     C:\Users\Administrator\Desktop\turb-gpt-free-register\.venv\Lib\site-packages\requests\__init__.py:92: RequestsDependencyWarning: Unable to find acceptable character detection dependency (chardet or charset_normalizer).
+       warnings.warn(
+
+   -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+   291 passed, 1 warning in 22.60s
+   ```
+
+8. **未做的 / 存疑的**：没有新增线上账号或新的指纹试验；未证明这些状态分支曾在已停用样本上触发；资料字段来源差异、MFA 开关与注册成功语义差异仍独立列出。服务端停用的具体依据仍未知。本轮改动使协议尊重已返回的验证要求，而非恢复停用账号。原有界面、配置及支付相关未提交工作继续保留，不混入本次提交。

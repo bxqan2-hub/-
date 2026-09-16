@@ -1729,6 +1729,8 @@ class ChatGPTProtocolRegister:
         password: str,
         authorization: dict,
     ) -> dict:
+        from .credential_checks import _requires_phone_verification
+
         page_type = _authorization_page_type(authorization)
         continue_url = _authorization_continue_url(authorization)
         password_registered = False
@@ -1741,7 +1743,15 @@ class ChatGPTProtocolRegister:
 
         for _ in range(6):
             self._check_cancelled()
+            if _requires_phone_verification({"page_type": page_type.lower()}, continue_url):
+                raise RuntimeError("stage=protocol_phone_verification_required")
+            normalized_page = page_type.lower()
+            normalized_path = urlparse(continue_url).path.rstrip("/")
+            if normalized_page == "login_password" or normalized_path == "/log-in/password":
+                raise RuntimeError("stage=protocol_existing_account_login_required")
             if _password_registration_step(page_type, continue_url):
+                if password_registered:
+                    raise RuntimeError("stage=protocol_password_step_not_advanced")
                 self._visit_auth_step(
                     continue_url or "/create-account/password",
                     referer="/create-account",
@@ -1797,27 +1807,14 @@ class ChatGPTProtocolRegister:
                 self.log(f"邮箱验证码校验通过: next={page_type or continue_url or 'unknown'}")
                 continue
 
-            normalized_page = str(page_type or "").strip().lower()
-            normalized_url = str(continue_url or "").strip().lower()
-            if normalized_page == "add_phone" or normalized_url.endswith("/add-phone"):
-                # ``add_phone`` is also used as a UI hint in sessions where
-                # the account-creation API still permits completion.  Let the
-                # server-side create_account call make the authoritative
-                # decision instead of rejecting the transaction prematurely.
-                self.log(
-                    "OpenAI 注册返回 add_phone，继续调用 create_account "
-                    "由服务端确认是否强制手机号验证"
-                )
-                break
             if (
                 normalized_page in {"about_you", "create_account"}
-                or "about-you" in normalized_url
-                or (not normalized_page and not normalized_url and password_registered and otp_completed)
+                or (not normalized_page and normalized_path == "/about-you")
             ):
                 break
-            raise RuntimeError(
-                f"OpenAI 注册进入未知步骤: {page_type or continue_url or 'unknown'}"
-            )
+            # Missing or conflicting state is not permission to skip a required
+            # step. Keep URL/query values out of the persisted failure message.
+            raise RuntimeError("stage=protocol_registration_step_unconfirmed")
         else:
             raise RuntimeError("OpenAI 注册状态切换次数过多")
 
