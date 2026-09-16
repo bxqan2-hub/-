@@ -175,7 +175,7 @@ def bind_totp_2fa(
     return {
         "secret": secret,
         "session_id": session_id,
-        "activated": bool(result.get("success")),
+        "activated": result.get("success") is True,
         "result": result,
     }
 

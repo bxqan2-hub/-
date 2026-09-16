@@ -20,7 +20,9 @@ README/MANUAL/TECHNICAL 中的接口示例代表上游，本站差异以本文�
   `--profile-dir` 由客户端内部传入，不新增 UI 路径配置。
 - `scripts/fingerprint.mjs:profileDir/parseProxy/coreExe/coreVersion/createProfileOnDisk`：
   ID/路径及链接校验；URL 解析保留代理密码中的冒号、@ 和 IPv6；socks5h 归一为 socks5；
-  从已安装目录选择指定真实内核；构建失败前不创建目录；默认使用干净骨架，
+  从已安装目录选择指定真实内核；从该 EXE 的 ProductVersion 读取完整版本，
+  写入 chromeVersion 供原生 Client Hints 使用，启动目录仍按主版本选择；版本读取失败或主版本不匹配时停止。
+  构建失败前不创建目录；默认使用干净骨架，
   不从最新官方或其他账号 Profile 继承代理、Cookie 或扩展状态。
 - `scripts/roxy-api.mjs`：使用 URL 解码后的脚本路径；健康响应标记组件和 Profile 根；
   写接口只收 POST JSON，禁止 Origin 请求并校验 Host，不开放跨站 CORS；

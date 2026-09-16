@@ -6,7 +6,7 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 > [`bxqan2-hub/-.git`](https://github.com/bxqan2-hub/-.git) 是**注册与账号管理主站**。
 > 独立的“邮箱换绑分站”是另一个 Git 项目、另一个进程和另一套运行数据；它的服务端源码不在本仓库中。
 
-- **protocol**：纯协议注册，基于 `curl_cffi` + Sentinel/PoW；强制 TLS/UA/OS 三层对齐并固定代理出口。
+- **protocol**：协议状态机 + 本地 Roxy 无窗口内核；HTTP、Cookie 与 SDK 共用实际内核和同一随机 Profile。
 - **roxy**：RoxyBrowser 指纹浏览器 + Selenium 自动化注册，兼容新版页面流，例如 `create-account/password`、`about-you` 年龄/生日表单、地区本地化页面等。
 - **cloak**：CloakBrowser + Playwright 适配层自动化注册，支持免费 binary、无头模式、humanize、固定 fingerprint seed、代理 geoip。
 - **browser_use**：Browser Use Cloud stealth Chromium + Playwright（可选住宅代理，无需本机安装 Roxy）。
@@ -361,14 +361,14 @@ CLOAK_USER_DATA_DIR = ""        # 留空临时环境；填路径可持久化 pro
 REGISTRATION_DRIVER = "protocol"
 ```
 
-协议注册会使用 `curl_cffi`、Sentinel/PoW、代理池等配置，并按 fail-closed 规则执行：
+协议注册保留 aBaiFreeGPT 的接口状态机，页面导航、API 请求与 SDK 由本地 Roxy 内核执行，不使用页面点击提交：
 
-- TLS 固定为 `chrome146` impersonate；UA、`sec-ch-ua*`、`navigator.platform` 与 JS OS 同步使用 Chrome 146 macOS 画像，任一层不一致即停止。
-- 每个注册会话只绑定一条代理，关闭环境变量/`NO_PROXY` 继承，禁止请求级覆盖代理或 TLS 指纹。
-- 代理必须能确认出口 IP；代理缺失、探测失败或连接失败时停止，不回退直连。
-- SOCKS 代理必须写成 `socks5h://`，避免 `socks5://` 在本地解析目标域名。
-- `oai-did` 和 Cloudflare Cookie 只采用服务端真实 `Set-Cookie`，首个成功响应后再同步 OAuth 设备上下文，避免预置跨域 Cookie 触发 Managed Challenge。
-- 收到 `cf-mitigated: challenge` 时，协议驱动保持当前选中的代理端点及 TLS/UA/OS 画像不变，只重建 transport、清理 Cloudflare 挑战 Cookie并保留 OAuth 流程 Cookie；达到重试上限才返回 `cloudflare_managed_challenge`。
+- 不弹浏览器窗口，后台仍有 Chromium 进程；启动参数固定 `headless=True`，结束后关闭并删除本次独立 Profile。
+- 使用现有 `ROXY_CORE_VERSION`，支持本地已安装的版本（例如 151 / 152 / 153）或 `latest`。完整版本从所选内核文件读取，核对实际内核、API 版本、运行时 UA 与 Client Hints 完整版本；不一致即停止。
+- 复用本地组件的随机指纹生成器；语言、时区按真实代理出口匹配，创建前预检并在实际内核内复核出口。
+- 首页、Auth 页面和 OAuth 回调执行真实 Document 导航，加载页面自身的 DOM/脚本；注册、OAuth 与 MFA 的 API 使用同一 Profile 内原生 fetch。API Referer 来自当前页面，SDK 复用页面加载的实例。
+- Cookie 保留浏览器域/路径约束；MFA 前重新核对同一浏览器 Session 邮箱与 Token，严格确认激活成功后保存。禁止请求级代理或 TLS 覆盖，错误按阶段记录。真实页面加载会产生页面资源和站点自身的后台请求，流量高于空白页 fetch。
+- 协议模式固定使用本地组件，正常 Roxy 注册仍按原有本地/官方开关运行。本次不改变默认注册方式；在现有设置中选择 `protocol` 才启用此路径。
 
 #### 使用 Browser Use Cloud 注册
 
@@ -644,16 +644,16 @@ REGISTER_PASSWORD = "你的固定密码"
 
 如果注册页面没有密码步骤，Roxy/Cloak/Browser Use/Skyvern 会在 MFA 重认证前触发
 `post_login_add_password`，通过邮箱验证码确认并提交同一个密码；密码未确认时不会继续 enroll TOTP。
-初始密码已成功提交时不会重复改密。`protocol` 纯协议驱动没有可用浏览器页面，无法执行补密码；
-开启 2FA 时会在远端注册前直接停止，需改用 Roxy/Cloak/Browser Use/Skyvern。
+初始密码已成功提交时不会重复改密。`protocol` 保留上游协议状态机的密码提交及同会话 MFA enroll/activate，
+现在由本地无窗口内核执行；只有密码提交和 TOTP 激活确认后才保存完整账号。
 该联动还要求 `USE_EMAIL_SERVICE=true`，用于自动收取注册后重认证的第二封 OTP。
 MFA 协议重认证遇到 Cloudflare HTTP 403 时，会复用当前注册浏览器通过挑战、同步 Cookie，
 再继续邮箱 OTP 与 TOTP 激活，而不是直接结束任务。
 
 配置项：
 
-- `ENABLE_2FA`：唯一联动开关，默认 `false`；开启后才设置密码并 enroll/activate TOTP。
-- `REGISTER_PASSWORD`：仅在 `ENABLE_2FA=true` 时使用；留空则每号随机生成。
+- `ENABLE_2FA`：上述页面注册路径的联动开关，默认 `false`；协议注册沿用上游强制确认密码与 TOTP 的保存条件。
+- `REGISTER_PASSWORD`：页面注册在 `ENABLE_2FA=true` 时使用；协议注册同样读取此值，留空则每号随机生成。
 
 保存位置：
 

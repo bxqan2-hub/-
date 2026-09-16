@@ -2,35 +2,22 @@
 from __future__ import annotations
 
 import logging
-import threading
+import re
 import time
-from dataclasses import asdict
 from typing import Callable
 
 from config import email as email_cfg
+from config.proxy import mask_proxy_url
 from core.account_export import save_account_data
 from core.email_provider import resolve_email_source, wait_for_otp
 from core.flow_trigger import trigger_flow
+from core.abais_protocol.local_browser_session import LocalBrowserSession
 from core.registration_password import (
     persist_confirmed_registration_password,
     registration_password,
 )
 
 logger = logging.getLogger(__name__)
-_PROFILE_POOL = None
-_PROFILE_LOCK = threading.Lock()
-
-
-def _next_profile():
-    global _PROFILE_POOL
-    from core.abais_protocol.environment_profile import FingerprintPool
-
-    with _PROFILE_LOCK:
-        if _PROFILE_POOL is None:
-            _PROFILE_POOL = FingerprintPool.from_us_en_desktop()
-        return next(_PROFILE_POOL)
-
-
 def _pick_protocol_proxy(proxy: str | None) -> str:
     selected = str(proxy or "").strip()
     if selected:
@@ -38,20 +25,6 @@ def _pick_protocol_proxy(proxy: str | None) -> str:
     from config.proxy import pick_proxy
 
     return str(pick_proxy(strict=True) or "").strip()
-
-
-def _proxy_rotator(current: str) -> Callable[[], str | None]:
-    def rotate() -> str | None:
-        from config.proxy import pick_proxy
-
-        try:
-            candidate = str(pick_proxy(strict=True, excluded={current}) or "").strip()
-        except Exception as exc:
-            logger.warning("[协议注册] Cloudflare 后代理轮换失败: %s", exc)
-            return None
-        return candidate or None
-
-    return rotate
 
 
 def _otp_callback(email: str, initial_code: str | None) -> Callable[[], str]:
@@ -87,29 +60,49 @@ def run_abai_protocol_registration(
 
     selected_proxy = _pick_protocol_proxy(proxy)
     password = registration_password()
-    profile = _next_profile()
-    logger.info(
-        "[aBaiFreeGPT协议] 开始：%s，profile=%s，impersonate=%s",
-        email,
-        profile.name,
-        profile.impersonate,
-    )
-    worker = ChatGPTProtocolRegister(
-        proxy=selected_proxy,
-        otp_callback=_otp_callback(email, otp_code),
-        profile=profile,
-        proxy_rotate_callback=_proxy_rotator(selected_proxy),
-        log_fn=lambda message: logger.info("[aBaiFreeGPT协议] %s", message),
-    )
-    result = worker.run(email=email, password=password)
+    from core.registration_service import check_stop_requested, is_stop_requested
+
+    with LocalBrowserSession(proxy=selected_proxy, email=email) as transport:
+        profile = dict(transport.profile)
+        worker = ChatGPTProtocolRegister(
+            proxy=selected_proxy,
+            otp_callback=_otp_callback(email, otp_code),
+            session=transport,
+            cancel_check=is_stop_requested,
+            # Upstream messages may contain auth URLs or remote response bodies.
+            log_fn=lambda _message: logger.info("[aBaiFreeGPT协议] stage=%s http=%s", transport.stage, transport.http_status),
+        )
+        # Reuse the worker's existing borrowed-session and Sentinel interfaces.
+        # No curl session/profile or proxy-rotation factory enters registration.
+        worker.user_agent = profile["user_agent"]
+        worker.sentinel = transport
+        try:
+            result = worker.run(email=email, password=password)
+        except Exception as exc:
+            check_stop_requested()
+            stage = re.search(r"\bstage=(protocol_[a-z_]+)\b", str(exc))
+            code = getattr(exc, "code", "")
+            if code in ("account_deactivated", "account_suspended", "account_banned"):
+                from core.openai_auth import AccountUnusableError
+
+                raise AccountUnusableError(
+                    f"stage={transport.stage} http_status={transport.http_status or '-'} code={code}",
+                    error_code=code,
+                ) from None
+            raise RuntimeError(
+                f"stage={stage.group(1) if stage else transport.stage} "
+                f"http_status={transport.http_status or '-'} type={type(exc).__name__}"
+            ) from None
 
     access_token = str(result.get("access_token") or "").strip()
     totp = result.get("totp_2fa") if isinstance(result.get("totp_2fa"), dict) else {}
     totp_secret = str(totp.get("secret") or "").strip() or None
     if not access_token:
         raise RuntimeError("aBaiFreeGPT 协议注册未返回 access_token")
-    if not totp_secret or not bool(totp.get("bound")):
+    if not totp_secret or totp.get("bound") is not True:
         raise RuntimeError("aBaiFreeGPT 协议注册未确认 TOTP 激活")
+    if result.get("password_registered") is not True:
+        raise RuntimeError("协议注册未确认密码提交成功")
 
     checkpoint_persisted = persist_confirmed_registration_password(email, password)
     refresh_token = str(result.get("refresh_token") or "").strip()
@@ -127,7 +120,8 @@ def run_abai_protocol_registration(
         "id_token": result.get("id_token"),
         "client_id": result.get("client_id"),
         "cookies": result.get("cookies") if isinstance(result.get("cookies"), dict) else {},
-        "browser_profile": asdict(profile),
+        "browser_profile": profile,
+        "registration_traffic": transport.traffic,
         "registration_password": password,
         "password_registered": bool(result.get("password_registered")),
         "password_setup": {
@@ -148,7 +142,9 @@ def run_abai_protocol_registration(
         access_token=access_token,
         totp_secret=totp_secret,
         email_source=resolve_email_source(email),
-        proxy_used=selected_proxy or None,
+        proxy_used=mask_proxy_url(selected_proxy) or None,
+        registration_exit_ip=transport.exit_geo.get("ip"),
+        registration_exit_country=transport.exit_geo.get("country"),
         batch_dir=batch_dir,
         registration_name=name,
         birth_date=birthday,
@@ -167,6 +163,7 @@ def run_abai_protocol_registration(
         "totp_secret": totp_secret,
         "flow": flow_result,
         "codex": codex_result,
+        "traffic": transport.traffic,
         "error": None,
     }
 

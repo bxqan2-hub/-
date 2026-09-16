@@ -199,16 +199,11 @@ class DirectCodexRegistrationUnavailable(RuntimeError):
 
 
 def _is_cloudflare_challenge_response(response) -> bool:
-    status = int(getattr(response, "status_code", 0) or 0)
     headers = {
         str(key).strip().lower(): str(value or "").strip().lower()
         for key, value in (getattr(response, "headers", {}) or {}).items()
     }
     content_type = headers.get("content-type", "")
-    if status in {403, 429, 500, 502, 503, 504} and (
-        headers.get("server") == "cloudflare" or "cf-ray" in headers
-    ):
-        return True
     try:
         body = str(getattr(response, "text", "") or "").lower()
     except Exception:
@@ -231,10 +226,8 @@ def _is_cloudflare_challenge_response(response) -> bool:
         )
     ):
         return True
-    # Cloudflare's current blocked/error page may omit its brand and can be
-    # returned as an empty 5xx body from the edge.  Treat those responses as
-    # a challenge so the caller can rotate the route instead of recording a
-    # false password failure.
+    # A CDN server/ray header alone also accompanies ordinary auth errors.
+    # Preserve those responses for account-state / HTTP error handling.
     return False
 
 
@@ -1555,16 +1548,33 @@ class ChatGPTProtocolRegister:
         access_token = str(result.get("access_token") or "").strip()
         if not access_token:
             raise RuntimeError("协议注册结果缺少 access token，无法绑定 TOTP 2FA")
+        # OAuth token minting can change auth cookies and the returned token's
+        # audience. Re-read this browser's web session before any MFA mutation;
+        # keep the OAuth export token separate from the explicit MFA bearer.
+        self._check_cancelled()
+        session_response = self.session.get(f"{CHATGPT_APP}/api/auth/session")
+        session_payload = _response_json(session_response)
+        _raise_if_explicit_account_ban(session_payload, stage="MFA 前会话核对")
+        user = session_payload.get("user")
+        expected_email = str(result.get("email") or "").strip().casefold()
+        actual_email = str(user.get("email") or "").strip().casefold() if isinstance(user, dict) else ""
+        mfa_token = session_payload.get("accessToken")
+        if (getattr(session_response, "status_code", 0) != 200
+                or not isinstance(mfa_token, str) or not mfa_token.strip()):
+            raise RuntimeError("stage=protocol_mfa_session_read")
+        if not expected_email or expected_email != actual_email:
+            raise RuntimeError("stage=protocol_session_account_mismatch")
+        self._check_cancelled()
         try:
-            totp = bind_totp_2fa(self.session, access_token)
+            totp = bind_totp_2fa(self.session, mfa_token.strip())
         except Exception as exc:
-            raise RuntimeError(f"协议注册 TOTP 2FA 绑定失败: {exc}") from exc
-        secret = str(totp.get("secret") or "").strip()
-        if not bool(totp.get("activated")) or not secret:
+            stage = re.search(r"\bstage=(protocol_[a-z_]+)\b", str(exc))
             raise RuntimeError(
-                "协议注册 TOTP 2FA 激活未确认，拒绝保存账号: "
-                f"{str(totp.get('result') or totp)[:160]}"
-            )
+                f"stage={stage.group(1) if stage else 'protocol_mfa_bind'} type={type(exc).__name__}"
+            ) from None
+        secret = str(totp.get("secret") or "").strip()
+        if totp.get("activated") is not True or not secret:
+            raise RuntimeError("stage=protocol_mfa_activation_unconfirmed")
         result["password_registered"] = True
         result["totp_2fa"] = {
             "requested": True,

@@ -185,8 +185,25 @@ def node_api(tmp_path_factory):
     profiles = root / "profiles"
     session = requests.Session()
     session.trust_env = False
+    # Keep the OS version-info boundary deterministic; the test executables
+    # are deliberately inert files, never copies of an installed browser.
+    version_reader = root / "version-reader.mjs"
+    version_reader.write_text("""
+import cp from 'node:child_process';
+import path from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
+const original = cp.execFileSync;
+cp.execFileSync = function(file, args, options) {
+  if (options?.env?.ROXY_VERSION_EXE) {
+    const major = path.basename(path.dirname(options.env.ROXY_VERSION_EXE));
+    return `${major}.0.1.2`;
+  }
+  return original.call(this, file, args, options);
+};
+syncBuiltinESMExports();
+""", encoding="utf-8")
     with (root / "node.log").open("wb") as log:
-        process = subprocess.Popen([node, str(mod._BUNDLED_ROXY_API), "--port", str(port), "--data-dir", str(root / "roxy"), "--profile-dir", str(profiles)], stdout=log, stderr=log, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        process = subprocess.Popen([node, "--import", version_reader.as_uri(), str(mod._BUNDLED_ROXY_API), "--port", str(port), "--data-dir", str(root / "roxy"), "--profile-dir", str(profiles)], stdout=log, stderr=log, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     base = f"http://127.0.0.1:{port}"
     try:
         for _ in range(100):
@@ -219,7 +236,7 @@ def test_vendored_api_random_profiles_proxy_codec_and_idempotent_delete(node_api
             created.append(pid)
             fp = session.get(base + "/browser/fingerprint", params={"dirId": pid, "full": 1}, timeout=5).json()["data"]
             assert fp["fproxy"]["type"] == "socks5"
-            assert fp["chromeVersion"] == "151" and "Chrome/151." in fp["userAgent"]
+            assert fp["chromeVersion"] == "151.0.1.2" and "Chrome/151." in fp["userAgent"]
             assert fp["fproxy"]["password"] == "p:a@ss" and fp["fproxy"]["host"] == "::1"
             fingerprints.append(fp)
         assert created[0] != created[1]
@@ -228,7 +245,7 @@ def test_vendored_api_random_profiles_proxy_codec_and_idempotent_delete(node_api
         created.append(direct)
         fp = session.get(base + "/browser/fingerprint", params={"dirId": direct, "full": 1}, timeout=5).json()["data"]
         assert "fproxy" not in fp
-        assert fp["chromeVersion"] == "153"  # Only an unspecified core selects latest.
+        assert fp["chromeVersion"] == "153.0.1.2"  # Only an unspecified core selects latest.
     finally:
         for pid in created:
             for _ in range(2):
@@ -262,7 +279,7 @@ def test_vendored_api_matches_actual_proxy_geography(node_api, country, zone, lo
     pid = response["data"]["dirId"]
     try:
         fp = session.get(base + "/browser/fingerprint", params={"dirId": pid, "full": 1}, timeout=5).json()["data"]
-        assert fp["chromeVersion"] == "151"
+        assert fp["chromeVersion"] == "151.0.1.2"
         assert fp["appLocale"] == locale and fp["timeZone"] == zone
         assert fp["acceptLang"] == locale
         assert response["data"]["locale"] == locale and response["data"]["timeZone"] == zone

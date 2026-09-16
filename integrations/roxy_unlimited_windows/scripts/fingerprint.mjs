@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 // ---------- codec ----------
 const KEY = Buffer.from('402ead7d23b43b6d1e0528d4f99c59bd', 'utf8');
@@ -138,8 +139,9 @@ const noiseStr = (n) => Array.from(crypto.randomBytes(n)).map((b) => NOISE_ALPHA
 export function coreExe(opts) {
   const P = getPaths(opts);
   if (opts?.coreVersion && opts.coreVersion !== 'latest') {
-    const version = String(opts.coreVersion);
-    if (!/^[1-9][0-9]{1,2}$/.test(version)) throw new Error('invalid coreVersion');
+    const requested = String(opts.coreVersion);
+    if (!/^[1-9][0-9]{1,2}(?:\.\d+\.\d+\.\d+)?$/.test(requested)) throw new Error('invalid coreVersion');
+    const version = requested.split('.')[0];
     const exe = path.join(P.coreBinDir, version, 'RoxyChrome.exe');
     if (!fs.existsSync(exe)) throw new Error(`Roxy core ${version} is not installed`);
     return exe;
@@ -154,6 +156,24 @@ export function coreExe(opts) {
   return P.coreExe;
 }
 export const coreVersion = (opts) => path.basename(path.dirname(coreExe(opts)));
+
+const CORE_VERSIONS = new Map();
+function coreFullVersion(opts) {
+  const executable = coreExe(opts);
+  const key = `${executable}:${fs.statSync(executable).mtimeMs}`;
+  if (CORE_VERSIONS.has(key)) return CORE_VERSIONS.get(key);
+  // The install directory names only the major version. Chromium's high-entropy
+  // Client Hints require the actual executable version, not that directory name.
+  const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    '(Get-Item -LiteralPath $env:ROXY_VERSION_EXE).VersionInfo.ProductVersion'], {
+    encoding: 'utf8', timeout: 8000, windowsHide: true,
+    env: { ...process.env, ROXY_VERSION_EXE: executable },
+  }).trim();
+  const version = output.match(/^([1-9][0-9]{1,2}\.\d+\.\d+\.\d+)(?:\s|$)/)?.[1];
+  if (!version || version.split('.')[0] !== coreVersion(opts)) throw new Error('installed core version mismatch');
+  CORE_VERSIONS.set(key, version);
+  return version;
+}
 
 export function parseProxy(s) {
   try {
@@ -216,7 +236,7 @@ export function buildFingerprint(o) {
     ? { width: o.screen[0], height: o.screen[1] }
     : pick(SCREENS);
 
-  const ver = coreVersion({ coreVersion: o.coreVersion });
+  const ver = coreFullVersion({ coreVersion: o.coreVersion });
   const major = ver.split('.')[0];
 
   // ---- identity ----
