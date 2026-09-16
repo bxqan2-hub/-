@@ -1,5 +1,11 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-16 1035 补密码 Session 读取与本地 151 复测
+
+- 仍锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新读取 account_export、roxy_registration、roxy_codex_oauth、roxybrowser_client，对照 SHA-256 见本次报告。密码重认证是本地扩展；上游 MFA Session 读取的 no-store 与显式 Token 边界保留。
+- 1035 旧日志显示本地开窗、邮箱 OTP 和首次 Session 邮箱匹配均成功，补密码再次读取 Session 时 403，尚未进入密码/MFA 写入。原地对齐 Session/CSRF 的 no-store/no-cache，并分开 Session、CSRF 与 signin 错误类型；历史 403 的唯一来源未由响应头取证确认。
+- 原批次结束后加载修复，1035 于 11:11:39 实际补密码、MFA enroll/activate、只读 Token 校验成功；唯一 Profile 实际 Chrome 151.0.7922.72，已关闭删除。其他浏览器入口检查、凭据风险复核、回归及 R8 见 `docs/2026-09-16_1035补密码2FA修复与本地调用实测-report.md`。
+
 ## 2026-09-16 本地 Roxy 组件开关与 151 内核实测
 
 - GPT-utral-platform 仍锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新对照 roxybrowser_client、roxy_registration、account_export，SHA-256 分别为 `6cb5281a320080425544727c6aa1dc95c40f3183d814f381e9f64e002d6c1e9c`、`454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`、`985b99e669711d3de50dd6072ba83f660ac74d5ea156bf84f829c8fb258d0547`。

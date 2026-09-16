@@ -186,7 +186,8 @@ def test_security_setup_api_routes_are_independent_and_do_not_return_secrets(mon
 
 
 @pytest.mark.parametrize("refresh_state", ["ok", "transport_recovered", "missing_token", "wrong_email", "read_failed", "existing_password", "existing_totp", "existing_totp_read_failed", "existing_totp_missing_token", "existing_totp_wrong_email", "existing_totp_cookie_failed"])
-def test_security_worker_reuses_validated_helpers_without_entering_registration(monkeypatch, tmp_path, refresh_state) -> None:
+@pytest.mark.parametrize("local_backend", [False, True])
+def test_security_worker_reuses_validated_helpers_without_entering_registration(monkeypatch, tmp_path, refresh_state, local_backend) -> None:
     from config import roxybrowser as roxy_cfg
     from core import account_export, registration_password, roxy_codex_oauth, roxy_registration, session as session_module
 
@@ -236,7 +237,37 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
         "update_account_security_setup",
         lambda *args, **kwargs: calls["updates"].append((args, kwargs)) or True,
     )
-    monkeypatch.setattr("core.roxybrowser_client.RoxyBrowserClient", Client)
+    profile_id = "profile-7"
+    if local_backend:
+        from core import roxybrowser_client
+        from config import proxy as proxy_cfg
+        profile_id = "local-" + "7" * 32
+        local = roxybrowser_client.RoxyBrowserClient(local_component=True, profile_proxy="socks5h://fixture.example:1080")
+        monkeypatch.setattr(proxy_cfg, "pick_proxy", lambda **kw: "socks5h://fixture.example:1080")
+        monkeypatch.setattr(roxy_cfg, "ROXY_CREATE_USE_PROXY_POOL", True)
+        monkeypatch.setattr(roxy_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True)
+        monkeypatch.setattr(roxy_cfg, "ROXY_KEEP_BROWSER_OPEN", False)
+        monkeypatch.setattr(roxy_cfg, "ROXY_DELETE_PROFILE_AFTER_RUN", True)
+        monkeypatch.setattr(roxy_cfg, "ROXY_CORE_VERSION", "151")
+        monkeypatch.setattr("core.browser_exit_geo.probe_proxy_exit_geo", lambda *a, **kw: {"ip": "203.0.113.7", "country": "GB", "timezone": "Europe/London"})
+        def wire(method, path, **kwargs):
+            calls.setdefault("wire", []).append((method, path, kwargs.get("json_body")))
+            assert local.api_base == "http://127.0.0.1:50001"
+            return {"code": 0, "data": {"dirId": "7" * 32, "http": "127.0.0.1:9222", "coreVersion": "151"}}
+        monkeypatch.setattr(local, "request", wire)
+        original_open, original_cleanup = local.open_profile, local.cleanup_profile
+        def open_local(**kwargs):
+            calls["open_count"] = calls.get("open_count", 0) + 1
+            calls["open_profile"] = kwargs
+            return original_open(**kwargs)
+        def cleanup_local(opened):
+            calls["cleanup_profile"] = opened.profile_id
+            return original_cleanup(opened)
+        monkeypatch.setattr(local, "open_profile", open_local)
+        monkeypatch.setattr(local, "cleanup_profile", cleanup_local)
+        monkeypatch.setattr(roxybrowser_client, "RoxyBrowserClient", lambda: local)
+    else:
+        monkeypatch.setattr("core.roxybrowser_client.RoxyBrowserClient", Client)
     monkeypatch.setattr(roxy_registration, "_build_driver", lambda opened: Driver())
     monkeypatch.setattr(roxy_registration, "_center_browser_window", lambda driver: calls.setdefault("centered", True))
     def fetch_session(*args, **kwargs):
@@ -307,7 +338,12 @@ def test_security_worker_reuses_validated_helpers_without_entering_registration(
     else:
         assert "password" not in calls
         assert calls["session_reads"] == 1
-    assert calls["cleanup_profile"] == "profile-7"
+    assert calls["cleanup_profile"] == profile_id
+    if local_backend:
+        assert [item[1] for item in calls["wire"]] == ["/browser/create", "/browser/open", "/browser/close", "/browser/delete"] * calls["open_count"]
+        assert calls["wire"][0][2]["coreVersion"] == "151"
+        assert calls["wire"][0][2]["country"] == "GB"
+        assert calls["wire"][-1][2] == {"dirId": "7" * 32}
     assert calls["driver_quit"] is True
     assert calls["session_closed"] is True
     assert calls["updates"][-1][1]["registration_password"] == "Worker-pass-1!"

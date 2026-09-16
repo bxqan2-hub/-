@@ -86,12 +86,29 @@ def test_protocol_entry_receives_local_route_instead_of_pool(monkeypatch):
     factory.assert_called_once_with(proxy="http://127.0.0.1:7897")
 
 
-def test_codex_headless_skips_visible_window_positioning(monkeypatch):
+@pytest.mark.parametrize("local_backend", [False, True])
+def test_codex_headless_skips_visible_window_positioning(monkeypatch, local_backend):
     monkeypatch.setattr(codex_config, "CODEX_HEADLESS", True)
     monkeypatch.setattr(roxy_codex_oauth._roxy_cfg, "ROXY_OPEN_HEADLESS", False)
     monkeypatch.setattr(roxy_codex_oauth._roxy_cfg, "ROXY_KEEP_BROWSER_OPEN", False)
     client, driver, center = Mock(), Mock(), Mock()
     client.open_profile.return_value = SimpleNamespace(profile_id="fixture", raw={})
+    wire_calls = []
+    if local_backend:
+        from core.roxybrowser_client import RoxyBrowserClient
+        for key, value in {"ROXY_ONE_PROFILE_PER_ACCOUNT": True, "ROXY_DELETE_PROFILE_AFTER_RUN": True,
+                           "ROXY_CORE_VERSION": "151"}.items():
+            monkeypatch.setattr(roxy_codex_oauth._roxy_cfg, key, value)
+        local = RoxyBrowserClient(local_component=True, profile_proxy="http://127.0.0.1:7897")
+        monkeypatch.setattr("core.browser_exit_geo.probe_proxy_exit_geo", lambda *a, **kw: {
+            "ip": "203.0.113.7", "country": "GB", "timezone": "Europe/London",
+        })
+        def wire(method, path, **kwargs):
+            assert local.api_base == "http://127.0.0.1:50001"
+            wire_calls.append((path, kwargs.get("json_body")))
+            return {"code": 0, "data": {"dirId": "7" * 32, "http": "127.0.0.1:9222", "coreVersion": "151"}}
+        monkeypatch.setattr(local, "request", wire)
+        client = Mock(wraps=local)
     monkeypatch.setattr(roxy_codex_oauth, "RoxyBrowserClient", Mock(return_value=client))
     monkeypatch.setattr(roxy_codex_oauth, "_build_driver", Mock(return_value=driver))
     monkeypatch.setattr(roxy_codex_oauth, "_center_browser_window", center)
@@ -102,7 +119,15 @@ def test_codex_headless_skips_visible_window_positioning(monkeypatch):
     client.open_profile.assert_called_once_with(headless=True)
     center.assert_not_called()
     driver.quit.assert_called_once()
-    client.cleanup_profile.assert_called_once_with(client.open_profile.return_value)
+    client.cleanup_profile.assert_called_once()
+    if local_backend:
+        assert [path for path, _ in wire_calls] == ["/browser/create", "/browser/open", "/browser/close", "/browser/delete"]
+        assert wire_calls[0][1]["coreVersion"] == "151"
+        assert wire_calls[0][1]["country"] == "GB"
+        assert wire_calls[1][1]["headless"] is True
+        assert client.cleanup_profile.call_args.args[0].profile_id == "local-" + "7" * 32
+    else:
+        client.cleanup_profile.assert_called_once_with(client.open_profile.return_value)
 
 
 @pytest.mark.parametrize("provider,label,key,base", [

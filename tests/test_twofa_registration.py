@@ -2859,7 +2859,8 @@ def test_password_disabled_control_is_not_an_error_page(runtime):
 
 @pytest.mark.parametrize("runtime", ["selenium", "playwright"])
 @pytest.mark.parametrize("matched", [False, True])
-def test_password_reauth_javascript_checks_target_before_signin(runtime, matched):
+@pytest.mark.parametrize("stale_cache", [False, True])
+def test_password_reauth_javascript_checks_target_before_signin(runtime, matched, stale_cache):
     import json
     import shutil
     import subprocess
@@ -2869,11 +2870,14 @@ def test_password_reauth_javascript_checks_target_before_signin(runtime, matched
         pytest.skip("Node.js is required for the browser fixture")
     source = account_export._PASSWORD_REAUTH_SELENIUM_JS if runtime == "selenium" else account_export._PASSWORD_REAUTH_JS
     script = """
-const {source,runtime,matched} = JSON.parse(require('fs').readFileSync(0,'utf8'));
+const {source,runtime,matched,stale_cache} = JSON.parse(require('fs').readFileSync(0,'utf8'));
 const calls=[];
 global.document={cookie:'oai-did=fixture-device'};
 global.fetch=async (url,options={})=>{
  const path=new URL(url,'https://chatgpt.com').pathname; calls.push(path);
+ if(stale_cache && ['/api/auth/session','/api/auth/csrf'].includes(path) &&
+    (options.cache!=='no-store' || options.headers?.['cache-control']!=='no-cache'))
+   return {ok:false,status:403,json:async()=>({})};
  const value=path.endsWith('/session')?{accessToken:'private-token',user:{email:matched?'user@example.test':'other@example.test'}}:
    path.endsWith('/csrf')?{csrfToken:'csrf-fixture'}:{url:'https://auth.openai.com/email-verification'};
  return {ok:true,status:200,json:async()=>value};
@@ -2882,13 +2886,36 @@ const run=runtime==='selenium'?new Promise(resolve=>new Function(source)('user@e
  eval(`(${source})`)('user@example.test');
 run.then(result=>process.stdout.write(JSON.stringify({result,calls})));
 """
-    result = json.loads(subprocess.run([node, "-e", script], input=json.dumps({"source": source, "runtime": runtime, "matched": matched}),
+    result = json.loads(subprocess.run([node, "-e", script], input=json.dumps({"source": source, "runtime": runtime, "matched": matched, "stale_cache": stale_cache}),
                                       text=True, capture_output=True, check=True, timeout=10).stdout)
     assert result["calls"] == (["/api/auth/session", "/api/auth/csrf", "/api/auth/signin/openai"] if matched else ["/api/auth/session"])
     assert result["result"]["ok"] is matched
     if not matched:
         assert result["result"]["stage"] == "session_account_mismatch"
     assert "private-token" not in str(result)
+
+
+@pytest.mark.parametrize("response_stage,expected_stage,expected_code", [
+    ("session", "password_session", "password_session_read_failed"),
+    ("session_account_mismatch", "password_session", "password_session_account_mismatch"),
+    ("csrf", "password_csrf", "password_csrf_read_failed"),
+    ("signin", "password_reauth", "password_reauth_start_failed"),
+])
+def test_password_reauth_read_failures_are_separate_from_write_failures(monkeypatch, caplog, response_stage, expected_stage, expected_code):
+    monkeypatch.setattr(account_export, "_snapshot_otp_history", lambda *a, **k: set())
+    monkeypatch.setattr(account_export, "_snapshot_otp_message_ids", lambda *a, **k: set())
+    driver = SimpleNamespace(execute_async_script=Mock(return_value={
+        "ok": False, "stage": response_stage, "status": 403, "text": "PRIVATE-TOKEN PRIVATE-COOKIE",
+    }), get=Mock())
+    result = account_export._setup_password_with_driver(
+        driver=driver, session=object(), email="user@example.test", password="Ab3!cdefgh123",
+    )
+    assert result["ok"] is False
+    assert result["stage"] == expected_stage and result["code"] == expected_code
+    assert result["http_status"] == 403
+    driver.execute_async_script.assert_called_once()
+    driver.get.assert_not_called()
+    assert "PRIVATE-" not in str(result) + caplog.text
 
 
 def test_password_timeout_resend_javascript_matches_english_and_vietnamese():

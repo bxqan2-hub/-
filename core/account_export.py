@@ -660,7 +660,8 @@ _BROWSER_CHALLENGE_RE = re.compile(
 _PASSWORD_REAUTH_JS = r"""
 async expectedEmail => {
   const sessionResponse = await fetch('/api/auth/session', {
-    credentials: 'include', headers: {'accept': 'application/json'},
+    cache: 'no-store', credentials: 'include',
+    headers: {'accept': 'application/json', 'cache-control': 'no-cache'},
   });
   const session = await sessionResponse.json().catch(() => ({}));
   const email = String(session?.user?.email || '');
@@ -669,7 +670,8 @@ async expectedEmail => {
   if (!expectedEmail || email.trim().toLowerCase() !== String(expectedEmail).trim().toLowerCase())
     return {ok:false, stage:'session_account_mismatch', status:sessionResponse.status};
   const csrfResponse = await fetch('/api/auth/csrf', {
-    credentials: 'include', headers: {'accept': 'application/json'},
+    cache: 'no-store', credentials: 'include',
+    headers: {'accept': 'application/json', 'cache-control': 'no-cache'},
   });
   const csrf = await csrfResponse.json().catch(() => ({}));
   const csrfToken = String(csrf.csrfToken || '');
@@ -705,7 +707,8 @@ const done = arguments[arguments.length - 1];
   try {
     const result = await (async () => {
       const sessionResponse = await fetch('/api/auth/session', {
-        credentials: 'include', headers: {'accept': 'application/json'},
+        cache: 'no-store', credentials: 'include',
+        headers: {'accept': 'application/json', 'cache-control': 'no-cache'},
       });
       const session = await sessionResponse.json().catch(() => ({}));
       const email = String(session?.user?.email || '');
@@ -714,7 +717,8 @@ const done = arguments[arguments.length - 1];
       if (!expectedEmail || email.trim().toLowerCase() !== expectedEmail)
         return {ok:false, stage:'session_account_mismatch', status:sessionResponse.status};
       const csrfResponse = await fetch('/api/auth/csrf', {
-        credentials: 'include', headers: {'accept': 'application/json'},
+        cache: 'no-store', credentials: 'include',
+        headers: {'accept': 'application/json', 'cache-control': 'no-cache'},
       });
       const csrf = await csrfResponse.json().catch(() => ({}));
       const csrfToken = String(csrf.csrfToken || '');
@@ -1577,10 +1581,17 @@ def _setup_password_with_driver(
         }
     if not isinstance(reauth, dict) or not reauth.get("ok"):
         status = reauth.get("status") if isinstance(reauth, dict) else None
+        response_stage = str(reauth.get("stage") or "") if isinstance(reauth, dict) else ""
+        stage, code = {
+            "session": ("password_session", "password_session_read_failed"),
+            "session_account_mismatch": ("password_session", "password_session_account_mismatch"),
+            "csrf": ("password_csrf", "password_csrf_read_failed"),
+        }.get(response_stage, ("password_reauth", "password_reauth_start_failed"))
+        logger.warning("%s[2FA][密码] 重认证启动未完成 stage=%s code=%s http_status=%s", prefix, stage, code, status or "-")
         return {
-            "ok": False, "status": "failed", "stage": "password_reauth",
-            "code": "password_reauth_start_failed",
-            "message": f"重认证启动失败 stage={reauth.get('stage') if isinstance(reauth, dict) else '?'} status={status}",
+            "ok": False, "status": "failed", "stage": stage,
+            "code": code,
+            "message": f"重认证启动未完成 stage={stage} status={status}",
             "http_status": int(status) if status else None,
         }
     try:
