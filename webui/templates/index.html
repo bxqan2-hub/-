@@ -8793,7 +8793,7 @@ function smsConfigSectionForKey(key) {
 
 function roxyConfigSectionForKey(key) {
   if ([
-    'ROXY_API_BASE', 'ROXY_API_TOKEN', 'ROXY_PROFILE_ID', 'ROXY_WORKSPACE_ID', 'ROXY_PROJECT_ID',
+    'ROXY_LOCAL_COMPONENT', 'ROXY_API_BASE', 'ROXY_API_TOKEN', 'ROXY_PROFILE_ID', 'ROXY_WORKSPACE_ID', 'ROXY_PROJECT_ID',
     'ROXY_WORKSPACE_LIST_PATH', 'ROXY_OPEN_PATH', 'ROXY_CLOSE_PATH', 'ROXY_DELETE_PATH',
   ].includes(key)) {
     return ['连接与团队', 'Roxy 本地 API、团队/项目、固定环境和生命周期接口路径'];
@@ -10334,6 +10334,11 @@ async function loadRoxyWorkspaces() {
   status.textContent = '正在调用 Roxy API 获取团队/工作区...';
   try {
     const r = await api('/api/roxy/workspaces');
+    if (r.local_component) {
+      sel.innerHTML = '<option value="">本地组件无需团队/项目</option>';
+      status.textContent = r.message || '本地组件已就绪';
+      return;
+    }
     const items = r.items || [];
     if (!items.length) {
       const errs = (r.errors || []).slice(0, 5).map(x => `${x.method || ''} ${x.path || ''}: ${x.error || ''}`).join('；');

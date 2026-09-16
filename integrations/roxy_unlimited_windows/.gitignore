@@ -1,0 +1,7 @@
+# 运行时生成的文件（含本机 dirId，勿提交）
+scripts/last-created.json
+*.decrypted.json
+
+# 内核解包/下载的临时产物
+*.log
+*.tmp

@@ -96,7 +96,8 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
                         self.assertEqual(roxybrowser.ROXY_CORE_VERSION, expected)
                         with patch.object(config_editor, "EDITABLE_FIELDS", [field]):
                             self.assertEqual(config_editor.get_config()[0]["value"], expected)
-                        with patch.object(roxybrowser, "ROXY_WORKSPACE_ID", "123"), \
+                        with patch.object(roxybrowser, "ROXY_LOCAL_COMPONENT", False), \
+                             patch.object(roxybrowser, "ROXY_WORKSPACE_ID", "123"), \
                              patch.object(RoxyBrowserClient, "request", return_value={"data": {"dirId": "fixture"}}) as request:
                             RoxyBrowserClient(profile_proxy="socks5h://proxy.example:1080").create_profile()
                         body = request.call_args.kwargs["json_body"]

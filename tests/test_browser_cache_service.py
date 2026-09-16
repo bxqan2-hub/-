@@ -74,7 +74,8 @@ def test_profile_inventory_reads_official_v3_ids_without_exposing_rows():
     client = MagicMock()
     client.api_base = "http://127.0.0.1:50000"
     client.http.get.return_value = response
-    with patch("core.roxybrowser_client.RoxyBrowserClient", return_value=client):
+    with patch.object(cache_service._roxy_cfg, "ROXY_LOCAL_COMPONENT", False), \
+         patch("core.roxybrowser_client.RoxyBrowserClient", return_value=client):
         profile_ids, ok, error = cache_service._profile_inventory()
 
     assert ok is True

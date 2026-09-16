@@ -1,5 +1,14 @@
 # 上游项目索引：GPT-utral-platform
 
+## 2026-09-16 本地 Roxy 组件开关与 151 内核实测
+
+- GPT-utral-platform 仍锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新对照 roxybrowser_client、roxy_registration、account_export，SHA-256 分别为 `6cb5281a320080425544727c6aa1dc95c40f3183d814f381e9f64e002d6c1e9c`、`454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`、`985b99e669711d3de50dd6072ba83f660ac74d5ea156bf84f829c8fb258d0547`。
+- 按用户指定引入 wangshen233/roxy-unlimited-windows `81f7da873fd0a3a9550ec769d2b37e26e28f2715`，唯一运行入口为 vendored `scripts/roxy-api.mjs`。在既有客户端边界增加用户要求的本地/官方开关，注册、密码与 MFA 状态机未替换；官方 App 和内核二进制未修改。
+- 本地生成独立随机 lumi.conf，而非仅换官方 API 地址；保留上游 Canvas/Audio 扩展与 CDP 注入。新增补丁涉及独立数据目录、指定真实内核、代理协议转换、生命周期和 localhost API 边界。随机项/固定项、上游原始实现/本站修改分列于报告。
+- 本机已开启本地模式，任务 217 / 账号 991 使用新邮箱完成注册、密码、MFA enroll/activate 和只读 Token 校验；进程、驱动和 API 均核对为用户指定 151，结束后 Profile/临时扩展/进程均已清理。
+- 用户追加按代理所在地匹配后，复用原出口预检，传 country/实际 IANA 时区给本地生成器，用 ICU/CLDR 确定地区语言；不再给代理注册固定英语/纽约。官方与本地 151 在同一英国代理上的 HTTPS 对照：navigator 语言/列表、时区、HTTP Accept-Language 一致；硬件随机值和上游噪声算法不保证逐字段相同。追加新邮箱任务 218 / 账号 992 注册、密码、MFA 和只读 Token 校验全部成功，真实窗口 en-GB / Europe/London 与 GB 出口一致，Profile 已清理。
+- 回归、凭据边界、实测记录和 R8 自检见 `docs/2026-09-16_本地Roxy组件部署与151实测-report.md`；组件更新还须读取 `integrations/UPSTREAM_SOURCES.md` 与锁定文件，保留本地差异。
+
 ## 2026-09-16 注册后密码/2FA 的原窗口 Session 恢复
 
 - 继续锁定 `68a1f8faede7e41f10ac5f9af267465fa61d0e3d`；重新读取上游 roxy_registration 与 account_export，SHA-256 分别为 `454a5a84a75613e5617a54491744c2cd9f595d05af64fab824e4de880219ccf5`、`985b99e669711d3de50dd6072ba83f660ac74d5ea156bf84f829c8fb258d0547`。

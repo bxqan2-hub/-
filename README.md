@@ -275,6 +275,23 @@ Cloudflare Email Routing 需要把域名邮件转发到 QQ 邮箱。此模式不
 
 #### 使用 RoxyBrowser 注册
 
+配置页 → RoxyBrowser → 连接与团队 → **使用本地 Roxy 组件**：
+
+- 开启（`.env: ROXY_LOCAL_COMPONENT=True`）：自动启动已部署的
+  [roxy-unlimited-windows](https://github.com/wangshen233/roxy-unlimited-windows)
+  本地组件，直连 `127.0.0.1:50001`，无需官方 App、团队或 Token。
+- 关闭：沿用下方官方 Roxy API 地址、Token、团队和项目配置；这些值保留不被覆盖。
+- 本地需要 Windows、Node.js 22+、已安装的 Roxy 内核及 chromedriver。Profile
+  独立存放在 `data/roxy_local/browser-cache/`，日志在 `logs/roxy-local-api.log`。
+  每账号仍走原代理预检、窗口内出口复核和密码/MFA 流程；不复用已有账号 Cookie。
+- 本地组件使用 Windows 10/11 画像；有代理时按实际出口国家自动匹配语言和
+  Accept-Language，时区使用出口预检返回的 IANA 值（多时区国家不取固定默认）。
+  缺少国家/时区时在创建前报错；直连手工调用才沿用 `en-US` 默认值。Chrome 版本仍读取既有选项，
+  指定版本须已安装。切换只影响新客户端；`local-` Profile 标记保证旧任务仍按原后端清理。
+  代码默认关闭，部署机器可在配置页开启。关闭开关不会终止已经打开的本地窗口。
+
+以下为**关闭本地组件时**的官方 API 配置：
+
 ```python
 REGISTRATION_DRIVER = "roxy"  # 可选 protocol / roxy / cloak
 ROXY_API_BASE = "http://127.0.0.1:50100"

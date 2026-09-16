@@ -18,7 +18,11 @@ from config.env_loader import env_str, apply_env_overrides
 #   "skyvern"      = Skyvern Browser Sessions + Playwright
 REGISTRATION_DRIVER: str = "roxy"
 
-# RoxyBrowser 本地 API
+# 开启后使用随项目部署的本地组件（127.0.0.1:50001），关闭后使用下方官方 API 配置。
+# 切换仅影响新客户端；已有 Profile 仍由创建它的后端清理。
+ROXY_LOCAL_COMPONENT: bool = False
+
+# RoxyBrowser 官方 API（本地组件模式不读取其地址和 Token）
 ROXY_API_BASE: str = "http://127.0.0.1:50100"
 ROXY_API_TOKEN: str = env_str("ROXY_API_TOKEN", "")
 
@@ -181,6 +185,7 @@ ROXY_CODEX_CALLBACK_TIMEOUT: int = 180
 
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
+    'ROXY_LOCAL_COMPONENT': 'bool',
     'REGISTRATION_DRIVER': 'str', 'ROXY_API_BASE': 'str', 'ROXY_API_TOKEN': 'str',
     'ROXY_PROFILE_ID': 'str', 'ROXY_WORKSPACE_ID': 'str', 'ROXY_PROJECT_ID': 'str',
     'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool',

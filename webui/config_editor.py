@@ -216,6 +216,10 @@ EDITABLE_FIELDS = [
         "label": "起始 URL", "help": "默认 https://chatgpt.com/auth/login",
     },
     {
+        "key": "ROXY_LOCAL_COMPONENT", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
+        "label": "使用本地 Roxy 组件", "help": "开启：自动启动项目组件并调用 127.0.0.1:50001，无需官方 App/团队/Token；本地系统画像为 Windows 10/11。关闭：使用下方官方 API 配置。只影响后续任务，旧窗口按原后端清理。",
+    },
+    {
         "key": "ROXY_API_BASE", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
         "label": "Roxy API 地址", "help": "默认 http://127.0.0.1:50000；需在 Roxy 应用 API 配置中开启",
     },

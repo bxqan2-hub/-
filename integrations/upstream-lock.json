@@ -1,6 +1,13 @@
 {
   "runtime_projects": [
     {
+      "name": "roxy-unlimited-windows",
+      "url": "https://github.com/wangshen233/roxy-unlimited-windows",
+      "commit": "81f7da873fd0a3a9550ec769d2b37e26e28f2715",
+      "path": "integrations/roxy_unlimited_windows",
+      "usage": "Optional loopback browser component; not a payment/extraction service"
+    },
+    {
       "name": "pay153-checkout-link",
       "url": "https://github.com/1537271403/pay153-checkout-link",
       "commit": "e8b36626162f09363f29b85af42de98cc8114c9b",

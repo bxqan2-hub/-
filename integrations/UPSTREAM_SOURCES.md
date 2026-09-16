@@ -1,5 +1,22 @@
 # Upstream sources and local adaptation policy
 
+## Optional local Roxy browser component
+
+- [wangshen233/roxy-unlimited-windows](https://github.com/wangshen233/roxy-unlimited-windows)
+- Locked commit: `81f7da873fd0a3a9550ec769d2b37e26e28f2715`
+- Vendored path: `integrations/roxy_unlimited_windows`; original LICENSE and
+  attribution retained. This is a browser lifecycle service, not another
+  payment/extraction service.
+- `ROXY_LOCAL_COMPONENT` selects this loopback component or the existing
+  official API. See `roxy_unlimited_windows/LOCAL_ADAPTATIONS.md` before updating:
+  project-owned profiles, request-origin checks, proxy parsing, installed-core
+  selection, launch/cleanup handling and health identity are deliberate patches.
+- Fetch the locked upstream, compare the three modified runtime scripts, and
+  run `tests/test_roxy_local_component.py` plus the Roxy/config/cache/WebUI
+  regressions before updating. Do not replace these files blindly.
+
+## Payment/extraction sources
+
 This site runs exactly one bundled link-extraction service:
 
 1. [PAY.153 Checkout Link](https://github.com/1537271403/pay153-checkout-link)

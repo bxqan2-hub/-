@@ -5,8 +5,13 @@ main `web.py` process:
 
 - `pay153_checkout`, exposed through `/pay153/`
 
-The main WebUI owns authentication and dispatches PAY.153 in-process. Only the
-configured WebUI port listens; no child service port is used.
+The main WebUI owns authentication and dispatches PAY.153 in-process. Payment
+extraction uses only the configured WebUI port, with no child payment service.
+
+The optional `roxy_unlimited_windows` browser component listens separately on
+`127.0.0.1:50001`. It is selected by `ROXY_LOCAL_COMPONENT` and starts lazily
+through the existing Roxy client. See its `LOCAL_ADAPTATIONS.md`; it is not a
+payment service and requires no npm packages.
 
 On Windows, double-click `一键安装.bat` after copying the project to a new
 computer or after dependency updates. It recreates the portable `.venv`,

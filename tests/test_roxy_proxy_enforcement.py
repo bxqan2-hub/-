@@ -9,6 +9,10 @@ from core.roxybrowser_client import RoxyBrowserClient
 
 
 class RoxyProxyEnforcementTests(unittest.TestCase):
+    def setUp(self):
+        # These tests exercise the official wire format, independent of .env.
+        self.enterContext(patch("core.roxybrowser_client._cfg.ROXY_LOCAL_COMPONENT", False))
+
     def test_profile_is_reported_immediately_after_creation(self):
         client = RoxyBrowserClient()
         reported = []

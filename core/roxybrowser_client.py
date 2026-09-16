@@ -6,10 +6,13 @@ import json
 import logging
 import re
 import secrets
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from urllib.parse import unquote, urljoin, urlparse
+from pathlib import Path
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import requests
 
@@ -23,6 +26,11 @@ logger = logging.getLogger(__name__)
 # the short local create/open/close/delete HTTP calls.
 _ROXY_LIFECYCLE_LOCK = threading.RLock()
 _ROXY_CREATE_LOCK = _ROXY_LIFECYCLE_LOCK
+_ROXY_SERVICE_LOCK = threading.RLock()
+_ROOT = Path(__file__).resolve().parent.parent
+_BUNDLED_ROXY_API = _ROOT / "integrations" / "roxy_unlimited_windows" / "scripts" / "roxy-api.mjs"
+_LOCAL_PROFILE_ROOT = _ROOT / "data" / "roxy_local" / "browser-cache"
+_LOCAL_API_BASE = "http://127.0.0.1:50001"
 
 # Keep every Profile process alive for the registration worker, but stop
 # Chromium's optional background services from competing with the foreground
@@ -177,12 +185,17 @@ class RoxyBrowserClient:
         api_base: str | None = None,
         token: str | None = None,
         profile_proxy: str | None = None,
+        *,
+        local_component: bool | None = None,
     ):
-        self.api_base = (api_base or _cfg.ROXY_API_BASE).strip()
-        self.token = (token if token is not None else _cfg.ROXY_API_TOKEN).strip()
+        self.local_component = bool(getattr(_cfg, "ROXY_LOCAL_COMPONENT", False)) if local_component is None else bool(local_component)
+        self.api_base = (api_base or (_LOCAL_API_BASE if self.local_component else _cfg.ROXY_API_BASE)).strip()
+        self.token = "" if self.local_component else (token if token is not None else _cfg.ROXY_API_TOKEN).strip()
         self.profile_proxy = str(profile_proxy or "").strip() or None
         self.profile_proxy_source = "explicit" if self.profile_proxy else None
         self._last_profile_create_summary: dict[str, object] = {}
+        self._local_startup_args: list[str] = []
+        self._local_api_ready = False
         self.http = requests.Session()
         # Roxy OpenAPI normally listens on loopback.  Do not let Clash/system
         # proxy settings forward these local requests and turn connection
@@ -197,6 +210,86 @@ class RoxyBrowserClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             })
+
+    def _health(self) -> tuple[bool, str]:
+        try:
+            response = self.http.get(_join_url(self.api_base, "/health"), timeout=1.5)
+        except requests.RequestException:
+            return False, ""
+        if response.status_code != 200:
+            return False, f"HTTP {response.status_code}"
+        try:
+            payload = response.json()
+        except Exception:
+            return False, "响应不是 JSON"
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if (isinstance(data, dict) and payload.get("code") == 0
+                and data.get("service") == "roxy-unlimited-windows"
+                and Path(str(data.get("profileRoot") or "")).resolve() == _LOCAL_PROFILE_ROOT.resolve()):
+            return True, ""
+        return False, "响应不是 bundled Roxy API"
+
+    def ensure_local_api(self) -> None:
+        """Start the vendored local Roxy API once and wait for its health endpoint."""
+        if not self.local_component:
+            return
+        parsed = urlparse(self.api_base)
+        host = (parsed.hostname or "").lower()
+        if (parsed.scheme != "http" or host not in {"127.0.0.1", "localhost"}
+                or parsed.path not in {"", "/"} or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise RuntimeError("ROXY_API_BASE 必须是本机 HTTP 地址，例如 http://127.0.0.1:50001")
+        healthy, detail = self._health()
+        if healthy:
+            return
+        if detail:
+            raise RuntimeError(f"Roxy 本地 API 地址已被其他服务占用：{self.api_base}（{detail}）")
+
+        with _ROXY_SERVICE_LOCK:
+            healthy, detail = self._health()
+            if healthy:
+                return
+            if detail:
+                raise RuntimeError(f"Roxy 本地 API 地址已被其他服务占用：{self.api_base}（{detail}）")
+            if not _BUNDLED_ROXY_API.is_file():
+                raise RuntimeError(f"Roxy 本地组件缺失：{_BUNDLED_ROXY_API}")
+            node = shutil.which("node")
+            if not node:
+                raise RuntimeError("未找到 Node.js 22+，请重新运行 install-integrations.bat")
+            port = parsed.port or 80
+            log_path = _ROOT / "logs" / "roxy-local-api.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            flags = 0
+            if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+                flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+            if hasattr(subprocess, "DETACHED_PROCESS"):
+                flags |= subprocess.DETACHED_PROCESS
+            startupinfo = None
+            if hasattr(subprocess, "STARTUPINFO"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+            with log_path.open("ab") as log_file:
+                process = subprocess.Popen(
+                    [node, str(_BUNDLED_ROXY_API), "--port", str(port), "--profile-dir", str(_LOCAL_PROFILE_ROOT)],
+                    cwd=str(_BUNDLED_ROXY_API.parent.parent),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=flags,
+                    startupinfo=startupinfo,
+                    close_fds=True,
+                )
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                healthy, detail = self._health()
+                if healthy:
+                    logger.info("[Roxy] 本地组件已启动：api=%s pid=%s", self.api_base, process.pid)
+                    return
+                if process.poll() is not None:
+                    break
+                time.sleep(0.25)
+            raise RuntimeError(f"Roxy 本地组件启动失败，请查看 {log_path}")
+
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
         text = str(exc or "").lower()
@@ -220,6 +313,9 @@ class RoxyBrowserClient:
         return "正在创建中，请稍等" in text
 
     def request(self, method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
+        if self.local_component and not self._local_api_ready:
+            self.ensure_local_api()
+            self._local_api_ready = True
         url = _join_url(self.api_base, path)
         method_u = method.upper()
         # create 网络超时后服务端可能已创建环境，直接重试可能产生孤儿环境；
@@ -240,8 +336,8 @@ class RoxyBrowserClient:
         for attempt in range(1, max_attempts + 1):
             try:
                 logger.debug(
-                    "[Roxy] %s %s params=%s body=%s attempt=%s/%s",
-                    method, url, params, json_body, attempt, max_attempts,
+                    "[Roxy] %s %s attempt=%s/%s",
+                    method, path, attempt, max_attempts,
                 )
                 api_timeout = int(
                     getattr(
@@ -251,6 +347,8 @@ class RoxyBrowserClient:
                     )
                     or (45 if is_create else 15)
                 )
+                if self.local_component and str(path).rstrip("/") == "/browser/open":
+                    api_timeout = max(api_timeout, 55)
                 request_kwargs = {
                     "params": params or None,
                     "json": json_body if json_body is not None else None,
@@ -394,6 +492,9 @@ class RoxyBrowserClient:
         获取 Roxy 团队/工作区列表。
         Roxy 不同版本路径可能有差异，因此先试配置路径，再试常见路径。
         """
+        if self.local_component:
+            self.ensure_local_api()
+            return {"ok": True, "items": [], "local_component": True, "message": "本地组件已就绪，无需团队/项目配置"}
         configured = str(getattr(_cfg, "ROXY_WORKSPACE_LIST_PATH", "") or "").strip()
         method = str(getattr(_cfg, "ROXY_WORKSPACE_LIST_METHOD", "GET") or "GET").upper()
         candidates = []
@@ -545,7 +646,7 @@ class RoxyBrowserClient:
                 proxy_info.get("host"),
                 proxy_info.get("port"),
             )
-        if not body.get("workspaceId"):
+        if not self.local_component and not body.get("workspaceId"):
             raise RuntimeError(
                 "Roxy 创建环境需要 workspaceId。请在 config/roxybrowser.py 或 WebUI 的 RoxyBrowser 配置中填写 ROXY_WORKSPACE_ID，"
                 "或直接在 ROXY_PROFILE_CREATE_PAYLOAD 里加入 {'workspaceId': '你的工作区ID'}。"
@@ -570,8 +671,39 @@ class RoxyBrowserClient:
             "os": str(body.get("os") or "") or None,
             "os_version": str(body.get("osVersion") or "") or None,
         }
+        if self.local_component:
+            # Translate only the lifecycle boundary; registration/OTP/security
+            # still use the existing Selenium flow and proxy preflight.
+            self._local_startup_args = startup_args
+            os_name = str(body.get("os") or "")
+            local_os = os_name if os_name in {"Windows 10", "Windows 11"} else secrets.choice(("Windows 10", "Windows 11"))
+            proxy_info = body.get("proxyInfo") or {}
+            local_proxy = "direct"
+            if proxy_info:
+                if not isinstance(proxy_info, dict) or not proxy_info.get("host") or not proxy_info.get("port"):
+                    raise ValueError("本地 Roxy proxyInfo 缺少 host/port")
+                scheme = str(proxy_info.get("protocol") or proxy_info.get("proxyCategory") or "").lower()
+                if scheme not in {"socks5", "http", "https"}:
+                    raise ValueError("本地 Roxy 代理协议须为 SOCKS5/HTTP/HTTPS")
+                auth = ""
+                if proxy_info.get("proxyUserName"):
+                    auth = quote(str(proxy_info["proxyUserName"]), safe="") + ":" + quote(str(proxy_info.get("proxyPassword") or ""), safe="") + "@"
+                host = str(proxy_info["host"])
+                if ":" in host and not host.startswith("["):
+                    host = f"[{host}]"
+                local_proxy = f"{scheme}://{auth}{host}:{proxy_info['port']}"
+            body = {
+                "windowName": body.get("windowName"), "os": local_os,
+                "proxy": local_proxy, "open": False,
+                "coreVersion": core_version,
+                "locale": body.get("locale") or "en-US",
+                "country": body.get("country"), "timeZone": body.get("timeZone"),
+                "portScanWhiteList": "1455;", "randomFingerprint": True,
+            }
+            self._last_profile_create_summary.update(os=local_os, os_version=None)
+            logger.info("[Roxy] 本地组件创建：os=%s coreVersion=%s randomFingerprint=True", local_os, core_version)
         with _ROXY_CREATE_LOCK:
-            result = self.request(_cfg.ROXY_CREATE_METHOD, _cfg.ROXY_CREATE_PATH, json_body=body)
+            result = self.request("POST" if self.local_component else _cfg.ROXY_CREATE_METHOD, "/browser/create" if self.local_component else _cfg.ROXY_CREATE_PATH, json_body=body)
         profile_id = _first(result, [
             ("id",), ("dirId",), ("dir_id",), ("profile_id",), ("profileId",), ("browser_id",),
             ("data", "id"), ("data", "dirId"), ("data", "dir_id"),
@@ -579,7 +711,13 @@ class RoxyBrowserClient:
         ])
         if not profile_id:
             raise RuntimeError(f"Roxy 创建环境成功但未返回 dirId/profile_id: {result}")
-        return profile_id
+        if self.local_component:
+            data = result.get("data") or {}
+            self._last_profile_create_summary.update(
+                locale=data.get("locale"), timezone=data.get("timeZone"), country=body.get("country"),
+            )
+            logger.info("[Roxy] 本地地区设置：country=%s locale=%s timezone=%s", body.get("country") or "manual", data.get("locale"), data.get("timeZone"))
+        return f"local-{profile_id}" if self.local_component else profile_id
 
     @staticmethod
     def _normalize_profile_id(value: str | None) -> str:
@@ -599,13 +737,19 @@ class RoxyBrowserClient:
         proxy_probe_stop_check=None,
     ) -> RoxyOpenResult:
         one_profile = bool(getattr(_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
-        configured_pid = self._normalize_profile_id(profile_id if profile_id is not None else getattr(_cfg, "ROXY_PROFILE_ID", ""))
+        configured_pid = self._normalize_profile_id(profile_id if profile_id is not None else ("" if self.local_component else getattr(_cfg, "ROXY_PROFILE_ID", "")))
+        if configured_pid and configured_pid.startswith("local-") != self.local_component:
+            raise ValueError("Profile 所属后端与当前 Roxy 模式不一致")
         if one_profile and configured_pid:
             raise RuntimeError(
                 "已启用 ROXY_ONE_PROFILE_PER_ACCOUNT=True（一号一环境），"
                 "不能配置/传入固定 ROXY_PROFILE_ID；请留空以便每个账号创建新环境。"
             )
 
+        # Even the explicit-local-proxy entry needs real egress geography for
+        # a new local fingerprint; never infer it from the proxy hostname.
+        if self.local_component and not configured_pid:
+            require_proxy_exit_ip = require_proxy_exit_ip or bool(self._ensure_profile_proxy())
         preflight_exit_geo: dict = {}
         if require_proxy_exit_ip:
             self._ensure_profile_proxy()
@@ -667,7 +811,14 @@ class RoxyBrowserClient:
         pid = configured_pid
         created_by_run = False
         if not pid:
-            pid = self.create_profile()
+            if self.local_component and preflight_exit_geo:
+                country = str(preflight_exit_geo.get("country") or "").strip().upper()
+                timezone = str(preflight_exit_geo.get("timezone") or "").strip()
+                if not re.fullmatch(r"[A-Z]{2}", country) or not timezone:
+                    raise RuntimeError("stage=local_fingerprint_geo：代理预检缺少国家代码/IANA 时区，未创建环境")
+                pid = self.create_profile({"country": country, "timeZone": timezone})
+            else:
+                pid = self.create_profile()
             created_by_run = True
             logger.info("[Roxy] 已创建临时环境：%s", pid)
         try:
@@ -709,14 +860,24 @@ class RoxyBrowserClient:
         # ROXY_OPEN_HEADLESS 是显式开关，优先级应高于 ROXY_OPEN_EXTRA_PARAMS，
         # 否则 extra 里残留 headless=False 会导致 WebUI 保存无头后仍弹窗口。
         params["headless"] = bool(getattr(_cfg, "ROXY_OPEN_HEADLESS", False)) if headless is None else bool(headless)
+        method = _cfg.ROXY_OPEN_METHOD
+        if self.local_component:
+            path, method = "/browser/open", "POST"
+            # Persisted startupParam is a launcher field in the official app;
+            # the direct local launcher consumes argv at open time instead.
+            params = {
+                "dirId": pid.removeprefix("local-"), "headless": params["headless"],
+                "args": list(dict.fromkeys([*self._local_startup_args, *merged_args])),
+                "workbench": False,
+            }
         keep_open = bool(getattr(_cfg, "ROXY_KEEP_BROWSER_OPEN", False))
         logger.info("[Roxy] open 参数：profile=%s headless=%s keep_open=%s", pid, params.get("headless"), keep_open)
         try:
             result = self.request(
-                _cfg.ROXY_OPEN_METHOD,
+                method,
                 path,
-                params=params if _cfg.ROXY_OPEN_METHOD.upper() == "GET" else None,
-                json_body=params if _cfg.ROXY_OPEN_METHOD.upper() != "GET" else None,
+                params=params if method.upper() == "GET" else None,
+                json_body=params if method.upper() != "GET" else None,
             )
             debugger_address = self._extract_debugger_address(result)
             logger.info("[Roxy] open 返回摘要: debugger=%s raw=%s", debugger_address, json.dumps(result, ensure_ascii=False)[:800])
@@ -752,18 +913,20 @@ class RoxyBrowserClient:
     def close_profile(self, profile_id: str) -> bool:
         if not profile_id:
             return False
+        is_local = str(profile_id).startswith("local-")
+        if is_local != self.local_component:
+            return RoxyBrowserClient(local_component=is_local).close_profile(profile_id)
         path = str(_cfg.ROXY_CLOSE_PATH).format(profile_id=profile_id)
         try:
             body = {
                 "workspaceId": _workspace_id_value(),
                 "dirId": int(profile_id) if str(profile_id).isdigit() else profile_id,
             }
-            self.request(
-                _cfg.ROXY_CLOSE_METHOD,
-                path,
-                params=body if str(_cfg.ROXY_CLOSE_METHOD).upper() == "GET" else None,
-                json_body=body if str(_cfg.ROXY_CLOSE_METHOD).upper() != "GET" else None,
-            )
+            method = _cfg.ROXY_CLOSE_METHOD
+            if self.local_component:
+                path, method, body = "/browser/close", "POST", {"dirId": profile_id.removeprefix("local-")}
+            self.request(method, path, params=body if method.upper() == "GET" else None,
+                         json_body=body if method.upper() != "GET" else None)
             logger.info("[Roxy] 已关闭环境：%s", profile_id)
             return True
         except Exception as exc:
@@ -773,6 +936,9 @@ class RoxyBrowserClient:
     def delete_profile(self, profile_id: str) -> bool:
         if not profile_id:
             return False
+        is_local = str(profile_id).startswith("local-")
+        if is_local != self.local_component:
+            return RoxyBrowserClient(local_component=is_local).delete_profile(profile_id)
         path = str(getattr(_cfg, "ROXY_DELETE_PATH", "/browser/delete")).format(profile_id=profile_id)
         method = str(getattr(_cfg, "ROXY_DELETE_METHOD", "POST") or "POST")
         try:
@@ -780,6 +946,8 @@ class RoxyBrowserClient:
                 "workspaceId": _workspace_id_value(),
                 "dirIds": [int(profile_id) if str(profile_id).isdigit() else profile_id],
             }
+            if self.local_component:
+                path, method, body = "/browser/delete", "POST", {"dirId": profile_id.removeprefix("local-")}
             self.request(
                 method,
                 path,

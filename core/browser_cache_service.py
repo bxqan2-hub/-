@@ -54,6 +54,8 @@ def _path_within(path: Path, root: Path) -> bool:
 
 
 def _roxy_root() -> Path:
+    if bool(getattr(_roxy_cfg, "ROXY_LOCAL_COMPONENT", False)):
+        return (_PROJECT_ROOT / "data" / "roxy_local").resolve(strict=False)
     appdata = str(os.environ.get("APPDATA") or "").strip()
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
     return (base / "RoxyBrowser").resolve(strict=False)
@@ -117,12 +119,23 @@ def _profile_cache_dirs(root: Path, profile_ids: set[str] | None = None) -> list
 
 
 def _profile_inventory() -> tuple[set[str], bool, str]:
-    """Read Roxy's official Profile list before deleting a whole directory."""
+    """Read the selected Roxy backend's Profile list before directory cleanup."""
     try:
         from core.roxybrowser_client import RoxyBrowserClient
         from config import roxybrowser as _cfg
 
         client = RoxyBrowserClient()
+        if bool(getattr(_cfg, "ROXY_LOCAL_COMPONENT", False)):
+            # Local profiles are already scoped to this project's own root.
+            payload = client.request("GET", "/browser/list")
+            data = payload.get("data", {})
+            rows = data.get("rows") if isinstance(data, dict) else None
+            if not isinstance(rows, list) or data.get("total") != len(rows):
+                return set(), False, "profile_list_incomplete"
+            ids = {str(row.get("dirId") or "").lower() for row in rows if isinstance(row, dict)}
+            if any(not _PROFILE_DIR_PATTERN.fullmatch(value) for value in ids) or len(ids) != len(rows):
+                return set(), False, "profile_list_ids"
+            return ids, True, ""
         page = 1
         page_size = 100
         profile_ids: set[str] = set()
