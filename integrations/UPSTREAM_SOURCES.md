@@ -84,6 +84,25 @@ MoMo qualification reference:
   polling, or redirect extraction. MoMo uses its own
   `MOMO_CHECK_PROXY_PROFILES` pool and fixed VN exit.
 
+UPI qualification reference:
+
+- Re-audited PAY.153 HEAD on 2026-09-17; it remains the locked
+  `e8b36626162f09363f29b85af42de98cc8114c9b` revision. No upstream version change.
+- `provider_checkout.py:stripe_to_provider` checks `upi` in the Stripe init
+  methods before Elements, promotion updates, taxes or payment continuation.
+  The local account detector stops at that availability boundary: create an
+  IN/INR Plus Checkout without a promotion through the independent
+  `UPI_CHECK_PROXY_PROFILES` IN pool, read methods directly when present,
+  otherwise reuse the same session/proxy for one Stripe init or OAICS state read.
+- A published UPI method in INR means eligible; amount/trial status is not
+  an eligibility condition. Missing/malformed sessions and transport failures
+  are failed checks, distinct from completed checks without UPI. Diagnostics
+  exclude response bodies, tokens, checkout URLs and proxy credentials.
+- Compared current upstream `app.py`, `provider_checkout.py`,
+  `stripe_checkout.py`, and `upi_go_runner.py`. The last three remain identical;
+  the intentional local routing/provider patches in `app.py` are retained.
+  UPI qualification adds no runtime service and never enters extraction jobs.
+
 PayPal OAICS extraction core:
 
 - [link-pp](https://github.com/eatWhitePorridge/link-pp)

@@ -25,7 +25,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request
 from werkzeug.test import Client as WsgiClient
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-from core import account_operation_control, browser_cache_service, codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, gopay_service, momo_service, at_validity_scheduler
+from core import account_operation_control, browser_cache_service, codex_retry_service, db, plan_check_service, codex_agent_service, live_check_service, account_security_service, gc_registration_service, checkout_kind_service, jp_trial_service, oaics_extract_service, gcash_service, gopay_service, momo_service, upi_service, at_validity_scheduler
 from core import chatgpt_plan, integrated_runtime
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
@@ -623,6 +623,7 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "gcash_status", "gcash_eligible", "gcash_payment_method_id",
         "gopay_status", "gopay_eligible",
         "momo_status", "momo_eligible",
+        "upi_status", "upi_eligible",
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error", "jp_trial_checked_at",
         "codex_status", "codex_agent_status",
         "email_rebind_status", "email_rebind_label", "email_rebind_from", "email_rebound_at",
@@ -679,6 +680,9 @@ def _compact_account_for_list(row: dict, gc_job: dict | None = None) -> dict:
         "momo_ok", "momo_checkout_country", "momo_checkout_currency", "momo_checkout_kind", "momo_stripe_mode",
         "momo_actual_trial", "momo_one_click_trial_eligible", "momo_detection_outcome", "momo_method", "momo_evidence", "momo_evidence_source", "momo_inspection_steps", "momo_payment_method_types", "momo_checked_at", "momo_completed_at", "momo_error",
         "momo_attempt_count", "momo_retried_proxies",
+        "upi_ok", "upi_checkout_country", "upi_checkout_currency", "upi_checkout_kind",
+        "upi_payment_method_types", "upi_detection_outcome", "upi_checked_at",
+        "upi_completed_at", "upi_error", "upi_attempt_count",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_queued_at", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",
         # 邮箱检测结果：账号页直接展示并支持单账号刷新。
@@ -1067,6 +1071,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_gopay = db.recover_interrupted_gopay_checks()
     if recovered_gopay:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 GoPay 资格检测状态", recovered_gopay)
+    recovered_upi = db.recover_interrupted_upi_checks()
+    if recovered_upi:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 UPI 资格检测状态", recovered_upi)
     recovered_momo = db.recover_interrupted_momo_checks()
     if recovered_momo:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 MoMo 资格检测状态", recovered_momo)
@@ -1156,8 +1163,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                 return [row for row in rows if row.get("gopay_eligible") is True]
             if qualification == "momo":
                 return [row for row in rows if row.get("momo_eligible") is True]
+            if qualification == "upi":
+                return [row for row in rows if row.get("upi_eligible") is True]
             if qualification in {"any", "either"}:
-                return [row for row in rows if row.get("gcash_eligible") is True or row.get("gopay_eligible") is True or row.get("momo_eligible") is True]
+                return [row for row in rows if row.get("gcash_eligible") is True or row.get("gopay_eligible") is True or row.get("momo_eligible") is True or row.get("upi_eligible") is True]
             return rows
         if group_id:
             rows = _filter_account_rows_by_group(
@@ -1179,7 +1188,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            if checkout_kind or gcash in {"1", "true", "yes"} or qualification in {"gcash", "gopay", "momo", "any", "either"}:
+            if checkout_kind or gcash in {"1", "true", "yes"} or qualification in {"gcash", "gopay", "momo", "upi", "any", "either"}:
                 rows = [row for row in db.list_accounts(limit=1_000_000, archived=archived, plan_filter=plan_filter, q=q, at_filter=at_filter)
                         if (not checkout_kind or str(row.get("checkout_kind") or "").strip().lower() == checkout_kind)
                         and (gcash not in {"1", "true", "yes"} or row.get("gcash_eligible") is True)]
@@ -1534,8 +1543,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             rows = [row for row in rows if row.get("gopay_eligible") is True]
         elif qualification == "momo":
             rows = [row for row in rows if row.get("momo_eligible") is True]
+        elif qualification == "upi":
+            rows = [row for row in rows if row.get("upi_eligible") is True]
         elif qualification in {"any", "either"}:
-            rows = [row for row in rows if row.get("gcash_eligible") is True or row.get("gopay_eligible") is True or row.get("momo_eligible") is True]
+            rows = [row for row in rows if row.get("gcash_eligible") is True or row.get("gopay_eligible") is True or row.get("momo_eligible") is True or row.get("upi_eligible") is True]
         result = _paginate_items(_compact_accounts_for_list(rows), page=page, page_size=page_size)
         result["filter_email_count"] = len(email_set)
         return jsonify(result)
@@ -2350,6 +2361,74 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped, "skipped_count": len(skipped), "workers": workers,
             "confirm_sent": False,
             "message": "每个账号只创建一次 VN/VND Checkout，并从创建响应直接判断 MoMo；随后立即停止",
+        }), 202
+
+    @app.post("/api/accounts/check-upi-bulk")
+    def api_accounts_check_upi_bulk():
+        """Create one IN/INR Checkout and inspect UPI availability."""
+        from core import detection_proxy
+        import random
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多检测 500 个账号"}), 400
+        try:
+            workers = _positive_worker_count(data.get("workers"), upi_service.DEFAULT_WORKERS)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是正整数"}), 400
+        workers = max(1, min(workers, upi_service.MAX_WORKERS, len(ids)))
+        pool_specs = detection_proxy.qualification_proxy_specs("IN", "upi")
+        if not pool_specs:
+            return jsonify({"ok": False, "error": "尚未配置资格检测 IN（印度）国家代理池"}), 409
+        proxy_urls = []
+        for spec in pool_specs:
+            try:
+                value = detection_proxy.resolve_static_detection_proxy(spec) or ""
+                if value:
+                    proxy_urls.append(value)
+            except Exception:
+                continue
+        if not proxy_urls:
+            return jsonify({"ok": False, "error": "资格检测 IN 国家代理池全部无法解析"}), 409
+        executor = upi_service.get_executor(workers)
+        started, busy, failed, skipped = [], [], [], []
+        seen: set[int] = set()
+        for raw_id in ids:
+            try:
+                account_id = int(raw_id)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if account_id in seen:
+                continue
+            seen.add(account_id)
+            account = db.get_account(account_id)
+            if not account:
+                skipped.append({"id": account_id, "reason": "账号不存在"})
+                continue
+            token = str(account.get("access_token") or "").strip()
+            if not token:
+                skipped.append({"id": account_id, "email": account.get("email"), "reason": "缺少 AT/access_token"})
+                continue
+            candidates = list(proxy_urls)
+            random.shuffle(candidates)
+            queued = upi_service.enqueue(account_id=account_id, access_token=token, trigger="manual_upi_bulk", proxies=candidates, max_retries=upi_service.MAX_PROXY_RETRIES, executor=executor)
+            item = {"id": account_id, "email": account.get("email"), **queued}
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True, "started": started, "started_count": len(started),
+            "busy": busy, "busy_count": len(busy), "failed": failed, "failed_count": len(failed),
+            "skipped": skipped, "skipped_count": len(skipped), "workers": workers,
+            "confirm_sent": False,
+            "message": "使用印度代理创建 IN/INR Checkout，读取 UPI 支付方式后结束；网络错误按代理池重试",
         }), 202
 
     @app.post("/api/accounts/at-qualification-check")
@@ -4674,13 +4753,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             "gcash": ("GCASH_CHECK_PROXY_PROFILES", "GCASH_CHECK_PROXY_ACTIVE"),
             "gopay": ("GOPAY_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_ACTIVE"),
             "momo": ("MOMO_CHECK_PROXY_PROFILES", "MOMO_CHECK_PROXY_ACTIVE"),
+            "upi": ("UPI_CHECK_PROXY_PROFILES", "UPI_CHECK_PROXY_ACTIVE"),
         }
         if purpose not in field_map:
-            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout、gcash、gopay、momo 或 qualification"}), 400
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout、gcash、gopay、momo、upi 或 qualification"}), 400
 
         from config import proxy as proxy_cfg
         from core import detection_proxy
-        expected_country = {"gcash": "PH", "gopay": "ID", "momo": "VN"}.get(purpose)
+        expected_country = {"gcash": "PH", "gopay": "ID", "momo": "VN", "upi": "IN"}.get(purpose)
 
         try:
             submitted = detection_proxy.parse_detection_proxy_pool(
@@ -4832,9 +4912,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             "gcash": ("GCASH_CHECK_PROXY_PROFILES", "GCASH_CHECK_PROXY_ACTIVE"),
             "gopay": ("GOPAY_CHECK_PROXY_PROFILES", "GOPAY_CHECK_PROXY_ACTIVE"),
             "momo": ("MOMO_CHECK_PROXY_PROFILES", "MOMO_CHECK_PROXY_ACTIVE"),
+            "upi": ("UPI_CHECK_PROXY_PROFILES", "UPI_CHECK_PROXY_ACTIVE"),
         }
         if purpose not in field_map:
-            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout、gcash、gopay、momo 或 qualification"}), 400
+            return jsonify({"ok": False, "error": "purpose 必须是 plan、at、checkout、gcash、gopay、momo、upi 或 qualification"}), 400
         if len(country) != 2 or not country.isalpha():
             return jsonify({"ok": False, "error": "country 必须是两位国家代码"}), 400
 

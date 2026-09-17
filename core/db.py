@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from core import account_operation_control
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
 _LEGACY_DATA_DIR = _PROJECT_ROOT / "data"
@@ -1903,6 +1905,102 @@ def recover_interrupted_momo_checks() -> int:
         return recovered
 
 
+def claim_account_upi(acc_id: int, trigger: str = "manual", *, generation: int | None = None) -> bool:
+    """Atomically reserve a non-confirming UPI qualification task."""
+    with _LOCK:
+        if generation is not None and account_operation_control.is_cancelled(generation):
+            return False
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("upi_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "upi_queued_at" if current_status == "queued" else "upi_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row.update({
+            "upi_status": "queued", "upi_ok": False, "upi_eligible": False,
+            "upi_trigger": str(trigger or "manual"), "upi_error": None,
+            "upi_queued_at": now, "upi_started_at": None, "upi_completed_at": None,
+            "updated_at": now,
+        })
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_upi_running(acc_id: int, *, generation: int | None = None) -> bool:
+    with _LOCK:
+        if generation is not None and account_operation_control.is_cancelled(generation):
+            return False
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("upi_status") not in {"queued", "running"}:
+            return False
+        row["upi_status"] = "running"
+        row["upi_started_at"] = _now()
+        row["upi_error"] = None
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def update_account_upi(acc_id: int, result: dict | None = None, *, generation: int | None = None) -> bool:
+    """Persist UPI metadata only while its operation generation is current."""
+    result = result or {}
+    with _LOCK:
+        if generation is not None and account_operation_control.is_cancelled(generation):
+            return False
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        ok = bool(result.get("ok"))
+        eligible = ok and bool(result.get("upi"))
+        row["upi_status"] = "success" if ok else "failed"
+        row["upi_ok"] = ok
+        row["upi_eligible"] = eligible
+        row["upi_checkout_country"] = str(result.get("checkout_country") or "IN")[:8]
+        row["upi_checkout_currency"] = str(result.get("checkout_currency") or "INR")[:8]
+        row["upi_checkout_kind"] = str(result.get("checkout_kind") or "")[:16]
+        row["upi_payment_method_types"] = result.get("payment_method_types") or []
+        row["upi_detection_outcome"] = str(result.get("detection_outcome") or "")[:64]
+        row["upi_checked_at"] = result.get("checked_at") or _now()
+        row["upi_completed_at"] = _now()
+        row["upi_error"] = None if eligible else str(result.get("error") or "未检测到 UPI 支付方式")[:500]
+        row["upi_attempt_count"] = int(result.get("attempt_count") or 1)
+        row["upi_retried_proxies"] = result.get("retried_proxies")
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_upi_checks() -> int:
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("upi_status") not in {"queued", "running"}:
+                continue
+            row["upi_status"] = "failed"
+            row["upi_ok"] = False
+            row["upi_eligible"] = False
+            row["upi_error"] = "WebUI 重启导致 UPI 检测中断，请重新检测"
+            row["upi_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
 def stop_account_page_operations(reason: str = "账号页操作已停止") -> dict:
     """把账号页后台队列中尚未完成的项目标记为停止。
 
@@ -1916,6 +2014,7 @@ def stop_account_page_operations(reason: str = "账号页操作已停止") -> di
         ("gcash_status", "gcash_error", "gcash_completed_at", "failed"),
         ("gopay_status", "gopay_error", "gopay_completed_at", "failed"),
         ("momo_status", "momo_error", "momo_completed_at", "failed"),
+        ("upi_status", "upi_error", "upi_completed_at", "failed"),
         ("oaics_extract_status", "oaics_extract_error", "oaics_extract_completed_at", "failed"),
         ("live_check_status", "live_check_error", "live_checked_at", "failed"),
         ("codex_agent_status", "codex_agent_error", "codex_agent_completed_at", "failed"),
@@ -1941,6 +2040,9 @@ def stop_account_page_operations(reason: str = "账号页操作已停止") -> di
                 elif status_key == "gopay_status":
                     row["gopay_ok"] = False
                     row["gopay_eligible"] = False
+                elif status_key == "upi_status":
+                    row["upi_ok"] = False
+                    row["upi_eligible"] = False
                 elif status_key == "oaics_extract_status":
                     row["oaics_extract_ok"] = False
                     row["oaics_extract_stage"] = "账号页操作已停止"
@@ -2386,6 +2488,9 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "gopay_status", "gopay_ok", "gopay_eligible",
         "gopay_checkout_country", "gopay_checkout_currency", "gopay_checkout_amount",
         "gopay_checked_at", "gopay_error", "gopay_completed_at", "gopay_attempt_count",
+        "upi_status", "upi_ok", "upi_eligible", "upi_checkout_country", "upi_checkout_currency",
+        "upi_checkout_kind", "upi_payment_method_types", "upi_detection_outcome",
+        "upi_checked_at", "upi_error", "upi_completed_at", "upi_attempt_count",
         "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
         "oaics_extract_stage", "oaics_extract_log", "oaics_extract_started_at", "oaics_extract_completed_at", "oaics_link",
         "jp_trial_status", "jp_trial_eligible", "jp_trial_evidence", "jp_trial_error",
@@ -2437,6 +2542,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
             "plan_type", "subscription_plan", "has_active_plus_subscription", "plan_import_hint",
             "plan_import_hint_at", "plus_trial_eligible", "checkout_kind_status", "checkout_kind",
             "gcash_status", "gcash_ok", "gcash_eligible", "gopay_status", "gopay_ok",
+            "upi_status", "upi_ok", "upi_eligible", "upi_error", "upi_checked_at",
             "gopay_eligible", "oaics_extract_status", "oaics_extract_ok", "oaics_extract_error",
             "oaics_extract_stage", "oaics_extract_log", "oaics_link", "jp_trial_status",
             "jp_trial_eligible", "jp_trial_error", "jp_trial_checked_at", "codex_status",

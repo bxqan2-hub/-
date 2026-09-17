@@ -3511,7 +3511,7 @@ def momo_checkout_method(checkout: Any) -> tuple[str, str]:
     return "", ""
 
 
-def _momo_checkout_kind(session_id: str, checkout: dict[str, Any]) -> str:
+def _qualification_checkout_kind(session_id: str, checkout: dict[str, Any]) -> str:
     """Classify the session for diagnostics and method-source selection."""
     normalized = str(session_id or "").strip().lower()
     provider = str(checkout.get("checkout_provider") or "").strip().lower()
@@ -3560,7 +3560,7 @@ def detect_momo(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         session_id = str(checkout.get("checkout_session_id") or "")
         if not session_id and not str(checkout.get("url") or checkout.get("checkout_url") or "").strip():
             return {"ok": False, "momo": False, "checkout_created": False, "confirm_sent": False, "proxy_source": proxy_source, "checkout_country": "VN", "checkout_currency": "VND", "checked_at": int(time.time()), "error": "创建 VN/VND Checkout 失败：未返回 Session"}, 502
-        checkout_kind = _momo_checkout_kind(session_id, checkout)
+        checkout_kind = _qualification_checkout_kind(session_id, checkout)
         method_evidence, evidence_source = momo_checkout_method(checkout)
         inspection_steps = ["checkout_create"]
         inspected_payload: dict[str, Any] = checkout
@@ -3619,6 +3619,129 @@ def detect_momo(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:
         error_text = f"{type(exc).__name__}: {str(exc)[:500]}"
         upstream_status = re.search(r"OpenAI Checkout HTTP\s+(\d{3})", error_text)
         return {"ok": False, "momo": False, "confirm_sent": False, "promo_update_sent": False, "upstream_http_status": int(upstream_status.group(1)) if upstream_status else None, "error": error_text}, 502
+
+
+def detect_upi(data: dict[str, Any] | None, *, check_cancelled=None) -> tuple[dict[str, Any], int]:
+    """Inspect IN/INR Checkout methods, stopping at the extraction availability gate."""
+    check_cancelled = check_cancelled or (lambda: None)
+    check_cancelled()
+    data = data if isinstance(data, dict) else {}
+    token_raw = str(data.get("token") or "").strip()
+    proxy = str(data.get("proxy") or "").strip()
+    result = {
+        "ok": False, "upi": False, "checkout_created": False,
+        "checkout_country": "IN", "checkout_currency": "INR",
+        "confirm_sent": False, "promo_update_sent": False,
+        "inspection_steps": [], "payment_method_types": [],
+        "checked_at": int(time.time()),
+    }
+    if not token_raw or not proxy:
+        return {**result, "error": "UPI 查询需要 AT/access_token 和印度代理"}, 400
+    try:
+        token, meta = extract_access_token(token_raw)
+        proxy = normalize_proxy(proxy)
+    except Exception:
+        return {**result, "error": "AT 或代理格式错误"}, 400
+    device_id, did = str(uuid.uuid4()), str(uuid.uuid4())
+    options = {
+        "plan": "plus", "link_type": "detection", "country": "IN", "currency": "INR",
+        "checkout_country": "IN", "checkout_currency": "INR", "use_promo": False,
+    }
+    stage = "checkout_create"
+    created = {}
+    try:
+        result["inspection_steps"].append(stage)
+        created = create_checkout(
+            token, checkout_payload(options, meta), proxy, device_id, did,
+            lambda _message: None, use_sen=True, use_so=True,
+        )
+        check_cancelled()
+        checkout = dict(created.get("data") or {})
+        session_id = str(checkout.get("checkout_session_id") or "")
+        if not session_id:
+            raise RuntimeError("missing_checkout_session")
+        result["checkout_created"] = True
+        result["checkout_kind"] = _qualification_checkout_kind(session_id, checkout)
+        inspected = checkout
+        # A published method in the creation response is already decisive.
+        def published_methods(payload):
+            containers = [payload] + [payload.get(key) for key in (
+                "checkout_session", "session", "payment_method_configuration",
+            )]
+            methods = []
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
+                for field in ("payment_method_types", "custom_payment_methods", "available_payment_methods", "payment_methods"):
+                    published = container.get(field)
+                    if not isinstance(published, list):
+                        continue
+                    for item in published:
+                        labels = [item] if isinstance(item, str) else [
+                            item.get(key) for key in ("type", "name", "display_name", "label", "payment_method_type", "provider", "id")
+                        ] if isinstance(item, dict) else []
+                        for label in labels:
+                            value = str(label or "").strip().lower()
+                            if value and value not in methods:
+                                methods.append(value)
+            return methods
+
+        methods = published_methods(checkout)
+        if "upi" not in methods and result["checkout_kind"] == "oaics":
+            stage = "oaics_custom_checkout"
+            result["inspection_steps"].append(stage)
+            check_cancelled()
+            inspected = fetch_custom_checkout_session(
+                created["http"], token, session_id,
+                str(checkout.get("processor_entity") or "openai_ie"), device_id,
+            )
+            methods = published_methods(inspected)
+        elif "upi" not in methods and result["checkout_kind"] in {"cs_live", "cs_test"}:
+            stage = "stripe_init"
+            result["inspection_steps"].append(stage)
+            http = created["http"]
+            pk = str(checkout.get("stripe_publishable_key") or checkout.get("publishable_key")
+                     or checkout.get("publishableKey") or checkout.get("key") or "").strip()
+            check_cancelled()
+            if not pk:
+                pk = sc.verify_pk(http, session_id, lambda _message: None)
+            check_cancelled()
+            inspected, _version, ctx = sc.init_checkout(http, session_id, pk, sc._profile("IN"), lambda _message: None)
+            methods = published_methods({"payment_method_types": ctx.get("payment_method_types") or sc._extract_payment_method_types(inspected)})
+        elif "upi" not in methods and result["checkout_kind"] == "unknown":
+            raise RuntimeError("unsupported_checkout_session")
+        check_cancelled()
+        currency = str(inspected.get("checkout_currency") or inspected.get("currency")
+                       or checkout.get("checkout_currency") or checkout.get("currency") or "INR").upper()
+        if stage == "stripe_init":
+            currency = str(ctx.get("currency") or currency).upper()
+        eligible = "upi" in methods and currency == "INR"
+        result.update({
+            "ok": True, "upi": eligible, "payment_method_types": methods,
+            "checkout_currency": currency,
+            "detection_outcome": "qualified" if eligible else "currency_mismatch" if currency != "INR" else "no_upi_payment_method",
+            "error": None if eligible else "Checkout 币种不是 INR" if currency != "INR" else "当前 IN/INR Checkout 未发布 UPI 支付方式",
+        })
+        return result, 200
+    except Exception as exc:
+        check_cancelled()
+        # Keep response bodies, tokens, checkout URLs and proxy credentials out of diagnostics.
+        message = str(exc).lower()
+        upstream_status = re.search(r"(?:http|status)[ :]+(\d{3})|\[(\d{3})\]", message)
+        code = int(next(value for value in upstream_status.groups() if value)) if upstream_status else None
+        retryable = code in {400, 429, 500, 502, 503, 504} if code else any(
+            hint in message for hint in ("timeout", "timed out", "connection", "proxyerror", "ssl", "curl:", "sentinel", "unusual activity")
+        )
+        return {**result, "error": f"UPI {stage} 失败（{type(exc).__name__}" + (f"，HTTP {code}" if code else "") + "）",
+                "upstream_http_status": code, "retryable": retryable,
+                "transport_failed": any(hint in message for hint in ("connect tunnel failed", "curl: (7)", "could not connect to proxy", "could not resolve proxy", "proxyerror", "connection refused"))}, 502
+    finally:
+        http = created.get("http")
+        if http is not None:
+            try:
+                http.close()
+            except Exception:
+                pass
 
 
 def detect_gopay(data: dict[str, Any] | None) -> tuple[dict[str, Any], int]:

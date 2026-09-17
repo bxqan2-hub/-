@@ -97,16 +97,18 @@ CHECKOUT_CHECK_PROXY_ACTIVE = ""
 # GCash 资格检测专用代理池；需要 PH 出口代理。每行 `名称|代理或代理API`。
 GC_CHECK_PROXY_PROFILES = []
 
-# 支付资格检测按国家静态代理池；GCash 固定读取 PH，GoPay 固定读取 ID，MoMo 固定读取 VN。
+# 支付资格检测独立静态代理池；GCash 读取 PH，GoPay 读取 ID，MoMo 读取 VN，UPI 读取 IN。
 # 后续新增资格类型时继续在这个池中按目标国家取代理。
 QUALIFICATION_CHECK_PROXY_PROFILES = []
 QUALIFICATION_CHECK_PROXY_ACTIVE = ""
 GCASH_CHECK_PROXY_PROFILES = []
 GOPAY_CHECK_PROXY_PROFILES = []
 MOMO_CHECK_PROXY_PROFILES = []
+UPI_CHECK_PROXY_PROFILES = []
 GCASH_CHECK_PROXY_ACTIVE = "PH"
 GOPAY_CHECK_PROXY_ACTIVE = "ID"
 MOMO_CHECK_PROXY_ACTIVE = "VN"
+UPI_CHECK_PROXY_ACTIVE = "IN"
 
 # PayPal OAICS 提链专用代理池；格式支持 `名称|代理` 或直接代理，每行一条。
 PAYPAL_OAICS_PROXY_PROFILES = []
@@ -742,9 +744,11 @@ apply_env_overrides(globals(), {
     'GCASH_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'GOPAY_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'MOMO_CHECK_PROXY_PROFILES': 'list_str_multiline',
+    'UPI_CHECK_PROXY_PROFILES': 'list_str_multiline',
     'GCASH_CHECK_PROXY_ACTIVE': 'str',
     'GOPAY_CHECK_PROXY_ACTIVE': 'str',
     'MOMO_CHECK_PROXY_ACTIVE': 'str',
+    'UPI_CHECK_PROXY_ACTIVE': 'str',
     'PAYPAL_OAICS_PROXY_PROFILES': 'list_str_multiline',
     'PAYPAL_OAICS_PROXY_ACTIVE': 'str',
     'PAYPAL_OAICS_WORKERS': 'int',
@@ -765,6 +769,7 @@ for _runtime_key in (
     "GCASH_CHECK_PROXY_PROFILES",
     "GOPAY_CHECK_PROXY_PROFILES",
     "MOMO_CHECK_PROXY_PROFILES",
+    "UPI_CHECK_PROXY_PROFILES",
 ):
     _runtime_values = read_runtime_list_file(_runtime_key)
     if _runtime_values is not None:
